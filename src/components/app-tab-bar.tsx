@@ -1,10 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import Animated, { LinearTransition } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Radius, Shadow, Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { useBrandGradient, useIsDark, useTheme } from '@/hooks/use-theme';
+import { useClassStore } from '@/store/class-store';
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
@@ -12,14 +16,17 @@ const TAB_ITEMS: { name: string; label: string; icon: IoniconName; activeIcon: I
   { name: 'index', label: 'Tổng quan', icon: 'grid-outline', activeIcon: 'grid' },
   { name: 'students', label: 'Học sinh', icon: 'people-outline', activeIcon: 'people' },
   { name: 'feed', label: 'Nhật ký', icon: 'sparkles-outline', activeIcon: 'sparkles' },
+  { name: 'tools', label: 'Tiện ích', icon: 'apps-outline', activeIcon: 'apps' },
   { name: 'settings', label: 'Cài đặt', icon: 'settings-outline', activeIcon: 'settings' },
 ];
 
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
 /**
- * Floating pill tab bar shared by every platform.
+ * Floating 5-tab pill bar shared by every platform.
  *
- * Receives the navigation state from the router and renders four equal items
- * with an animated-feeling "selected" treatment (color + soft background).
+ * The active tab expands into a gradient capsule with icon + label while
+ * inactive tabs show quiet icons (plus a live pending count badge on Nhật ký).
  */
 export function AppTabBar({
   state,
@@ -27,7 +34,17 @@ export function AppTabBar({
   state: { index: number; routes: { key: string; name: string }[] };
 }) {
   const theme = useTheme();
+  const isDark = useIsDark();
+  const gradient = useBrandGradient();
   const insets = useSafeAreaInsets();
+  const { role, totals } = useClassStore();
+
+  const barBg =
+    Platform.OS === 'web'
+      ? isDark
+        ? 'rgba(18, 24, 38, 0.82)'
+        : 'rgba(255, 255, 255, 0.86)'
+      : theme.card;
 
   return (
     <View
@@ -37,46 +54,59 @@ export function AppTabBar({
         style={[
           styles.bar,
           Shadow.floating,
-          { backgroundColor: theme.card, borderColor: theme.border },
+          {
+            backgroundColor: barBg,
+            borderColor: theme.border,
+          },
+          Platform.OS === 'web' && ({ backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' } as object),
         ]}>
         {state.routes.map((route, index) => {
           const item = TAB_ITEMS.find((tab) => tab.name === route.name);
           if (!item) return null;
           const focused = state.index === index;
+          const badgeCount = route.name === 'feed' && role === 'teacher' ? totals.pending : 0;
 
           const onPress = () => {
             if (focused) return;
+            if (Platform.OS !== 'web') Haptics.selectionAsync().catch(() => {});
             router.navigate((route.name === 'index' ? '/' : '/' + route.name) as never);
           };
 
           return (
-            <Pressable
+            <AnimatedPressable
               key={route.key}
+              layout={LinearTransition.springify().damping(20)}
               onPress={onPress}
               accessibilityRole="button"
+              accessibilityLabel={item.label}
               accessibilityState={focused ? { selected: true } : {}}
-              style={({ pressed }) => [styles.item, pressed && styles.pressed]}>
-              <View
-                style={[
-                  styles.iconWrap,
-                  focused && { backgroundColor: theme.accentSoft },
-                ]}>
+              style={[styles.item, focused ? styles.itemActive : styles.itemIdle]}>
+              {focused ? (
+                <LinearGradient
+                  colors={gradient}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={StyleSheet.absoluteFill}
+                />
+              ) : null}
+              <View style={styles.iconBox}>
                 <Ionicons
                   name={focused ? item.activeIcon : item.icon}
                   size={20}
-                  color={focused ? theme.accentText : theme.textMuted}
+                  color={focused ? '#FFFFFF' : theme.textMuted}
                 />
+                {badgeCount > 0 && !focused ? (
+                  <View style={[styles.badge, { backgroundColor: theme.danger, borderColor: theme.card }]}>
+                    <Text style={styles.badgeText}>{badgeCount > 9 ? '9+' : badgeCount}</Text>
+                  </View>
+                ) : null}
               </View>
-              <Text
-                numberOfLines={1}
-                style={[
-                  styles.label,
-                  { color: focused ? theme.accentText : theme.textMuted },
-                  focused && styles.labelActive,
-                ]}>
-                {item.label}
-              </Text>
-            </Pressable>
+              {focused ? (
+                <Text numberOfLines={1} style={styles.label}>
+                  {item.label}
+                </Text>
+              ) : null}
+            </AnimatedPressable>
           );
         })}
       </View>
@@ -96,27 +126,37 @@ const styles = StyleSheet.create({
   bar: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     width: '100%',
-    maxWidth: 520,
+    maxWidth: 480,
     borderRadius: Radius.pill,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingVertical: Spacing.two,
-    paddingHorizontal: Spacing.two,
-    gap: Spacing.one,
+    padding: 6,
+    gap: 4,
   },
   item: {
-    flex: 1,
+    height: 48,
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
-    paddingVertical: Spacing.one,
-  },
-  iconWrap: {
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.one + 2,
+    justifyContent: 'center',
+    gap: 6,
     borderRadius: Radius.pill,
+    overflow: 'hidden',
   },
-  label: { fontSize: 10, fontWeight: '600' },
-  labelActive: { fontWeight: '800' },
-  pressed: { opacity: 0.7 },
+  itemActive: { flex: 2.35, paddingHorizontal: 10 },
+  itemIdle: { flex: 1 },
+  iconBox: { alignItems: 'center', justifyContent: 'center' },
+  badge: {
+    position: 'absolute',
+    top: -6,
+    right: -10,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    paddingHorizontal: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: { color: '#FFFFFF', fontSize: 9, fontWeight: '900' },
+  label: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
 });

@@ -1,14 +1,21 @@
 /**
- * Learn more about light and dark modes:
- * https://docs.expo.dev/guides/color-schemes/
+ * Theme accessors wired to `ThemePreferenceProvider`, supporting custom
+ * light/dark modes and brand accent presets across all platforms.
  */
 
-import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useThemePreference } from '@/store/theme-store';
 
 export function useTheme() {
-  const scheme = useColorScheme();
-  const theme = scheme === 'dark' ? 'dark' : 'light';
-
-  return Colors[theme];
+  return useThemePreference().theme;
 }
+
+/** Two-stop brand gradient for the current theme & selected accent preset. */
+export function useBrandGradient(): [string, string] {
+  return useThemePreference().gradient;
+}
+
+export function useIsDark() {
+  return useThemePreference().isDark;
+}
+
+export { useThemePreference };

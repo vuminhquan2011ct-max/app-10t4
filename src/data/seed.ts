@@ -22,10 +22,6 @@ function dayOffset(daysAgo: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-function birthday(month: number, day: number, year = 2009): string {
-  return `${year}-${pad(month)}-${pad(day)}`;
-}
-
 type Seed = {
   name: string;
   gender: Student['gender'];
@@ -34,17 +30,15 @@ type Seed = {
   birth: string;
 };
 
-const SEEDS: Seed[] = [
-  { name: 'Nguyễn Minh Anh', gender: 'female', group: 'Tổ 1', position: 'Lớp trưởng', birth: birthday(3, 14) },
-  
-];
+/** Danh sách học sinh khởi tạo trống để giáo viên / lớp tự nhập. */
+const SEEDS: Seed[] = [];
 
 export const DEFAULT_CLASS: ClassInfo = {
   name: '10T4',
   school: 'THPT FPT',
   year: '2026 - 2027',
   teacherName: 'Ngô Vũ Hảo',
-  motto: 'Học để biết, học để làm, học để cùng nhau trưởng thành.',
+  motto: 'K8T4 Mãi Đĩnh.',
 };
 
 export function buildInitialStudents(): Student[] {

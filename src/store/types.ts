@@ -1,6 +1,33 @@
 /** Shapes shared by the store modules. */
 
-import type { ClassInfo, Entry, Role, Student } from '@/types/models';
+import type {
+  ActivityLogItem,
+  Announcement,
+  AnnouncementAuthorRole,
+  AnnouncementTag,
+  AttendanceDay,
+  ClassInfo,
+  ClassResource,
+  ClassTask,
+  DutyRoster,
+  Entry,
+  FeedbackCategory,
+  FeedbackItem,
+  FundCategory,
+  FundKind,
+  FundTransaction,
+  KudosItem,
+  KudosSticker,
+  Poll,
+  ResourceType,
+  Role,
+  ScheduleSession,
+  ScheduleSlot,
+  SeatingPlan,
+  Student,
+  TaskPriority,
+  Weekday,
+} from '@/types/models';
 
 export type PersistedState = {
   version: 1;
@@ -8,8 +35,36 @@ export type PersistedState = {
   students: Student[];
   entries: Entry[];
   role: Role;
-  /** Học sinh đang đăng nhập, chỉ dùng khi `role === 'student'`. */
+  /** Học sinh đang đăng nhập (chỉ dùng ở chế độ ngoại tuyến). */
   currentStudentId: string | null;
+  /** Điểm danh theo ngày (key = ISO date `YYYY-MM-DD`). */
+  attendance: Record<string, AttendanceDay>;
+  /** Thông báo & sự kiện lớp. */
+  announcements: Announcement[];
+  /** Sổ thu chi quỹ lớp. */
+  fundTransactions: FundTransaction[];
+  /** Bản đồ học sinh đã đóng quỹ kỳ hiện tại (`studentId -> true`). */
+  fundPaid: Record<string, boolean>;
+  fundCycleLabel: string;
+  fundCycleAmount: number;
+  /** Thời khóa biểu tuần. */
+  schedule: ScheduleSlot[];
+  /** Lịch trực nhật theo thứ (`2`..`7` -> tên tổ). */
+  dutyRoster: DutyRoster;
+  /** Bình chọn & khảo sát trong lớp. */
+  polls: Poll[];
+  /** Bảng nhiệm vụ & deadline học tập. */
+  tasks: ClassTask[];
+  /** Hộp thư góp ý (chế độ ngoại tuyến; khi online lưu ở bảng `class_feedback` bảo mật). */
+  feedback: FeedbackItem[];
+  /** Nhật ký hoạt động chỉnh sửa lớp. */
+  activityLog: ActivityLogItem[];
+  /** Bức tường Kudos & lời khen bạn bè. */
+  kudos: KudosItem[];
+  /** Kho tài liệu & đề cương học tập của lớp. */
+  resources: ClassResource[];
+  /** Sơ đồ chỗ ngồi tương tác của lớp. */
+  seating: SeatingPlan;
 };
 
 export type StudentInput = {
@@ -36,4 +91,78 @@ export type EntryInput = {
   proofUrl?: string | null;
   points: number;
   submittedBy?: Role;
+  reviewNote?: string | null;
 };
+
+export type AnnouncementInput = {
+  title: string;
+  content: string;
+  tag: AnnouncementTag;
+  eventDate?: string | null;
+  pinned?: boolean;
+  author?: string;
+  subject?: string | null;
+  authorRole?: AnnouncementAuthorRole;
+};
+
+export type FundTransactionInput = {
+  title: string;
+  kind: FundKind;
+  category: FundCategory;
+  amount: number;
+  date: string;
+  note?: string | null;
+};
+
+export type ScheduleSlotInput = {
+  day: Weekday;
+  period: number;
+  subject: string;
+  session: ScheduleSession;
+  teacher?: string | null;
+  room?: string | null;
+};
+
+export type PollInput = {
+  question: string;
+  description?: string | null;
+  options: string[];
+  deadline?: string | null;
+  author?: string;
+};
+
+export type TaskInput = {
+  title: string;
+  subject: string;
+  dueDate: string;
+  priority: TaskPriority;
+  note?: string | null;
+  author?: string;
+};
+
+export type FeedbackInput = {
+  category: FeedbackCategory;
+  content: string;
+  anonymous: boolean;
+  authorId: string;
+  authorName: string;
+};
+
+export type KudosInput = {
+  toStudentId: string;
+  sticker: KudosSticker;
+  message: string;
+  anonymous: boolean;
+  fromName?: string;
+};
+
+export type ResourceInput = {
+  title: string;
+  subject: string;
+  type: ResourceType;
+  url: string;
+  description?: string | null;
+  pinned?: boolean;
+  author?: string;
+};
+

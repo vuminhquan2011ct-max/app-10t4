@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "app-10t4",
+    "name": "Lớp 10T4 · THPT FPT",
     "slug": "app-10t4",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "app10t4",

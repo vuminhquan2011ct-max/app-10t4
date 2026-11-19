@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
 
 import { Radius, Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
@@ -16,7 +17,7 @@ type ButtonProps = {
   style?: StyleProp<ViewStyle>;
 };
 
-/** Pill-shaped action button with four visual variants. */
+/** Pill-shaped action button; the primary variant uses the brand gradient. */
 export function Button({
   label,
   onPress,
@@ -27,6 +28,7 @@ export function Button({
   style,
 }: ButtonProps) {
   const theme = useTheme();
+  const gradient = useBrandGradient();
 
   const palette = {
     primary: { bg: theme.accent, fg: '#FFFFFF' },
@@ -35,6 +37,8 @@ export function Button({
     ghost: { bg: 'transparent', fg: theme.textSecondary },
   }[variant];
 
+  const isPrimary = variant === 'primary';
+
   return (
     <Pressable
       onPress={onPress}
@@ -42,13 +46,22 @@ export function Button({
       style={({ pressed }) => [
         styles.button,
         size === 'sm' ? styles.small : styles.medium,
-        { backgroundColor: palette.bg },
+        isPrimary ? styles.primaryShadow : null,
+        { backgroundColor: isPrimary ? gradient[0] : palette.bg },
         pressed && styles.pressed,
         disabled && styles.disabled,
         style,
       ]}>
+      {isPrimary ? (
+        <LinearGradient
+          colors={gradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      ) : null}
       {icon ? <Ionicons name={icon} size={size === 'sm' ? 15 : 18} color={palette.fg} /> : null}
-      <Text style={[styles.label, { color: palette.fg, fontSize: size === 'sm' ? 13 : 15 }]}>
+      <Text style={[styles.label, size === 'sm' && styles.labelSmall, { color: palette.fg }]}>
         {label}
       </Text>
     </Pressable>
@@ -62,10 +75,19 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: Spacing.two,
     borderRadius: Radius.pill,
+    overflow: 'hidden',
   },
-  medium: { paddingHorizontal: Spacing.four, paddingVertical: 14 },
-  small: { paddingHorizontal: Spacing.three, paddingVertical: Spacing.two },
-  label: { fontWeight: '700' },
-  pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
+  medium: { paddingHorizontal: Spacing.four, minHeight: 50 },
+  small: { paddingHorizontal: Spacing.three, minHeight: 38 },
+  primaryShadow: {
+    shadowColor: '#4C6FFF',
+    shadowOpacity: 0.32,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
+  },
+  label: { fontSize: 15, fontWeight: '800', letterSpacing: 0.2 },
+  labelSmall: { fontSize: 13 },
+  pressed: { opacity: 0.9, transform: [{ scale: 0.97 }] },
   disabled: { opacity: 0.45 },
 });

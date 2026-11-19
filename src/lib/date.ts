@@ -47,10 +47,43 @@ export function isValidIsoDate(value: string): boolean {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` === value;
 }
 
-/** `2026-11-17` -> `17/11/2026`. */
+/** `2026-11-17` -> `17/11/2026`. Preserves custom typed text when non-ISO. */
 export function formatDate(value: string | null | undefined): string {
-  const date = parseIsoDate(value);
-  if (!date) return 'Chưa cập nhật';
+  const clean = value?.trim();
+  if (!clean) return 'Chưa cập nhật';
+  const date = parseIsoDate(clean);
+  if (!date) return clean;
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`;
+}
+
+/**
+ * Convert typed birth date (`DD/MM/YYYY`, `D-M-YYYY`, `DD.MM.YYYY`, or `YYYY-MM-DD`)
+ * into normalized ISO `YYYY-MM-DD` when valid; otherwise preserve trimmed freeform text.
+ */
+export function normalizeBirthDateInput(raw: string): string | null {
+  const clean = raw.trim();
+  if (!clean) return null;
+
+  if (isValidIsoDate(clean)) return clean;
+
+  const dmy = /^(\d{1,2})[/.\-\s](\d{1,2})[/.\-\s](\d{4})$/.exec(clean);
+  if (dmy) {
+    const day = Number(dmy[1]);
+    const month = Number(dmy[2]);
+    const year = Number(dmy[3]);
+    const iso = `${year}-${pad(month)}-${pad(day)}`;
+    if (isValidIsoDate(iso)) return iso;
+  }
+
+  return clean;
+}
+
+/** Format stored birth date for manual typing (`YYYY-MM-DD` -> `DD/MM/YYYY`). */
+export function formatBirthDateForInput(value: string | null | undefined): string {
+  const clean = value?.trim();
+  if (!clean) return '';
+  const date = parseIsoDate(clean);
+  if (!date) return clean;
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`;
 }
 
@@ -118,3 +151,38 @@ export function isUpcoming(value: string | null | undefined): boolean {
   const diff = daysSince(value);
   return diff !== null && diff < 0;
 }
+
+/** Shift an ISO date string by `delta` days (positive = future, negative = past). */
+export function shiftIsoDate(iso: string, delta: number): string {
+  const date = parseIsoDate(iso) ?? new Date();
+  date.setDate(date.getDate() + delta);
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** Current weekday mapped to `2..7` (Sunday falls back to `2` for timetable view). */
+export function currentSchoolWeekday(): 2 | 3 | 4 | 5 | 6 | 7 {
+  const jsDay = new Date().getDay(); // 0=Sun, 1=Mon ... 6=Sat
+  if (jsDay === 0) return 2;
+  return (jsDay + 1) as 2 | 3 | 4 | 5 | 6 | 7;
+}
+
+/** Days until the next occurrence of a birthday (`0` = today). */
+export function daysUntilBirthday(birthDate: string | null | undefined): number | null {
+  const parsed = parseIsoDate(birthDate);
+  if (!parsed) return null;
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let next = new Date(now.getFullYear(), parsed.getMonth(), parsed.getDate());
+  if (next.getTime() < todayStart.getTime()) {
+    next = new Date(now.getFullYear() + 1, parsed.getMonth(), parsed.getDate());
+  }
+  return Math.round((next.getTime() - todayStart.getTime()) / 86_400_000);
+}
+
+/** `19/11` short day/month label. */
+export function formatDayMonth(value: string | null | undefined): string {
+  const date = parseIsoDate(value);
+  if (!date) return '--';
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}`;
+}
+

@@ -13,6 +13,9 @@ type ProgressRingProps = {
   label?: string;
   caption?: string;
   trackColor?: string;
+  /** Overrides for the center text (e.g. white on a gradient). */
+  textColor?: string;
+  captionColor?: string;
 };
 
 /** Circular progress indicator drawn with SVG. */
@@ -24,6 +27,8 @@ export function ProgressRing({
   label,
   caption,
   trackColor,
+  textColor,
+  captionColor,
 }: ProgressRingProps) {
   const theme = useTheme();
   const clamped = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0));
@@ -56,11 +61,11 @@ export function ProgressRing({
         />
       </Svg>
       <View style={styles.center}>
-        <Text style={[styles.value, { color: theme.text, fontSize: size * 0.24 }]}>
+        <Text style={[styles.value, { color: textColor ?? theme.text, fontSize: size * 0.24 }]}>
           {label ?? `${Math.round(clamped * 100)}%`}
         </Text>
         {caption ? (
-          <Text style={[styles.caption, { color: theme.textMuted }]}>{caption}</Text>
+          <Text style={[styles.caption, { color: captionColor ?? theme.textMuted }]}>{caption}</Text>
         ) : null}
       </View>
     </View>
@@ -73,6 +78,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  value: { fontWeight: '800' },
+  value: { fontWeight: '900' },
   caption: { fontSize: 11, fontWeight: '600' },
 });

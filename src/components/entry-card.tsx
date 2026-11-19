@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Badge } from '@/components/ui/badge';
-import { Radius, Spacing } from '@/constants/theme';
+import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { ENTRY_CATEGORIES, ENTRY_KINDS, ENTRY_LEVELS, ENTRY_STATUSES } from '@/constants/entry-meta';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDate } from '@/lib/date';
@@ -27,11 +27,12 @@ export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
       onPress={onPress}
       style={({ pressed }) => [
         styles.card,
+        Shadow.card,
         { backgroundColor: theme.card, borderColor: theme.border },
         pressed && styles.pressed,
       ]}>
       <View style={[styles.iconBox, { backgroundColor: theme[kind.soft] }]}>
-        <Ionicons name={kind.icon} size={18} color={theme[kind.color]} />
+        <Ionicons name={kind.icon} size={20} color={theme[kind.color]} />
       </View>
 
       <View style={styles.body}>
@@ -58,7 +59,7 @@ export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
         </View>
       </View>
 
-      <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+      <Ionicons name="chevron-forward" size={16} style={styles.chevron} color={theme.textMuted} />
     </Pressable>
   );
 }
@@ -67,22 +68,23 @@ const styles = StyleSheet.create({
   card: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: Spacing.two,
+    gap: Spacing.three,
     padding: Spacing.three,
     borderRadius: Radius.lg,
     borderWidth: StyleSheet.hairlineWidth,
   },
   iconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: Radius.sm,
+    width: 42,
+    height: 42,
+    borderRadius: Radius.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
   body: { flex: 1, gap: Spacing.one },
-  title: { fontSize: 14, fontWeight: '700', lineHeight: 19 },
+  title: { fontSize: 15, fontWeight: '800', lineHeight: 20 },
   meta: { flexDirection: 'row' },
-  metaText: { fontSize: 11, flex: 1 },
+  metaText: { fontSize: 12, flex: 1 },
   badges: { flexDirection: 'row', gap: Spacing.one, marginTop: 2, flexWrap: 'wrap' },
-  pressed: { opacity: 0.8 },
+  chevron: { alignSelf: 'center' },
+  pressed: { opacity: 0.85, transform: [{ scale: 0.99 }] },
 });

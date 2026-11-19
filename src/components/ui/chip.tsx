@@ -16,7 +16,7 @@ type ChipProps = {
 /** Filter / option pill. Highlighted with the accent color when selected. */
 export function Chip({ label, selected = false, icon, onPress }: ChipProps) {
   const theme = useTheme();
-  const color = selected ? theme.accentText : theme.textSecondary;
+  const color = selected ? '#FFFFFF' : theme.textSecondary;
 
   return (
     <Pressable
@@ -24,8 +24,8 @@ export function Chip({ label, selected = false, icon, onPress }: ChipProps) {
       style={({ pressed }) => [
         styles.chip,
         {
-          backgroundColor: selected ? theme.accentSoft : theme.backgroundElement,
-          borderColor: selected ? theme.accent : 'transparent',
+          backgroundColor: selected ? theme.accent : theme.card,
+          borderColor: selected ? theme.accent : theme.border,
         },
         pressed && styles.pressed,
       ]}>
@@ -47,7 +47,7 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   pressed: {
     opacity: 0.8,

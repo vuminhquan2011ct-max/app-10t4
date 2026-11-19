@@ -1,0 +1,430 @@
+/**
+ * Teacher Member Approval, Role & Privacy Permission Console + Audit Log.
+ */
+
+import { Ionicons } from '@expo/vector-icons';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+
+import { PageHeader } from '@/components/page-header';
+import { Avatar } from '@/components/ui/avatar';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Chip } from '@/components/ui/chip';
+import { EmptyState } from '@/components/ui/empty-state';
+import { FadeIn } from '@/components/ui/fade-in';
+import { Screen } from '@/components/ui/screen';
+import { SectionHeader } from '@/components/ui/section-header';
+import { useToast } from '@/components/ui/toast';
+import { Radius, Spacing } from '@/constants/theme';
+import { MEMBER_ROLES, MEMBER_STATUSES } from '@/constants/utilities-meta';
+import { useTheme } from '@/hooks/use-theme';
+import { useAuth } from '@/store/auth-store';
+import { useClassStore } from '@/store/class-store';
+import type { MemberRole, MemberStatus, Profile } from '@/types/auth';
+
+type StatusFilter = 'all' | MemberStatus;
+
+const ROLE_ORDER: MemberRole[] = ['teacher', 'editor', 'student'];
+
+export default function MembersScreen() {
+  const auth = useAuth();
+  const { isTeacher, students, activityLog } = useClassStore();
+  const theme = useTheme();
+  const { showToast } = useToast();
+
+  const [members, setMembers] = useState<Profile[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState<StatusFilter>('all');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!auth.isCloudActive || !isTeacher) return;
+    setLoading(true);
+    try {
+      const list = await auth.fetchMembers();
+      setMembers(list);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không tải được danh sách thành viên', 'danger');
+    } finally {
+      setLoading(false);
+    }
+  }, [auth, isTeacher, showToast]);
+
+  useEffect(() => {
+    if (!auth.isCloudActive || !isTeacher) return;
+    let active = true;
+    auth
+      .fetchMembers()
+      .then((list) => {
+        if (active) setMembers(list);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [auth, isTeacher]);
+
+  const counts = useMemo(() => {
+    const c: Record<StatusFilter, number> = { all: members.length, pending: 0, approved: 0, blocked: 0 };
+    for (const m of members) c[m.status] += 1;
+    return c;
+  }, [members]);
+
+  const visible = useMemo(
+    () => members.filter((m) => filter === 'all' || m.status === filter),
+    [members, filter],
+  );
+
+  const applyPatch = async (member: Profile, patch: Parameters<typeof auth.updateMember>[1], msg: string) => {
+    try {
+      await auth.updateMember(member.id, patch);
+      await load();
+      showToast(msg);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Cập nhật thất bại', 'danger');
+    }
+  };
+
+  return (
+    <Screen withTabBar={false}>
+      <PageHeader
+        title={'Bảo mật & Nhật ký lớp'}
+        subtitle={'Lịch sử chỉnh sửa và trạng thái truy cập mật khẩu lớp'}
+        rightIcon={auth.isCloudActive ? 'refresh' : undefined}
+        onRightPress={auth.isCloudActive ? load : undefined}
+      />
+
+      {!isTeacher ? (
+        <EmptyState
+          icon={'lock-closed-outline'}
+          title={'Chỉ Giáo viên chủ nhiệm được truy cập'}
+          message={'Nhật ký chỉnh sửa và quản lý bảo mật thuộc về GVCN.'}
+        />
+      ) : !auth.isCloudActive ? (
+        <FadeIn index={0}>
+          <Card style={styles.offlineCard}>
+            <View style={[styles.iconBox, { backgroundColor: theme.accentSoft }]}>
+              <Ionicons name="key" size={22} color={theme.accent} />
+            </View>
+            <Text style={[styles.title, { color: theme.text }]}>
+              Đang bảo vệ bằng mật khẩu lớp 10T4
+            </Text>
+            <Text style={{ color: theme.textSecondary, fontSize: 13, lineHeight: 20 }}>
+              Tất cả người dùng mở khóa ứng dụng bằng mật khẩu lớp. Bạn có thể theo dõi lịch sử
+              chỉnh sửa dữ liệu ở danh sách bên dưới hoặc đăng xuất trong mục Cài đặt.
+            </Text>
+          </Card>
+        </FadeIn>
+      ) : (
+        <>
+          {/* Status filter */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
+            {(
+              [
+                { value: 'all', label: 'Tất cả' },
+                { value: 'pending', label: 'Chờ duyệt' },
+                { value: 'approved', label: 'Đã duyệt' },
+                { value: 'blocked', label: 'Đã chặn' },
+              ] as const
+            ).map((f) => (
+              <Chip
+                key={f.value}
+                label={`${f.label} · ${counts[f.value]}`}
+                selected={filter === f.value}
+                onPress={() => setFilter(f.value)}
+              />
+            ))}
+          </ScrollView>
+
+          {loading && members.length === 0 ? (
+            <EmptyState icon={'sync'} title={'Đang tải danh sách thành viên...'} />
+          ) : visible.length === 0 ? (
+            <EmptyState
+              icon={'people-outline'}
+              title={'Không có tài khoản trong mục này'}
+              message={'Chưa có thành viên nào trong danh sách.'}
+            />
+          ) : (
+            visible.map((member, i) => {
+              const roleMeta = MEMBER_ROLES[member.role];
+              const statusMeta = MEMBER_STATUSES[member.status];
+              const isSelf = member.id === auth.userId;
+              const linkedStudent = students.find((s) => s.id === member.studentId);
+              const expanded = expandedId === member.id;
+
+              return (
+                <FadeIn key={member.id} index={Math.min(i, 8)}>
+                  <Card style={styles.memberCard}>
+                    <Pressable
+                      onPress={() => setExpandedId(expanded ? null : member.id)}
+                      style={styles.memberHead}>
+                      <Avatar name={member.displayName || member.email || '?'} size={46} />
+                      <View style={styles.flex}>
+                        <Text style={[styles.memberName, { color: theme.text }]} numberOfLines={1}>
+                          {(member.displayName || 'Chưa đặt tên') + (isSelf ? ' (Bạn)' : '')}
+                        </Text>
+                        <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
+                          {member.email ?? 'Không rõ email'}
+                        </Text>
+                        <View style={styles.badgeRow}>
+                          <Badge
+                            label={statusMeta.label}
+                            color={statusMeta.color}
+                            soft={statusMeta.soft}
+                            icon={statusMeta.icon}
+                          />
+                          <Badge
+                            label={roleMeta.short}
+                            color={roleMeta.color}
+                            soft={roleMeta.soft}
+                            icon={roleMeta.icon}
+                          />
+                          {member.canViewPrivate || member.role === 'teacher' ? (
+                            <Badge
+                              label={'Xem SĐT/Email'}
+                              color={'gold'}
+                              soft={'goldSoft'}
+                              icon={'key'}
+                            />
+                          ) : null}
+                        </View>
+                      </View>
+                      <Ionicons
+                        name={expanded ? 'chevron-up' : 'chevron-down'}
+                        size={18}
+                        color={theme.textMuted}
+                      />
+                    </Pressable>
+
+                    {/* Pending quick actions */}
+                    {member.status === 'pending' ? (
+                      <View style={styles.quickRow}>
+                        <Button
+                          label={'Duyệt vào lớp'}
+                          size={'sm'}
+                          icon={'checkmark-circle'}
+                          style={styles.flex}
+                          onPress={() =>
+                            applyPatch(member, { status: 'approved' }, `Đã duyệt ${member.displayName || member.email}!`)
+                          }
+                        />
+                        <Button
+                          label={'Từ chối / Chặn'}
+                          size={'sm'}
+                          variant={'danger'}
+                          icon={'ban'}
+                          style={styles.flex}
+                          onPress={() =>
+                            applyPatch(member, { status: 'blocked' }, 'Đã chặn tài khoản này')
+                          }
+                        />
+                      </View>
+                    ) : null}
+
+                    {/* Expanded RBAC & Privacy panel */}
+                    {expanded && !isSelf ? (
+                      <View style={[styles.panel, { borderColor: theme.border }]}>
+                        <Text style={[styles.subLabel, { color: theme.textSecondary }]}>
+                          Vai trò trong lớp
+                        </Text>
+                        <View style={styles.roleRow}>
+                          {ROLE_ORDER.map((r) => {
+                            const active = member.role === r;
+                            return (
+                              <Pressable
+                                key={r}
+                                onPress={() =>
+                                  applyPatch(
+                                    member,
+                                    { role: r, canViewPrivate: r === 'teacher' ? true : member.canViewPrivate },
+                                    `Đã chuyển sang vai trò ${MEMBER_ROLES[r].label}`,
+                                  )
+                                }
+                                style={[
+                                  styles.roleBtn,
+                                  {
+                                    backgroundColor: active ? theme.accent : theme.backgroundElement,
+                                  },
+                                ]}>
+                                <Text
+                                  style={[
+                                    styles.roleBtnText,
+                                    { color: active ? '#FFFFFF' : theme.textSecondary },
+                                  ]}>
+                                  {MEMBER_ROLES[r].short}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+
+                        {/* Privacy toggle */}
+                        {member.role !== 'teacher' ? (
+                          <Pressable
+                            onPress={() =>
+                              applyPatch(
+                                member,
+                                { canViewPrivate: !member.canViewPrivate },
+                                member.canViewPrivate
+                                  ? 'Đã ẩn SĐT/Email với tài khoản này'
+                                  : 'Đã cấp quyền xem SĐT/Email',
+                              )
+                            }
+                            style={[styles.privToggle, { backgroundColor: theme.backgroundElement }]}>
+                            <Ionicons
+                              name={member.canViewPrivate ? 'eye' : 'eye-off'}
+                              size={18}
+                              color={member.canViewPrivate ? theme.accent : theme.textMuted}
+                            />
+                            <View style={styles.flex}>
+                              <Text style={[styles.privTitle, { color: theme.text }]}>
+                                Cho xem SĐT, Email, Địa chỉ & Ghi chú
+                              </Text>
+                              <Text style={{ color: theme.textMuted, fontSize: 11 }}>
+                                Nếu tắt, tài khoản chỉ thấy liên hệ của chính mình (khi đã liên kết)
+                              </Text>
+                            </View>
+                            <Ionicons
+                              name={member.canViewPrivate ? 'checkmark-circle' : 'ellipse-outline'}
+                              size={22}
+                              color={member.canViewPrivate ? theme.accent : theme.textMuted}
+                            />
+                          </Pressable>
+                        ) : null}
+
+                        {/* Link to student profile */}
+                        <Text style={[styles.subLabel, { color: theme.textSecondary }]}>
+                          {'Liên kết hồ sơ học sinh: ' + (linkedStudent?.name ?? 'Chưa liên kết')}
+                        </Text>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={styles.chips}>
+                          <Chip
+                            label={'Bỏ liên kết'}
+                            selected={!member.studentId}
+                            onPress={() =>
+                              applyPatch(member, { clearStudent: true }, 'Đã bỏ liên kết học sinh')
+                            }
+                          />
+                          {students.map((s) => (
+                            <Chip
+                              key={s.id}
+                              label={s.name}
+                              selected={member.studentId === s.id}
+                              onPress={() =>
+                                applyPatch(member, { studentId: s.id }, `Đã liên kết với ${s.name}`)
+                              }
+                            />
+                          ))}
+                        </ScrollView>
+
+                        {/* Block / Unblock */}
+                        <View style={styles.quickRow}>
+                          {member.status !== 'approved' ? (
+                            <Button
+                              label={'Duyệt lại'}
+                              size={'sm'}
+                              icon={'checkmark-circle'}
+                              style={styles.flex}
+                              onPress={() =>
+                                applyPatch(member, { status: 'approved' }, 'Đã mở quyền truy cập!')
+                              }
+                            />
+                          ) : (
+                            <Button
+                              label={'Khoá tài khoản này'}
+                              size={'sm'}
+                              variant={'danger'}
+                              icon={'ban'}
+                              style={styles.flex}
+                              onPress={() =>
+                                applyPatch(member, { status: 'blocked' }, 'Đã khoá tài khoản này')
+                              }
+                            />
+                          )}
+                        </View>
+                      </View>
+                    ) : null}
+                  </Card>
+                </FadeIn>
+              );
+            })
+          )}
+        </>
+      )}
+
+      {/* Audit Activity Log */}
+      <SectionHeader
+        title={'Nhật ký chỉnh sửa gần đây'}
+        subtitle={'Minh bạch ai đã thay đổi dữ liệu lớp'}
+      />
+      {activityLog.length === 0 ? (
+        <Card>
+          <Text style={{ color: theme.textSecondary, fontSize: 13 }}>
+            Chưa có hoạt động chỉnh sửa nào được ghi nhận.
+          </Text>
+        </Card>
+      ) : (
+        <Card style={styles.logCard}>
+          {activityLog.slice(0, 15).map((item) => (
+            <View key={item.id} style={[styles.logRow, { borderColor: theme.border }]}>
+              <View style={[styles.logDot, { backgroundColor: theme.accent }]} />
+              <View style={styles.flex}>
+                <Text style={[styles.logText, { color: theme.text }]}>
+                  <Text style={{ fontWeight: '800' }}>{item.actor}</Text>
+                  {' · ' + item.action}
+                </Text>
+                <Text style={{ color: theme.textMuted, fontSize: 11 }}>
+                  {new Date(item.createdAt).toLocaleString('vi-VN')}
+                </Text>
+              </View>
+            </View>
+          ))}
+        </Card>
+      )}
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  flex: { flex: 1 },
+  offlineCard: { gap: Spacing.three },
+  iconBox: { width: 44, height: 44, borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center' },
+  title: { fontSize: 17, fontWeight: '900' },
+  chips: { gap: Spacing.two, paddingRight: Spacing.two },
+  memberCard: { gap: Spacing.three },
+  memberHead: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
+  memberName: { fontSize: 15, fontWeight: '800' },
+  badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 },
+  quickRow: { flexDirection: 'row', gap: Spacing.two },
+  panel: {
+    gap: Spacing.two + 2,
+    paddingTop: Spacing.three,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  subLabel: { fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4 },
+  roleRow: { flexDirection: 'row', gap: 6 },
+  roleBtn: { flex: 1, paddingVertical: 9, borderRadius: Radius.sm, alignItems: 'center' },
+  roleBtnText: { fontSize: 12, fontWeight: '800' },
+  privToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    padding: Spacing.two + 4,
+    borderRadius: Radius.md,
+  },
+  privTitle: { fontSize: 13, fontWeight: '800' },
+  logCard: { gap: Spacing.two + 2 },
+  logRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.two,
+    paddingBottom: Spacing.two,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  logDot: { width: 8, height: 8, borderRadius: 4, marginTop: 6 },
+  logText: { fontSize: 13, lineHeight: 18 },
+});

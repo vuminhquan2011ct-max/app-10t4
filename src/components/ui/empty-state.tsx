@@ -17,9 +17,11 @@ export function EmptyState({ icon = 'sparkles-outline', title, message }: EmptyS
   const theme = useTheme();
 
   return (
-    <View style={styles.wrap}>
-      <View style={[styles.iconBox, { backgroundColor: theme.accentSoft }]}>
-        <Ionicons name={icon} size={30} color={theme.accentText} />
+    <View style={[styles.wrap, { borderColor: theme.border, backgroundColor: theme.card }]}>
+      <View style={[styles.halo, { backgroundColor: theme.accentSoft }]}>
+        <View style={[styles.iconBox, { backgroundColor: theme.card }]}>
+          <Ionicons name={icon} size={30} color={theme.accent} />
+        </View>
       </View>
       <Text style={[styles.title, { color: theme.text }]}>{title}</Text>
       {message ? (
@@ -35,14 +37,25 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
     paddingVertical: Spacing.five,
     paddingHorizontal: Spacing.four,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+  },
+  halo: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.one,
   },
   iconBox: {
     width: 64,
     height: 64,
-    borderRadius: Radius.lg,
+    borderRadius: 32,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  title: { fontSize: 16, fontWeight: '700', textAlign: 'center' },
+  title: { fontSize: 16, fontWeight: '800', textAlign: 'center' },
   message: { fontSize: 14, textAlign: 'center', lineHeight: 20 },
 });
