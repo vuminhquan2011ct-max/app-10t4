@@ -11,6 +11,6 @@ jobs:
     steps:
       - name: Ping Supabase
         run: |
-          status=$(curl -s -o /dev/null -w "%{http_code}" -H "apikey: sb_publishable_0hwZ3_WH0l9kBGu6hw4_Dw_Yg9_Hi0P" "https://srvpvlpvwgfiaogsaiiq.supabase.co/rest/v1/")
+          status=$(curl -s -o /dev/null -w "%{http_code}" -H "apikey:srvpvlpvwgfiaogsaiiq" "https://srvpvlpvwgfiaogsaiiq.supabase.co/rest/v1/")
           echo "HTTP Status: $status"
           test "$status" -eq 200
