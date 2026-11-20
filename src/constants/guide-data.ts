@@ -50,7 +50,7 @@ export const APP_TOUR_STEPS: TourStep[] = [
     teacherTip:
       'Mẹo GVCN: Bạn có thể thêm nhanh cả lớp cùng lúc qua mục "Nhập nhanh cả lớp" hoặc chấm thưởng nhanh ngay trong hồ sơ!',
     studentTip:
-      'Mẹo Học sinh: Chạm vào hồ sơ của chính bạn để xem huy hiệu đã mở khóa và cập nhật thông tin liên hệ bảo mật.',
+      'Mẹo Học sinh: Bạn có thể bấm "Thêm học sinh" để thêm thành viên mới, hoặc chạm vào hồ sơ của mình để xem huy hiệu & cập nhật liên hệ bảo mật.',
     highlights: ['Lọc theo Tổ & tìm không dấu', 'Huy hiệu thành tích tự động', 'Bảo mật liên hệ RLS'],
   },
   {

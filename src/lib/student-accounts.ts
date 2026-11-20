@@ -1,0 +1,686 @@
+/**
+ * Per-student account registry with unique Login ID (Số ID) & personal password.
+ *
+ * Security design:
+ * - Every student has a unique Login ID (`code`, case-insensitive) and a personal
+ *   password hashed with a per-account random salt using SHA-256 (pure TS so it
+ *   works identically across Web HTTP/HTTPS, iOS, and Android).
+ * - Duplicate Login ID protection: attempting to create or authenticate with an
+ *   already-taken Login ID using a non-matching password is always rejected with
+ *   a clear "duplicate ID / wrong password" error.
+ * - Passwords are NEVER written into `class_state` JSON or exported reports.
+ */
+
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+import { createId, normalizeName } from '@/lib/utils';
+import {
+  CLEAR_STUDENTS_MIGRATION_KEY,
+  STORAGE_KEY,
+  freshState,
+  parseState,
+} from '@/store/persist';
+import { buildStudent } from '@/store/reducers';
+import type { PersistedState } from '@/store/types';
+import type { Gender, Student } from '@/types/models';
+
+export const STUDENT_ACCOUNTS_KEY = 'class10t4:student-accounts:v1';
+export const MIN_STUDENT_PASSWORD_LENGTH = 4;
+
+export type StudentAccountRecord = {
+  studentId: string;
+  /** Display Số ID (e.g. `01`, `10T4-01`, `HS2026`). */
+  loginId: string;
+  /** Canonical uppercase key with whitespace stripped for duplicate detection. */
+  loginIdKey: string;
+  name: string;
+  /** Format: `<salt>:<sha256_hex>`. */
+  passwordHash: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/* ---------- Pure-TS SHA-256 (UTF-8 safe, works on HTTP, HTTPS, iOS, Android) ---------- */
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function utf8Bytes(str: string): Uint8Array {
+  const out: number[] = [];
+  for (let i = 0; i < str.length; i += 1) {
+    let code = str.charCodeAt(i);
+    if (code < 0x80) {
+      out.push(code);
+    } else if (code < 0x800) {
+      out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
+      const next = str.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = 0x10000 + (((code - 0xd800) << 10) | (next - 0xdc00));
+        i += 1;
+        out.push(
+          0xf0 | (code >> 18),
+          0x80 | ((code >> 12) & 0x3f),
+          0x80 | ((code >> 6) & 0x3f),
+          0x80 | (code & 0x3f),
+        );
+      } else {
+        out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+      }
+    } else {
+      out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function rotr(value: number, bits: number): number {
+  return (value >>> bits) | (value << (32 - bits));
+}
+
+export function sha256Hex(message: string): string {
+  const bytes = utf8Bytes(message);
+  const bitLen = bytes.length * 8;
+  const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLen);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  const w = new Uint32Array(64);
+
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let i = 0; i < 16; i += 1) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+
+    for (let i = 0; i < 64; i += 1) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((n) => n.toString(16).padStart(8, '0'))
+    .join('');
+}
+
+function randomSalt(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function hashStudentPassword(password: string, salt = randomSalt()): string {
+  const digest = sha256Hex(`class10t4:${salt}:${password}`);
+  return `${salt}:${digest}`;
+}
+
+export function verifyStudentPassword(password: string, storedHash: string): boolean {
+  const idx = storedHash.indexOf(':');
+  if (idx <= 0) return false;
+  const salt = storedHash.slice(0, idx);
+  const expected = storedHash.slice(idx + 1);
+  const actual = sha256Hex(`class10t4:${salt}:${password}`);
+  if (actual.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < actual.length; i += 1) {
+    diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/* ---------- Login ID & Password Validation Helpers ---------- */
+
+export function normalizeLoginIdDisplay(raw: string): string {
+  return raw.trim().replace(/\s+/g, '').toUpperCase();
+}
+
+export function normalizeLoginIdKey(raw: string): string {
+  return normalizeLoginIdDisplay(raw);
+}
+
+export function validateLoginId(raw: string): string | null {
+  const clean = normalizeLoginIdDisplay(raw);
+  if (!clean) return 'Vui lòng nhập Số ID cho học sinh (VD: 01, 10T4-01, HS05...)';
+  if (clean.length > 24) return 'Số ID tối đa 24 ký tự';
+  if (!/^[A-Z0-9_-]+$/.test(clean)) {
+    return 'Số ID chỉ được chứa chữ cái không dấu, số, dấu "-" hoặc "_"';
+  }
+  return null;
+}
+
+export type PasswordStrength = {
+  score: 0 | 1 | 2 | 3;
+  label: string;
+  color: 'danger' | 'warning' | 'accent' | 'success';
+};
+
+export function evaluatePasswordStrength(password: string): PasswordStrength {
+  const trimmed = password.trim();
+  if (trimmed.length < MIN_STUDENT_PASSWORD_LENGTH) {
+    return {
+      score: 0,
+      label: `Cần ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự`,
+      color: 'danger',
+    };
+  }
+  let points = 0;
+  if (trimmed.length >= 6) points += 1;
+  if (trimmed.length >= 8) points += 1;
+  if (/[0-9]/.test(trimmed) && /[a-zA-Z]/.test(trimmed)) points += 1;
+  if (/[^a-zA-Z0-9]/.test(trimmed)) points += 1;
+
+  if (points <= 1) return { score: 1, label: 'Trung bình', color: 'warning' };
+  if (points === 2) return { score: 2, label: 'Khá mạnh', color: 'accent' };
+  return { score: 3, label: 'Rất mạnh', color: 'success' };
+}
+
+/* ---------- Storage Helpers ---------- */
+
+export async function loadStudentAccounts(): Promise<StudentAccountRecord[]> {
+  try {
+    const raw = await AsyncStorage.getItem(STUDENT_ACCOUNTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is StudentAccountRecord =>
+        Boolean(item) &&
+        typeof item === 'object' &&
+        typeof (item as StudentAccountRecord).studentId === 'string' &&
+        typeof (item as StudentAccountRecord).loginIdKey === 'string' &&
+        typeof (item as StudentAccountRecord).passwordHash === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function saveStudentAccounts(records: StudentAccountRecord[]): Promise<void> {
+  await AsyncStorage.setItem(STUDENT_ACCOUNTS_KEY, JSON.stringify(records));
+}
+
+async function readSafePersistedState(): Promise<PersistedState> {
+  const [rawState, clearedFlag] = await Promise.all([
+    AsyncStorage.getItem(STORAGE_KEY),
+    AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
+  ]);
+  if (rawState) {
+    const parsed = parseState(rawState);
+    if (!clearedFlag) {
+      return {
+        ...parsed,
+        students: [],
+        entries: [],
+        attendance: {},
+        fundPaid: {},
+        kudos: [],
+        seating: { ...parsed.seating, seats: {}, updatedAt: new Date().toISOString() },
+        currentStudentId: null,
+      };
+    }
+    return parsed;
+  }
+  return freshState();
+}
+
+export async function findAccountByLoginId(loginId: string): Promise<StudentAccountRecord | null> {
+  const key = normalizeLoginIdKey(loginId);
+  if (!key) return null;
+  const accounts = await loadStudentAccounts();
+  return accounts.find((a) => a.loginIdKey === key) ?? null;
+}
+
+export async function findAccountByStudentId(
+  studentId: string,
+): Promise<StudentAccountRecord | null> {
+  if (!studentId) return null;
+  const accounts = await loadStudentAccounts();
+  return accounts.find((a) => a.studentId === studentId) ?? null;
+}
+
+/**
+ * Checks whether a Login ID is already claimed in either the account registry
+ * OR the persisted class roster (returns only a boolean, never leaking names).
+ */
+export async function isLoginIdTaken(
+  loginId: string,
+  excludeStudentId?: string,
+  knownStudents?: Student[],
+): Promise<boolean> {
+  const key = normalizeLoginIdKey(loginId);
+  if (!key) return false;
+  const accounts = await loadStudentAccounts();
+  if (accounts.some((a) => a.loginIdKey === key && a.studentId !== excludeStudentId)) {
+    return true;
+  }
+  const students = knownStudents ?? (await readSafePersistedState()).students;
+  return students.some(
+    (s) => normalizeLoginIdKey(s.code) === key && s.id !== excludeStudentId,
+  );
+}
+
+/** Suggests the next free `10T4-XX` Login ID across accounts and roster. */
+export async function suggestNextLoginId(
+  className = '10T4',
+  knownStudents?: Student[],
+): Promise<string> {
+  const accounts = await loadStudentAccounts();
+  const students = knownStudents ?? (await readSafePersistedState()).students;
+  const used = new Set<string>();
+  for (const a of accounts) used.add(a.loginIdKey);
+  for (const s of students) used.add(normalizeLoginIdKey(s.code));
+
+  const prefix = `${className.trim().toUpperCase()}-`;
+  let num = 1;
+  while (num < 9999) {
+    const candidate = `${prefix}${String(num).padStart(2, '0')}`;
+    if (!used.has(normalizeLoginIdKey(candidate))) return candidate;
+    num += 1;
+  }
+  return `${prefix}${Date.now().toString().slice(-4)}`;
+}
+
+/* ---------- Authentication & Registration Operations ---------- */
+
+export type VerifyLoginResult =
+  | { ok: true; account: StudentAccountRecord }
+  | { ok: false; reason: 'invalid' | 'not_found' | 'wrong_password'; error: string };
+
+export async function verifyStudentLogin(
+  rawLoginId: string,
+  rawPassword: string,
+): Promise<VerifyLoginResult> {
+  const loginId = normalizeLoginIdDisplay(rawLoginId);
+  const password = rawPassword.trim();
+
+  if (!loginId) {
+    return { ok: false, reason: 'invalid', error: 'Vui lòng nhập Số ID của bạn.' };
+  }
+  if (!password) {
+    return { ok: false, reason: 'invalid', error: 'Vui lòng nhập mật khẩu cá nhân.' };
+  }
+
+  const accounts = await loadStudentAccounts();
+  const key = normalizeLoginIdKey(loginId);
+  const found = accounts.find((a) => a.loginIdKey === key);
+
+  if (!found) {
+    // Also check if ID exists in class roster without a password yet
+    const state = await readSafePersistedState();
+    const rosterMatch = state.students.find((s) => normalizeLoginIdKey(s.code) === key);
+    if (rosterMatch) {
+      return {
+        ok: false,
+        reason: 'wrong_password',
+        error: `Số ID "${loginId}" đã tồn tại nhưng chưa đặt mật khẩu — hãy nhờ GVCN đặt mật khẩu trong mục Quản lý tài khoản.`,
+      };
+    }
+    return {
+      ok: false,
+      reason: 'not_found',
+      error: `Không tìm thấy tài khoản với Số ID "${loginId}". Hãy chuyển sang mục "Tạo tài khoản mới" để đăng ký!`,
+    };
+  }
+
+  if (!verifyStudentPassword(password, found.passwordHash)) {
+    return {
+      ok: false,
+      reason: 'wrong_password',
+      error: `Mật khẩu không đúng cho Số ID "${found.loginId}"! Vui lòng kiểm tra lại.`,
+    };
+  }
+
+  // Self-heal: ensure Student record exists in class_state so profile & posts always work.
+  const state = await readSafePersistedState();
+  if (!state.students.some((s) => s.id === found.studentId)) {
+    const restored = buildStudent(state.students, state.classInfo.name, {
+      id: found.studentId,
+      name: found.name,
+      code: found.loginId,
+      gender: 'male',
+    });
+    const nextState: PersistedState = {
+      ...state,
+      students: [...state.students, restored],
+    };
+    await Promise.all([
+      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)),
+      AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+    ]);
+  }
+
+  return { ok: true, account: found };
+}
+
+export type RegisterStudentParams = {
+  studentId?: string;
+  name: string;
+  loginId: string;
+  password: string;
+  gender?: Gender;
+  birthDate?: string | null;
+  group?: string | null;
+  position?: string | null;
+  /** When true (e.g. from AuthGate before ClassStore mounts), also writes Student into STORAGE_KEY. */
+  writeToClassState?: boolean;
+  knownStudents?: Student[];
+};
+
+export type RegisterStudentResult =
+  | { ok: true; account: StudentAccountRecord; student: Student }
+  | { ok: false; duplicateId?: boolean; passwordMatched?: boolean; error: string };
+
+export async function registerStudentAccount(
+  params: RegisterStudentParams,
+): Promise<RegisterStudentResult> {
+  const cleanName = normalizeName(params.name);
+  if (!cleanName || cleanName.length < 2) {
+    return { ok: false, error: 'Vui lòng nhập họ và tên học sinh (tối thiểu 2 ký tự).' };
+  }
+
+  const idErr = validateLoginId(params.loginId);
+  if (idErr) return { ok: false, error: idErr };
+
+  const loginId = normalizeLoginIdDisplay(params.loginId);
+  const loginIdKey = normalizeLoginIdKey(params.loginId);
+  const password = params.password.trim();
+
+  if (password.length < MIN_STUDENT_PASSWORD_LENGTH) {
+    return {
+      ok: false,
+      error: `Mật khẩu riêng phải có ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`,
+    };
+  }
+
+  const accounts = await loadStudentAccounts();
+  const state = params.writeToClassState || !params.knownStudents
+    ? await readSafePersistedState()
+    : null;
+  const roster = params.knownStudents ?? state?.students ?? [];
+
+  // Duplicate Login ID check — enforce exact rule: duplicate ID + wrong password => mật khẩu không đúng!
+  const existingAccount = accounts.find((a) => a.loginIdKey === loginIdKey);
+  if (existingAccount) {
+    const matched = verifyStudentPassword(password, existingAccount.passwordHash);
+    if (!matched) {
+      return {
+        ok: false,
+        duplicateId: true,
+        passwordMatched: false,
+        error: `Số ID "${loginId}" đã bị trùng với tài khoản khác — mật khẩu không đúng! Vui lòng đặt Số ID khác hoặc nhập đúng mật khẩu của ID này.`,
+      };
+    }
+    return {
+      ok: false,
+      duplicateId: true,
+      passwordMatched: true,
+      error: `Số ID "${loginId}" đã tồn tại! Hãy chuyển sang mục Đăng nhập bằng Số ID và mật khẩu này.`,
+    };
+  }
+
+  const existingRoster = roster.find((s) => normalizeLoginIdKey(s.code) === loginIdKey);
+  if (existingRoster) {
+    return {
+      ok: false,
+      duplicateId: true,
+      passwordMatched: false,
+      error: `Số ID "${loginId}" đã được sử dụng trong danh sách lớp — mật khẩu không đúng! Vui lòng chọn Số ID khác.`,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const studentId = params.studentId?.trim() || createId('stu');
+  const student = buildStudent(roster, state?.classInfo.name ?? '10T4', {
+    id: studentId,
+    name: cleanName,
+    code: loginId,
+    gender: params.gender ?? 'male',
+    birthDate: params.birthDate ?? null,
+    group: params.group ?? null,
+    position: params.position ?? null,
+  });
+
+  const account: StudentAccountRecord = {
+    studentId: student.id,
+    loginId,
+    loginIdKey,
+    name: student.name,
+    passwordHash: hashStudentPassword(password),
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await saveStudentAccounts([...accounts, account]);
+
+  if (params.writeToClassState && state) {
+    const logItem = {
+      id: createId('log'),
+      actor: student.name,
+      actorStudentId: student.id,
+      action: `Đăng ký tài khoản học sinh ${student.name} (ID: ${student.code})`,
+      createdAt: now,
+    };
+    const nextState: PersistedState = {
+      ...state,
+      students: [...state.students, student],
+      activityLog: [logItem, ...state.activityLog].slice(0, 40),
+    };
+    await Promise.all([
+      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)),
+      AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+    ]);
+  }
+
+  return { ok: true, account, student };
+}
+
+export async function updateStudentAccountCredentials(params: {
+  studentId: string;
+  name?: string;
+  newLoginId?: string;
+  newPassword?: string;
+  knownStudents?: Student[];
+}): Promise<{ ok: boolean; error?: string; account?: StudentAccountRecord }> {
+  const accounts = await loadStudentAccounts();
+  const idx = accounts.findIndex((a) => a.studentId === params.studentId);
+  const existing = idx >= 0 ? accounts[idx] : null;
+
+  let nextLoginId = existing?.loginId ?? '';
+  if (params.newLoginId !== undefined) {
+    const idErr = validateLoginId(params.newLoginId);
+    if (idErr) return { ok: false, error: idErr };
+    nextLoginId = normalizeLoginIdDisplay(params.newLoginId);
+    const nextKey = normalizeLoginIdKey(nextLoginId);
+    const conflictAcc = accounts.find(
+      (a) => a.loginIdKey === nextKey && a.studentId !== params.studentId,
+    );
+    if (conflictAcc) {
+      return {
+        ok: false,
+        error: `Số ID "${nextLoginId}" đã bị trùng với tài khoản khác — không thể sử dụng!`,
+      };
+    }
+    const roster = params.knownStudents ?? (await readSafePersistedState()).students;
+    if (
+      roster.some(
+        (s) => normalizeLoginIdKey(s.code) === nextKey && s.id !== params.studentId,
+      )
+    ) {
+      return {
+        ok: false,
+        error: `Số ID "${nextLoginId}" đã được sử dụng trong danh sách lớp!`,
+      };
+    }
+  } else if (!nextLoginId) {
+    const roster = params.knownStudents ?? (await readSafePersistedState()).students;
+    const stu = roster.find((s) => s.id === params.studentId);
+    nextLoginId = normalizeLoginIdDisplay(stu?.code ?? params.studentId);
+  }
+
+  let nextPasswordHash = existing?.passwordHash ?? '';
+  if (params.newPassword !== undefined && params.newPassword.trim().length > 0) {
+    const cleanPass = params.newPassword.trim();
+    if (cleanPass.length < MIN_STUDENT_PASSWORD_LENGTH) {
+      return {
+        ok: false,
+        error: `Mật khẩu mới phải có ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`,
+      };
+    }
+    nextPasswordHash = hashStudentPassword(cleanPass);
+  }
+
+  // If no existing account and no password provided, nothing to write yet unless password was set
+  if (!existing && !nextPasswordHash) {
+    return { ok: true };
+  }
+
+  const now = new Date().toISOString();
+  const updated: StudentAccountRecord = {
+    studentId: params.studentId,
+    loginId: nextLoginId,
+    loginIdKey: normalizeLoginIdKey(nextLoginId),
+    name: params.name ? normalizeName(params.name) : (existing?.name ?? ''),
+    passwordHash: nextPasswordHash,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  const nextList =
+    idx >= 0
+      ? accounts.map((a, i) => (i === idx ? updated : a))
+      : [...accounts, updated];
+  await saveStudentAccounts(nextList);
+  return { ok: true, account: updated };
+}
+
+export async function changeOwnStudentPassword(params: {
+  studentId: string;
+  currentPassword: string;
+  newPassword: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const accounts = await loadStudentAccounts();
+  const idx = accounts.findIndex((a) => a.studentId === params.studentId);
+  if (idx < 0) {
+    return { ok: false, error: 'Không tìm thấy tài khoản học sinh để đổi mật khẩu.' };
+  }
+  const current = accounts[idx];
+  if (!verifyStudentPassword(params.currentPassword.trim(), current.passwordHash)) {
+    return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
+  }
+  const cleanNew = params.newPassword.trim();
+  if (cleanNew.length < MIN_STUDENT_PASSWORD_LENGTH) {
+    return {
+      ok: false,
+      error: `Mật khẩu mới phải có ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`,
+    };
+  }
+  const next: StudentAccountRecord = {
+    ...current,
+    passwordHash: hashStudentPassword(cleanNew),
+    updatedAt: new Date().toISOString(),
+  };
+  await saveStudentAccounts(accounts.map((a, i) => (i === idx ? next : a)));
+  return { ok: true };
+}
+
+export async function removeStudentAccount(studentId: string): Promise<void> {
+  const accounts = await loadStudentAccounts();
+  const next = accounts.filter((a) => a.studentId !== studentId);
+  if (next.length !== accounts.length) {
+    await saveStudentAccounts(next);
+  }
+}
+
+export async function clearAllStudentAccounts(): Promise<void> {
+  await saveStudentAccounts([]);
+}
+
+export async function ensureAccountsForBulkStudents(
+  students: Student[],
+  initialPassword: string,
+): Promise<void> {
+  const cleanPass = initialPassword.trim();
+  if (cleanPass.length < MIN_STUDENT_PASSWORD_LENGTH || students.length === 0) return;
+  const accounts = await loadStudentAccounts();
+  const byStudentId = new Set(accounts.map((a) => a.studentId));
+  const byLoginKey = new Set(accounts.map((a) => a.loginIdKey));
+  const now = new Date().toISOString();
+  const additions: StudentAccountRecord[] = [];
+
+  for (const s of students) {
+    const loginId = normalizeLoginIdDisplay(s.code);
+    const loginIdKey = normalizeLoginIdKey(loginId);
+    if (!loginIdKey || byStudentId.has(s.id) || byLoginKey.has(loginIdKey)) continue;
+    byStudentId.add(s.id);
+    byLoginKey.add(loginIdKey);
+    additions.push({
+      studentId: s.id,
+      loginId,
+      loginIdKey,
+      name: s.name,
+      passwordHash: hashStudentPassword(cleanPass),
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  if (additions.length > 0) {
+    await saveStudentAccounts([...accounts, ...additions]);
+  }
+}

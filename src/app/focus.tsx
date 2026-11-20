@@ -26,10 +26,11 @@ import { Fonts, Radius, Shadow, Spacing } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { todayIso } from '@/lib/date';
 import { getLivePeriodStatus } from '@/lib/intelligence';
+import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
 
-const FOCUS_STORAGE_KEY = 'class10t4:focus-stats:v1';
+const FOCUS_STORAGE_PREFIX = 'class10t4:focus-stats:v2:';
 
 type FocusPreset = {
   id: string;
@@ -68,12 +69,14 @@ function formatClock(totalSeconds: number): string {
 }
 
 export default function FocusScreen() {
+  const { accountScopeKey } = useAuth();
   const { classInfo, schedule } = useClassStore();
   const { recordMissionProgress } = useDecor();
   const theme = useTheme();
   const gradient = useBrandGradient();
   const { showToast } = useToast();
 
+  const focusKey = `${FOCUS_STORAGE_PREFIX}${accountScopeKey}`;
   const [preset, setPreset] = useState<FocusPreset>(PRESETS[3]);
   const [totalSec, setTotalSec] = useState(PRESETS[3].minutes * 60);
   const [secondsLeft, setSecondsLeft] = useState(PRESETS[3].minutes * 60);
@@ -83,26 +86,28 @@ export default function FocusScreen() {
 
   const livePeriod = useMemo(() => getLivePeriodStatus(schedule), [schedule]);
 
-  // Load daily focus stats
+  // Load daily focus stats scoped to the signed-in user
   useEffect(() => {
     let active = true;
-    AsyncStorage.getItem(FOCUS_STORAGE_KEY)
+    AsyncStorage.getItem(focusKey)
       .then((raw) => {
-        if (!active || !raw) return;
-        const parsed = JSON.parse(raw) as Partial<FocusStats> | null;
+        if (!active) return;
+        const parsed = raw ? (JSON.parse(raw) as Partial<FocusStats> | null) : null;
         if (parsed && parsed.date === todayIso()) {
           setStats({
             date: parsed.date,
             sessions: Number(parsed.sessions ?? 0),
             minutes: Number(parsed.minutes ?? 0),
           });
+        } else {
+          setStats({ date: todayIso(), sessions: 0, minutes: 0 });
         }
       })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, []);
+  }, [focusKey]);
 
   // Countdown tick
   useEffect(() => {
@@ -122,7 +127,7 @@ export default function FocusScreen() {
               sessions: s.sessions + 1,
               minutes: s.minutes + completedMin,
             };
-            AsyncStorage.setItem(FOCUS_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+            AsyncStorage.setItem(focusKey, JSON.stringify(next)).catch(() => {});
             return next;
           });
           recordMissionProgress('focus_session', 1);
@@ -133,7 +138,7 @@ export default function FocusScreen() {
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [running, totalSec, preset.label, showToast, recordMissionProgress]);
+  }, [running, totalSec, preset.label, showToast, recordMissionProgress, focusKey]);
 
   const selectPreset = (item: FocusPreset) => {
     setRunning(false);

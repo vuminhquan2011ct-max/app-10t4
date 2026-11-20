@@ -22,7 +22,7 @@ alter table public.class_state add column if not exists updated_by uuid;
 -- ---------------------------------------------------------------------
 -- 2) Hồ sơ thành viên (mỗi tài khoản Google một dòng)
 --    role:   teacher = toàn quyền | editor = cán sự, được sửa dữ liệu
---            student = xem + gửi thành tích chờ duyệt
+--            student = xem + thêm học sinh + gửi thành tích chờ duyệt
 --    status: pending = chờ duyệt | approved = đã duyệt | blocked = bị chặn
 -- ---------------------------------------------------------------------
 create table if not exists public.profiles (
@@ -645,6 +645,7 @@ begin
   clean := jsonb_build_object(
     'id', coalesce(nullif(kudos ->> 'id', ''), 'kud_' || md5(random()::text)),
     'toStudentId', kudos ->> 'toStudentId',
+    'authorStudentId', public.app_my_student_id(),
     'fromName', case when coalesce((kudos ->> 'anonymous')::boolean, false)
                      then 'Bạn giấu tên'
                      else left(coalesce(nullif(trim(kudos ->> 'fromName'), ''), 'Thành viên 10T4'), 60) end,
@@ -711,6 +712,7 @@ begin
     'description', left(resource ->> 'description', 600),
     'pinned', false,
     'author', left(coalesce(nullif(trim(resource ->> 'author'), ''), 'Thành viên 10T4'), 60),
+    'ownerStudentId', case when public.app_is_teacher() then null else public.app_my_student_id() end,
     'createdAt', now()
   );
 
@@ -722,5 +724,251 @@ end $$;
 
 revoke all on function public.app_add_resource(jsonb) from public, anon;
 grant execute on function public.app_add_resource(jsonb) to authenticated;
+
+
+-- ---------------------------------------------------------------------
+-- 16) Thêm học sinh vào lớp (mọi thành viên đã duyệt, bao gồm học sinh)
+-- ---------------------------------------------------------------------
+create or replace function public.app_add_student(student jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  raw_name text;
+  clean_name text;
+  raw_code text;
+  class_name text;
+  prefix text;
+  next_num int;
+  code_str text;
+  clean jsonb;
+  actor text;
+  log_item jsonb;
+  existing_logs jsonb;
+  next_logs jsonb;
+begin
+  if not public.app_is_member() then
+    raise exception 'Bạn chưa được duyệt vào lớp';
+  end if;
+
+  raw_name := regexp_replace(trim(coalesce(student ->> 'name', '')), '\s+', ' ', 'g');
+  if raw_name = '' then
+    raise exception 'Thiếu họ và tên học sinh';
+  end if;
+  clean_name := left(raw_name, 100);
+
+  select coalesce(nullif(trim(data -> 'classInfo' ->> 'name'), ''), '10T4'),
+         coalesce(data -> 'activityLog', '[]'::jsonb)
+    into class_name, existing_logs
+    from public.class_state
+   where id = 'class10t4'
+     for update;
+
+  if class_name is null then
+    raise exception 'Chưa có dữ liệu lớp';
+  end if;
+
+  raw_code := upper(regexp_replace(trim(coalesce(student ->> 'code', '')), '\s+', '', 'g'));
+  if raw_code <> '' then
+    if exists (
+      select 1
+        from public.class_state c,
+             jsonb_array_elements(coalesce(c.data -> 'students', '[]'::jsonb)) s
+       where c.id = 'class10t4'
+         and upper(regexp_replace(trim(coalesce(s ->> 'code', '')), '\s+', '', 'g')) = raw_code
+    ) then
+      raise exception 'Số ID "%" đã bị trùng — mật khẩu không đúng!', raw_code;
+    end if;
+    code_str := left(raw_code, 24);
+  else
+    prefix := class_name || '-';
+
+    select coalesce(max(
+      case
+        when (s ->> 'code') like prefix || '%'
+             and substring(s ->> 'code' from length(prefix) + 1) ~ '^[0-9]+$'
+        then substring(s ->> 'code' from length(prefix) + 1)::int
+        else 0
+      end
+    ), 0) + 1
+      into next_num
+      from public.class_state c,
+           jsonb_array_elements(coalesce(c.data -> 'students', '[]'::jsonb)) s
+     where c.id = 'class10t4';
+
+    code_str := prefix || case when next_num < 10 then '0' || next_num::text else next_num::text end;
+  end if;
+
+  clean := jsonb_build_object(
+    'id', coalesce(nullif(trim(student ->> 'id'), ''), 'stu_' || md5(random()::text || clock_timestamp()::text)),
+    'name', clean_name,
+    'code', code_str,
+    'gender', case when student ->> 'gender' in ('male', 'female', 'other') then student ->> 'gender' else 'male' end,
+    'birthDate', nullif(left(trim(coalesce(student ->> 'birthDate', '')), 20), ''),
+    'phone', null,
+    'email', null,
+    'address', null,
+    'group', nullif(left(trim(coalesce(student ->> 'group', '')), 40), ''),
+    'position', nullif(left(trim(coalesce(student ->> 'position', '')), 60), ''),
+    'note', null,
+    'createdAt', now(),
+    'updatedAt', now()
+  );
+
+  select coalesce(nullif(trim(display_name), ''), email, 'Thành viên')
+    into actor
+    from public.profiles
+   where id = auth.uid();
+
+  log_item := jsonb_build_object(
+    'id', 'log_' || md5(random()::text || clock_timestamp()::text),
+    'actor', coalesce(actor, 'Thành viên'),
+    'action', 'Thêm học sinh ' || clean_name,
+    'createdAt', now()
+  );
+
+  select coalesce(jsonb_agg(item order by ord), '[]'::jsonb)
+    into next_logs
+    from (
+      select item, ord
+        from jsonb_array_elements(jsonb_build_array(log_item) || existing_logs) with ordinality as t(item, ord)
+       where ord <= 40
+    ) sub;
+
+  update public.class_state
+     set data = jsonb_set(
+       jsonb_set(data, '{students}', coalesce(data -> 'students', '[]'::jsonb) || jsonb_build_array(clean)),
+       '{activityLog}',
+       next_logs
+     )
+   where id = 'class10t4';
+end $$;
+
+create or replace function public.app_bulk_add_students(
+  names text[],
+  group_name text default null,
+  auto_distribute_groups boolean default true
+) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  class_name text;
+  prefix text;
+  next_num int;
+  start_idx int;
+  existing_logs jsonb;
+  next_logs jsonb;
+  new_students jsonb := '[]'::jsonb;
+  raw_name text;
+  clean_name text;
+  assigned_group text;
+  code_str text;
+  groups text[] := array['Tổ 1', 'Tổ 2', 'Tổ 3', 'Tổ 4'];
+  added_count int := 0;
+  actor text;
+  log_item jsonb;
+begin
+  if not public.app_is_member() then
+    raise exception 'Bạn chưa được duyệt vào lớp';
+  end if;
+
+  if names is null or array_length(names, 1) is null then
+    return;
+  end if;
+
+  select coalesce(nullif(trim(data -> 'classInfo' ->> 'name'), ''), '10T4'),
+         jsonb_array_length(coalesce(data -> 'students', '[]'::jsonb)),
+         coalesce(data -> 'activityLog', '[]'::jsonb)
+    into class_name, start_idx, existing_logs
+    from public.class_state
+   where id = 'class10t4'
+     for update;
+
+  if class_name is null then
+    raise exception 'Chưa có dữ liệu lớp';
+  end if;
+
+  prefix := class_name || '-';
+
+  select coalesce(max(
+    case
+      when (s ->> 'code') like prefix || '%'
+           and substring(s ->> 'code' from length(prefix) + 1) ~ '^[0-9]+$'
+      then substring(s ->> 'code' from length(prefix) + 1)::int
+      else 0
+    end
+  ), 0)
+    into next_num
+    from public.class_state c,
+         jsonb_array_elements(coalesce(c.data -> 'students', '[]'::jsonb)) s
+   where c.id = 'class10t4';
+
+  foreach raw_name in array names loop
+    exit when added_count >= 100;
+    clean_name := left(regexp_replace(trim(coalesce(raw_name, '')), '\s+', ' ', 'g'), 100);
+    if length(clean_name) < 2 then
+      continue;
+    end if;
+
+    next_num := next_num + 1;
+    code_str := prefix || case when next_num < 10 then '0' || next_num::text else next_num::text end;
+    assigned_group := case
+      when coalesce(auto_distribute_groups, true)
+      then groups[((start_idx + added_count) % 4) + 1]
+      else nullif(left(trim(coalesce(group_name, '')), 40), '')
+    end;
+
+    new_students := new_students || jsonb_build_array(jsonb_build_object(
+      'id', 'stu_' || md5(random()::text || clock_timestamp()::text || added_count::text),
+      'name', clean_name,
+      'code', code_str,
+      'gender', 'male',
+      'birthDate', null,
+      'phone', null,
+      'email', null,
+      'address', null,
+      'group', assigned_group,
+      'position', null,
+      'note', null,
+      'createdAt', now(),
+      'updatedAt', now()
+    ));
+    added_count := added_count + 1;
+  end loop;
+
+  if added_count = 0 then
+    return;
+  end if;
+
+  select coalesce(nullif(trim(display_name), ''), email, 'Thành viên')
+    into actor
+    from public.profiles
+   where id = auth.uid();
+
+  log_item := jsonb_build_object(
+    'id', 'log_' || md5(random()::text || clock_timestamp()::text),
+    'actor', coalesce(actor, 'Thành viên'),
+    'action', 'Nhập nhanh ' || added_count || ' học sinh',
+    'createdAt', now()
+  );
+
+  select coalesce(jsonb_agg(item order by ord), '[]'::jsonb)
+    into next_logs
+    from (
+      select item, ord
+        from jsonb_array_elements(jsonb_build_array(log_item) || existing_logs) with ordinality as t(item, ord)
+       where ord <= 40
+    ) sub;
+
+  update public.class_state
+     set data = jsonb_set(
+       jsonb_set(data, '{students}', coalesce(data -> 'students', '[]'::jsonb) || new_students),
+       '{activityLog}',
+       next_logs
+     )
+   where id = 'class10t4';
+end $$;
+
+revoke all on function public.app_add_student(jsonb) from public, anon;
+revoke all on function public.app_bulk_add_students(text[], text, boolean) from public, anon;
+grant execute on function public.app_add_student(jsonb) to authenticated;
+grant execute on function public.app_bulk_add_students(text[], text, boolean) to authenticated;
 
 

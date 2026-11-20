@@ -24,7 +24,8 @@ import { useClassStore } from '@/store/class-store';
 import type { AttendanceStatus } from '@/types/models';
 
 export default function AttendanceScreen() {
-  const { classInfo, students, role, attendanceOfDate, setAttendance, markAllPresent } = useClassStore();
+  const { classInfo, students, role, canViewAll, attendanceOfDate, setAttendance, markAllPresent } =
+    useClassStore();
   const theme = useTheme();
   const gradient = useBrandGradient();
   const { showToast } = useToast();
@@ -91,11 +92,15 @@ export default function AttendanceScreen() {
   return (
     <Screen withTabBar={false}>
       <PageHeader
-        title={'Điểm danh ngày'}
-        subtitle={'Chấm chuyên cần nhanh, ghi lý do & xuất Zalo'}
-        rightIcon={'share-social-outline'}
-        rightLabel={'Xuất Zalo'}
-        onRightPress={handleExportAttendance}
+        title={canViewAll ? 'Điểm danh ngày' : 'Điểm danh của tôi'}
+        subtitle={
+          canViewAll
+            ? 'Chấm chuyên cần nhanh, ghi lý do & xuất Zalo'
+            : 'Theo dõi chuyên cần cá nhân của riêng bạn'
+        }
+        rightIcon={canViewAll ? 'share-social-outline' : undefined}
+        rightLabel={canViewAll ? 'Xuất Zalo' : undefined}
+        onRightPress={canViewAll ? handleExportAttendance : undefined}
       />
 
       {/* Date Stepper */}

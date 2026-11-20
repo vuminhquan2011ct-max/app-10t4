@@ -73,15 +73,17 @@ function AppShell() {
   return (
     <ThemeProvider value={isDark ? DarkTheme : DefaultTheme}>
       <AuthProvider>
-        <ToastProvider>
-          <StatusBar style={isDark ? 'light' : 'dark'} />
-          <SplashWatcher />
-          <AuthGate>
-            <ClassStoreProvider>
-              <WorkspaceStack />
-            </ClassStoreProvider>
-          </AuthGate>
-        </ToastProvider>
+        <DecorProvider>
+          <ToastProvider>
+            <StatusBar style={isDark ? 'light' : 'dark'} />
+            <SplashWatcher />
+            <AuthGate>
+              <ClassStoreProvider>
+                <WorkspaceStack />
+              </ClassStoreProvider>
+            </AuthGate>
+          </ToastProvider>
+        </DecorProvider>
       </AuthProvider>
     </ThemeProvider>
   );
@@ -91,9 +93,7 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <ThemePreferenceProvider>
-        <DecorProvider>
-          <AppShell />
-        </DecorProvider>
+        <AppShell />
       </ThemePreferenceProvider>
     </SafeAreaProvider>
   );

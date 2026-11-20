@@ -76,6 +76,7 @@ export default function DashboardScreen() {
     ranking,
     memberRole,
     isTeacher,
+    canViewAll,
     isSubjectTeacher,
     subjectName,
     canEditClass,
@@ -109,7 +110,9 @@ export default function DashboardScreen() {
   const decor = useDecor();
   const activeMascot = MASCOTS[decor.mascotId] ?? MASCOTS.foxy;
 
-  const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('groups');
+  const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>(canViewAll ? 'groups' : 'weekly');
+  const activeAnalyticsTab: AnalyticsTab =
+    !canViewAll && analyticsTab === 'groups' ? 'weekly' : analyticsTab;
 
   const health = useMemo(() => computeClassHealth(store), [store]);
   const livePeriod = useMemo(() => getLivePeriodStatus(schedule), [schedule]);
@@ -144,11 +147,8 @@ export default function DashboardScreen() {
           ? theme.danger
           : theme.textMuted;
 
-  // Personalized metrics when viewing as a linked student
+  // Personalized metrics when viewing as an authenticated student
   const myStats = currentStudent ? statsOfStudent(currentStudent.id) : null;
-  const myRank = currentStudent
-    ? (ranking.find((r) => r.student.id === currentStudent.id)?.rank ?? null)
-    : null;
   const myAtt = currentStudent ? attendanceStatsOfStudent(currentStudent.id) : null;
   const mySeat = currentStudent ? seatOfStudent(currentStudent.id) : null;
   const myKudosCount = currentStudent ? kudosOfStudent(currentStudent.id).length : 0;
@@ -421,7 +421,7 @@ export default function DashboardScreen() {
         </FadeIn>
       ) : null}
 
-      {/* Personalized Student Corner (for linked students) */}
+      {/* Personalized Student Corner (for authenticated student) */}
       {currentStudent && myStats && !canEditClass ? (
         <FadeIn index={3}>
           <Card
@@ -431,18 +431,33 @@ export default function DashboardScreen() {
             }>
             <View style={styles.cornerTop}>
               <View style={styles.flex}>
-                <Badge label={'Góc cá nhân của bạn'} color={'accent'} soft={'accentSoft'} icon={'person'} />
+                <View style={styles.cornerStats}>
+                  <Badge
+                    label={'Không gian riêng của bạn'}
+                    color={'accent'}
+                    soft={'accentSoft'}
+                    icon={'lock-closed'}
+                  />
+                  <Badge
+                    label={`ID: ${currentStudent.code}`}
+                    color={'purple'}
+                    soft={'purpleSoft'}
+                    icon={'id-card-outline'}
+                  />
+                </View>
                 <Text style={[styles.cornerName, { color: theme.text }]}>{currentStudent.name}</Text>
                 <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
-                  {[currentStudent.group, mySeat?.label].filter(Boolean).join(' · ') || currentStudent.code}
+                  {[currentStudent.group || 'Lớp ' + classInfo.name, mySeat?.label]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </Text>
               </View>
               <View style={[styles.cornerRank, { backgroundColor: theme.accentSoft }]}>
                 <Text style={[styles.cornerRankVal, { color: theme.accentText }]}>
-                  {myRank ? `#${myRank}` : '--'}
+                  {`${myStats.points}đ`}
                 </Text>
                 <Text style={[styles.cornerRankSub, { color: theme.accentText }]}>
-                  {`${myStats.points}đ`}
+                  {`${myStats.total} bài`}
                 </Text>
               </View>
             </View>
@@ -535,7 +550,7 @@ export default function DashboardScreen() {
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.dockScroll}>
-          {QUICK_DOCK.map((item) => (
+          {QUICK_DOCK.filter((item) => canViewAll || item.route !== '/randomizer').map((item) => (
             <Pressable
               key={item.label}
               onPress={() =>
@@ -745,14 +760,14 @@ export default function DashboardScreen() {
       {/* Interactive Stats Grid */}
       <FadeIn index={6} style={styles.grid}>
         <StatCard
-          label={'Sĩ số lớp'}
-          value={totals.students}
-          icon={'people'}
+          label={canViewAll ? 'Sĩ số lớp' : 'Mã ID của bạn'}
+          value={canViewAll ? totals.students : (currentStudent?.code ?? '--')}
+          icon={canViewAll ? 'people' : 'id-card'}
           tone={'accent'}
           onPress={() => router.push('/students' as never)}
         />
         <StatCard
-          label={'Thành tích & HĐ'}
+          label={canViewAll ? 'Thành tích & HĐ' : 'Bài đăng của bạn'}
           value={totals.entries}
           icon={'trophy'}
           tone={'purple'}
@@ -761,14 +776,14 @@ export default function DashboardScreen() {
       </FadeIn>
       <FadeIn index={7} style={styles.grid}>
         <StatCard
-          label={'Chuỗi hoạt động'}
+          label={canViewAll ? 'Chuỗi hoạt động' : 'Chuỗi của bạn'}
           value={classStreak + ' ngày'}
           icon={'flame'}
           tone={'warning'}
           onPress={() => router.push('/insights' as never)}
         />
         <StatCard
-          label={'Tổng điểm thi đua'}
+          label={canViewAll ? 'Tổng điểm thi đua' : 'Điểm cá nhân'}
           value={totals.points}
           icon={'ribbon'}
           tone={'success'}
@@ -781,12 +796,22 @@ export default function DashboardScreen() {
         <View style={[styles.analyticsTabs, { backgroundColor: theme.card, borderColor: theme.border }]}>
           {(
             [
-              { key: 'groups', label: 'Đua top Tổ', icon: 'flame-outline' },
-              { key: 'weekly', label: '7 ngày qua', icon: 'stats-chart-outline' },
-              { key: 'categories', label: 'Lĩnh vực', icon: 'pie-chart-outline' },
-            ] as const
+              ...(canViewAll
+                ? [{ key: 'groups' as const, label: 'Đua top Tổ', icon: 'flame-outline' as const }]
+                : []),
+              {
+                key: 'weekly' as const,
+                label: canViewAll ? '7 ngày qua' : '7 ngày của bạn',
+                icon: 'stats-chart-outline' as const,
+              },
+              {
+                key: 'categories' as const,
+                label: canViewAll ? 'Lĩnh vực' : 'Lĩnh vực của bạn',
+                icon: 'pie-chart-outline' as const,
+              },
+            ]
           ).map((t) => {
-            const active = analyticsTab === t.key;
+            const active = activeAnalyticsTab === t.key;
             return (
               <Pressable
                 key={t.key}
@@ -809,88 +834,95 @@ export default function DashboardScreen() {
           })}
         </View>
 
-        {analyticsTab === 'groups' ? (
+        {activeAnalyticsTab === 'groups' && canViewAll ? (
           <GroupBattle groups={groupStats} />
-        ) : analyticsTab === 'weekly' ? (
+        ) : activeAnalyticsTab === 'weekly' ? (
           <WeeklyChart data={weeklyActivity} />
         ) : (
-          <CategoryBars stats={categoryStats} title={'Phân bổ điểm theo lĩnh vực'} />
+          <CategoryBars
+            stats={categoryStats}
+            title={canViewAll ? 'Phân bổ điểm theo lĩnh vực' : 'Điểm theo lĩnh vực của bạn'}
+          />
         )}
       </FadeIn>
 
-      {/* Ranking Podium */}
-      <FadeIn index={9}>
-        <SectionHeader
-          title={'Bảng xếp hạng'}
-          subtitle={'Chạm vào học sinh để xem hồ sơ chi tiết'}
-          actionLabel={'Xem tất cả'}
-          onAction={() => router.push('/students' as never)}
-        />
-      </FadeIn>
+      {/* Ranking Podium — Strictly Homeroom Teacher (GVCN) Only */}
+      {canViewAll ? (
+        <>
+          <FadeIn index={9}>
+            <SectionHeader
+              title={'Bảng xếp hạng toàn lớp'}
+              subtitle={'Chỉ GVCN xem tất cả · Chạm vào học sinh để xem hồ sơ'}
+              actionLabel={'Xem tất cả'}
+              onAction={() => router.push('/students' as never)}
+            />
+          </FadeIn>
 
-      <FadeIn index={10}>
-        <Card style={styles.rankCard}>
-          {ranking.length === 0 ? (
-            <Text style={{ color: theme.textSecondary }}>Chưa có dữ liệu xếp hạng.</Text>
-          ) : (
-            <>
-              <Podium
-                entries={podium.map((row) => ({
-                  id: row.student.id,
-                  name: row.student.name,
-                  points: row.points,
-                  rank: row.rank,
-                }))}
-                onPressEntry={(id) =>
-                  router.push({ pathname: '/student/[id]', params: { id } } as never)
-                }
-              />
-              {rest.length > 0 ? (
-                <View style={[styles.restList, { borderColor: theme.border }]}>
-                  {rest.map((row) => (
-                    <Pressable
-                      key={row.student.id}
-                      onPress={() =>
-                        router.push({
-                          pathname: '/student/[id]',
-                          params: { id: row.student.id },
-                        } as never)
-                      }
-                      style={({ pressed }) => [styles.rankRow, pressed && styles.pressed]}>
-                      <Text style={[styles.rankNum, { color: theme.textMuted }]}>{row.rank}</Text>
-                      <Avatar name={row.student.name} size={36} />
-                      <View style={styles.rankBody}>
-                        <Text style={[styles.rankName, { color: theme.text }]} numberOfLines={1}>
-                          {row.student.name}
-                        </Text>
-                        <View style={[styles.track, { backgroundColor: theme.backgroundElement }]}>
-                          <LinearGradient
-                            colors={gradient}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 0 }}
-                            style={[
-                              styles.fill,
-                              {
-                                width: `${Math.max(4, Math.round((row.points / maxPoints) * 100))}%` as `${number}%`,
-                              },
-                            ]}
-                          />
-                        </View>
-                      </View>
-                      <Text style={[styles.rankPts, { color: theme.accentText }]}>
-                        {row.points + ' đ'}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              ) : null}
-            </>
-          )}
-        </Card>
-      </FadeIn>
+          <FadeIn index={10}>
+            <Card style={styles.rankCard}>
+              {ranking.length === 0 ? (
+                <Text style={{ color: theme.textSecondary }}>Chưa có dữ liệu xếp hạng.</Text>
+              ) : (
+                <>
+                  <Podium
+                    entries={podium.map((row) => ({
+                      id: row.student.id,
+                      name: row.student.name,
+                      points: row.points,
+                      rank: row.rank,
+                    }))}
+                    onPressEntry={(id) =>
+                      router.push({ pathname: '/student/[id]', params: { id } } as never)
+                    }
+                  />
+                  {rest.length > 0 ? (
+                    <View style={[styles.restList, { borderColor: theme.border }]}>
+                      {rest.map((row) => (
+                        <Pressable
+                          key={row.student.id}
+                          onPress={() =>
+                            router.push({
+                              pathname: '/student/[id]',
+                              params: { id: row.student.id },
+                            } as never)
+                          }
+                          style={({ pressed }) => [styles.rankRow, pressed && styles.pressed]}>
+                          <Text style={[styles.rankNum, { color: theme.textMuted }]}>{row.rank}</Text>
+                          <Avatar name={row.student.name} size={36} />
+                          <View style={styles.rankBody}>
+                            <Text style={[styles.rankName, { color: theme.text }]} numberOfLines={1}>
+                              {row.student.name}
+                            </Text>
+                            <View style={[styles.track, { backgroundColor: theme.backgroundElement }]}>
+                              <LinearGradient
+                                colors={gradient}
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 1, y: 0 }}
+                                style={[
+                                  styles.fill,
+                                  {
+                                    width: `${Math.max(4, Math.round((row.points / maxPoints) * 100))}%` as `${number}%`,
+                                  },
+                                ]}
+                              />
+                            </View>
+                          </View>
+                          <Text style={[styles.rankPts, { color: theme.accentText }]}>
+                            {row.points + ' đ'}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
+                </>
+              )}
+            </Card>
+          </FadeIn>
+        </>
+      ) : null}
 
-      {/* Upcoming Birthdays with 1-tap Kudos Wish */}
-      {upcomingBirthdays.length > 0 ? (
+      {/* Upcoming Birthdays — GVCN only */}
+      {canViewAll && upcomingBirthdays.length > 0 ? (
         <FadeIn index={11}>
           <Card style={styles.bdayCard}>
             <View style={styles.bdayHead}>

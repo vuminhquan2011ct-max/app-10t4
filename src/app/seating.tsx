@@ -53,6 +53,7 @@ export default function SeatingScreen() {
     students,
     ranking,
     seating,
+    canViewAll,
     canEditClass,
     statsOfStudent,
     attendanceOfDate,
@@ -142,10 +143,14 @@ export default function SeatingScreen() {
     <Screen withTabBar={false}>
       <PageHeader
         title={'Sơ đồ chỗ ngồi'}
-        subtitle={`Lớp ${classInfo.name} · ${seatedIds.size}/${students.length} bạn đã xếp chỗ`}
-        rightIcon={'share-social-outline'}
-        rightLabel={'Xuất Zalo'}
-        onRightPress={handleExport}
+        subtitle={
+          canViewAll
+            ? `Lớp ${classInfo.name} · ${seatedIds.size}/${students.length} bạn đã xếp chỗ`
+            : `Vị trí chỗ ngồi riêng của bạn tại lớp ${classInfo.name}`
+        }
+        rightIcon={canViewAll ? 'share-social-outline' : undefined}
+        rightLabel={canViewAll ? 'Xuất Zalo' : undefined}
+        onRightPress={canViewAll ? handleExport : undefined}
       />
 
       {/* Lens Switcher */}

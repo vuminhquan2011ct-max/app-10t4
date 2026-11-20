@@ -51,17 +51,23 @@ function appendLog(
   prev: PersistedState,
   actor: string,
   action: string,
+  actorStudentId?: string | null,
 ): ActivityLogItem[] {
   const item: ActivityLogItem = {
     id: createId('log'),
     actor,
+    actorStudentId: actorStudentId ?? null,
     action,
     createdAt: new Date().toISOString(),
   };
   return [item, ...prev.activityLog].slice(0, 40);
 }
 
-export function createActions(mutate: Mutator, actorName: () => string) {
+export function createActions(
+  mutate: Mutator,
+  actorName: () => string,
+  actorStudentId: () => string | null = () => null,
+) {
   return {
     setRole: (role: Role) =>
       mutate((prev) => ({
@@ -80,22 +86,37 @@ export function createActions(mutate: Mutator, actorName: () => string) {
         activityLog: appendLog(prev, actorName(), 'Cập nhật thông tin lớp'),
       })),
 
-    addStudent: (input: StudentInput) => {
-      let createdId = '';
+    addStudentLocal: (input: StudentInput) => {
+      const id = input.id?.trim() || createId('stu');
       mutate((prev) => {
-        const student = buildStudent(prev.students, prev.classInfo.name, input);
-        createdId = student.id;
+        const student = buildStudent(prev.students, prev.classInfo.name, { ...input, id });
         return {
           ...prev,
           students: [...prev.students, student],
-          activityLog: appendLog(prev, actorName(), `Thêm học sinh ${student.name}`),
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Thêm học sinh ${student.name} (ID: ${student.code})`,
+            actorStudentId(),
+          ),
         };
       });
-      return createdId;
+      return id;
     },
 
+    /** Append pre-built students (used by bulk import so IDs match account credentials). */
+    appendStudentsLocal: (newStudents: Student[], logMessage: string) =>
+      mutate((prev) => {
+        if (newStudents.length === 0) return prev;
+        return {
+          ...prev,
+          students: [...prev.students, ...newStudents],
+          activityLog: appendLog(prev, actorName(), logMessage, actorStudentId()),
+        };
+      }),
+
     /** Import multiple students at once from newline-separated names. */
-    bulkAddStudents: (
+    bulkAddStudentsLocal: (
       names: string[],
       options?: { group?: string | null; autoDistributeGroups?: boolean },
     ) =>
@@ -118,7 +139,12 @@ export function createActions(mutate: Mutator, actorName: () => string) {
         return {
           ...prev,
           students: working,
-          activityLog: appendLog(prev, actorName(), `Nhập nhanh ${cleanNames.length} học sinh`),
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Nhập nhanh ${cleanNames.length} học sinh`,
+            actorStudentId(),
+          ),
         };
       }),
 
@@ -182,7 +208,12 @@ export function createActions(mutate: Mutator, actorName: () => string) {
       mutate((prev) => ({
         ...prev,
         entries: [entry, ...prev.entries],
-        activityLog: appendLog(prev, actorName(), `Ghi mục "${entry.title}" (+${entry.points}đ)`),
+        activityLog: appendLog(
+          prev,
+          actorName(),
+          `Ghi mục "${entry.title}" (+${entry.points}đ)`,
+          actorStudentId(),
+        ),
       }));
       return entry;
     },
@@ -554,6 +585,7 @@ export function createActions(mutate: Mutator, actorName: () => string) {
       const item: KudosItem = {
         id: createId('kud'),
         toStudentId: input.toStudentId,
+        authorStudentId: input.authorStudentId ?? null,
         fromName: input.anonymous ? 'Bạn giấu tên' : input.fromName?.trim() || actorName(),
         anonymous: input.anonymous,
         sticker: input.sticker,
@@ -566,7 +598,12 @@ export function createActions(mutate: Mutator, actorName: () => string) {
         return {
           ...prev,
           kudos: [item, ...prev.kudos].slice(0, 120),
-          activityLog: appendLog(prev, actorName(), `Gửi lời khen tới ${targetName}`),
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Gửi lời khen tới ${targetName}`,
+            actorStudentId(),
+          ),
         };
       });
       return item;
@@ -596,12 +633,18 @@ export function createActions(mutate: Mutator, actorName: () => string) {
         description: input.description?.trim() || null,
         pinned: Boolean(input.pinned),
         author: input.author?.trim() || actorName(),
+        ownerStudentId: input.ownerStudentId ?? null,
         createdAt: new Date().toISOString(),
       };
       mutate((prev) => ({
         ...prev,
         resources: [item, ...prev.resources],
-        activityLog: appendLog(prev, actorName(), `Thêm tài liệu "${item.title}"`),
+        activityLog: appendLog(
+          prev,
+          actorName(),
+          `Thêm tài liệu "${item.title}"`,
+          actorStudentId(),
+        ),
       }));
       return item;
     },

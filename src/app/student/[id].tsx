@@ -42,6 +42,7 @@ export default function StudentDetailScreen() {
     quickReward,
     saveStudentPrivate,
     canEditClass,
+    canViewAll,
     canViewNotes,
     canManagePrivate,
     canViewPrivateOf,
@@ -60,7 +61,24 @@ export default function StudentDetailScreen() {
   if (!student) {
     return (
       <Screen withTabBar={false}>
-        <EmptyState icon={'person-outline'} title={'Không tìm thấy học sinh'} />
+        <EmptyState
+          icon={canViewAll ? 'person-outline' : 'lock-closed-outline'}
+          title={canViewAll ? 'Không tìm thấy học sinh' : 'Trang hồ sơ riêng tư 🔒'}
+          message={
+            canViewAll
+              ? 'Học sinh này không tồn tại hoặc đã bị xoá.'
+              : 'Bạn chỉ được xem trang tên và dữ liệu của chính mình. Chỉ Giáo viên chủ nhiệm mới xem được hồ sơ của tất cả học sinh.'
+          }
+        />
+        {!canViewAll && currentStudentId ? (
+          <Button
+            label={'Về trang hồ sơ của tôi'}
+            icon={'person-circle'}
+            onPress={() =>
+              router.replace({ pathname: '/student/[id]', params: { id: currentStudentId } } as never)
+            }
+          />
+        ) : null}
         <Button label={'Quay lại'} variant={'soft'} onPress={() => router.back()} />
       </Screen>
     );
@@ -121,8 +139,12 @@ export default function StudentDetailScreen() {
   return (
     <Screen withTabBar={false}>
       <PageHeader
-        title={'Hồ sơ học sinh'}
-        subtitle={rank ? `Hạng #${rank} thi đua lớp ${classInfo.name}` : student.code}
+        title={canViewAll ? 'Hồ sơ học sinh' : 'Trang cá nhân của tôi'}
+        subtitle={
+          canViewAll && rank
+            ? `ID: ${student.code} · Hạng #${rank} thi đua lớp ${classInfo.name}`
+            : `ID: ${student.code} · Lớp ${classInfo.name}`
+        }
         rightIcon={'share-social-outline'}
         rightLabel={'Phiếu điểm'}
         onRightPress={handleShareReport}
@@ -140,7 +162,7 @@ export default function StudentDetailScreen() {
           <Avatar name={student.name} size={88} ring />
           <Text style={styles.name}>{student.name}</Text>
           <View style={styles.tags}>
-            {[student.code, student.position?.trim(), student.group, seat?.label].filter(Boolean).map((tag) => (
+            {[`ID: ${student.code}`, student.position?.trim(), student.group, seat?.label].filter(Boolean).map((tag) => (
               <View key={tag} style={styles.tag}>
                 <Text style={styles.tagText}>{tag}</Text>
               </View>
@@ -328,7 +350,7 @@ export default function StudentDetailScreen() {
       <View style={styles.actions}>
         {canEditClass ? (
           <Button
-            label={'Sửa hồ sơ'}
+            label={'Sửa & Mật khẩu'}
             variant={'soft'}
             icon={'create-outline'}
             style={styles.flex}

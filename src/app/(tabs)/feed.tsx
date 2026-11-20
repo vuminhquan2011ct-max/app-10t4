@@ -38,8 +38,17 @@ const FILTERS: { value: Filter; label: string }[] = [
 ];
 
 export default function FeedScreen() {
-  const { entries, role, canEditClass, currentStudentId, getStudent, setEntryStatus, approveAllPending, pullNow } =
-    useClassStore();
+  const {
+    entries,
+    role,
+    canViewAll,
+    canEditClass,
+    currentStudentId,
+    getStudent,
+    setEntryStatus,
+    approveAllPending,
+    pullNow,
+  } = useClassStore();
   const theme = useTheme();
   const { showToast } = useToast();
   const [query, setQuery] = useState('');
@@ -82,8 +91,12 @@ export default function FeedScreen() {
       <FadeIn index={0}>
         <SectionHeader
           large
-          title={'Nhật ký thành tích'}
-          subtitle={sorted.length + ' / ' + entries.length + ' mục, mới nhất ở trên'}
+          title={canViewAll ? 'Nhật ký thành tích' : 'Bài đăng của tôi'}
+          subtitle={
+            canViewAll
+              ? sorted.length + ' / ' + entries.length + ' mục toàn lớp · mới nhất ở trên'
+              : sorted.length + ' mục của riêng bạn · Chỉ bạn & GVCN thấy'
+          }
         />
       </FadeIn>
 

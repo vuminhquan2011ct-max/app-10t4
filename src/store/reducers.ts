@@ -22,7 +22,7 @@ function nextCode(students: Student[], className: string): string {
 export function buildStudent(existing: Student[], className: string, input: StudentInput): Student {
   const now = new Date().toISOString();
   return {
-    id: createId('stu'),
+    id: input.id?.trim() || createId('stu'),
     name: normalizeName(input.name),
     code: input.code?.trim() || nextCode(existing, className),
     gender: input.gender,

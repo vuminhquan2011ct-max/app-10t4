@@ -44,7 +44,9 @@ export default function ToolsScreen() {
     totals,
     ranking,
     isTeacher,
+    canViewAll,
     canEditClass,
+    canAddStudents,
     classStreak,
     categoryStats,
     announcements,
@@ -254,7 +256,20 @@ export default function ToolsScreen() {
       soft: 'accentSoft',
       route: '/schedule',
     },
-    ...(canEditClass
+    ...(canAddStudents
+      ? [
+          {
+            title: 'Thêm học sinh',
+            desc: 'Tạo tài khoản học sinh mới kèm Số ID & mật khẩu riêng tự đặt',
+            kpi: canViewAll ? `${students.length} học sinh` : 'ID & Mật khẩu riêng',
+            icon: 'person-add' as IoniconName,
+            color: 'accent' as ThemeColor,
+            soft: 'accentSoft' as ThemeColor,
+            route: '/student-form',
+          },
+        ]
+      : []),
+    ...(isTeacher
       ? [
           {
             title: 'Nhập nhanh cả lớp',
@@ -266,7 +281,9 @@ export default function ToolsScreen() {
             route: '/bulk-students',
           },
         ]
-      : [
+      : []),
+    ...(!canEditClass
+      ? [
           {
             title: 'Ghi thành tích mới',
             desc: 'Gửi thành tích học tập, CLB lên để giáo viên duyệt',
@@ -276,7 +293,8 @@ export default function ToolsScreen() {
             soft: 'accentSoft' as ThemeColor,
             route: '/entry-form',
           },
-        ]),
+        ]
+      : []),
   ];
 
   const communityTools: ToolCardItem[] = [
@@ -290,15 +308,19 @@ export default function ToolsScreen() {
       route: '/kudos',
       tag: 'MỚI',
     },
-    {
-      title: 'Gọi tên & Chia nhóm',
-      desc: 'Vòng quay ngẫu nhiên kiểm tra bài cũ, cộng điểm ngay',
-      kpi: `${students.length} học sinh sẵn sàng`,
-      icon: 'shuffle',
-      color: 'purple',
-      soft: 'purpleSoft',
-      route: '/randomizer',
-    },
+    ...(canViewAll
+      ? [
+          {
+            title: 'Gọi tên & Chia nhóm',
+            desc: 'Vòng quay ngẫu nhiên kiểm tra bài cũ, cộng điểm ngay',
+            kpi: `${students.length} học sinh sẵn sàng`,
+            icon: 'shuffle' as IoniconName,
+            color: 'purple' as ThemeColor,
+            soft: 'purpleSoft' as ThemeColor,
+            route: '/randomizer',
+          },
+        ]
+      : []),
     {
       title: 'Bình chọn lớp',
       desc: 'Lấy ý kiến tập thể nhanh chóng, biểu quyết trực tuyến',
@@ -456,29 +478,31 @@ export default function ToolsScreen() {
         <CategoryBars stats={categoryStats} title={'Thống kê thành tích theo lĩnh vực'} />
       </FadeIn>
 
-      {/* 1-Tap Report Export */}
-      <FadeIn index={6}>
-        <Card style={styles.reportCard}>
-          <View style={styles.reportHead}>
-            <View style={[styles.reportIcon, { backgroundColor: theme.accentSoft }]}>
-              <Ionicons name="document-text" size={20} color={theme.accent} />
+      {/* 1-Tap Report Export (GVCN only) */}
+      {canViewAll ? (
+        <FadeIn index={6}>
+          <Card style={styles.reportCard}>
+            <View style={styles.reportHead}>
+              <View style={[styles.reportIcon, { backgroundColor: theme.accentSoft }]}>
+                <Ionicons name="document-text" size={20} color={theme.accent} />
+              </View>
+              <View style={styles.flex}>
+                <Text style={[styles.reportTitle, { color: theme.text }]}>
+                  Xuất báo cáo tổng kết lớp
+                </Text>
+                <Text style={[styles.reportSub, { color: theme.textSecondary }]}>
+                  Tạo bản tóm tắt đẹp mắt (Top thi đua, điểm, quỹ) để gửi nhóm Zalo phụ huynh & lớp.
+                </Text>
+              </View>
             </View>
-            <View style={styles.flex}>
-              <Text style={[styles.reportTitle, { color: theme.text }]}>
-                Xuất báo cáo tổng kết lớp
-              </Text>
-              <Text style={[styles.reportSub, { color: theme.textSecondary }]}>
-                Tạo bản tóm tắt đẹp mắt (Top thi đua, điểm, quỹ) để gửi nhóm Zalo phụ huynh & lớp.
-              </Text>
-            </View>
-          </View>
-          <Button
-            label={'Sao chép / Chia sẻ báo cáo ngay'}
-            icon={'share-social'}
-            onPress={handleExportReport}
-          />
-        </Card>
-      </FadeIn>
+            <Button
+              label={'Sao chép / Chia sẻ báo cáo ngay'}
+              icon={'share-social'}
+              onPress={handleExportReport}
+            />
+          </Card>
+        </FadeIn>
+      ) : null}
     </Screen>
   );
 }

@@ -3,6 +3,7 @@
  */
 
 import { Ionicons } from '@expo/vector-icons';
+import { router } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -16,10 +17,17 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { Screen } from '@/components/ui/screen';
 import { SectionHeader } from '@/components/ui/section-header';
+import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
 import { Radius, Spacing } from '@/constants/theme';
 import { MEMBER_ROLES, MEMBER_STATUSES } from '@/constants/utilities-meta';
 import { useTheme } from '@/hooks/use-theme';
+import { stripVietnamese } from '@/lib/intelligence';
+import {
+  MIN_STUDENT_PASSWORD_LENGTH,
+  loadStudentAccounts,
+  type StudentAccountRecord,
+} from '@/lib/student-accounts';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import type { MemberRole, MemberStatus, Profile } from '@/types/auth';
@@ -30,7 +38,7 @@ const ROLE_ORDER: MemberRole[] = ['teacher', 'editor', 'student'];
 
 export default function MembersScreen() {
   const auth = useAuth();
-  const { isTeacher, students, activityLog } = useClassStore();
+  const { isTeacher, students, activityLog, statsOfStudent, updateStudent } = useClassStore();
   const theme = useTheme();
   const { showToast } = useToast();
 
@@ -38,6 +46,62 @@ export default function MembersScreen() {
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Local student account credentials management (GVCN only)
+  const [studentAccounts, setStudentAccounts] = useState<StudentAccountRecord[]>([]);
+  const [accountQuery, setAccountQuery] = useState('');
+  const [resetTargetId, setResetTargetId] = useState<string | null>(null);
+  const [resetPassDraft, setResetPassDraft] = useState('');
+
+  const refreshAccounts = useCallback(async () => {
+    const list = await loadStudentAccounts();
+    setStudentAccounts(list);
+  }, []);
+
+  useEffect(() => {
+    if (!isTeacher) return;
+    let active = true;
+    loadStudentAccounts()
+      .then((list) => {
+        if (active) setStudentAccounts(list);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isTeacher, students.length]);
+
+  const accountByStudentId = useMemo(
+    () => new Map(studentAccounts.map((a) => [a.studentId, a])),
+    [studentAccounts],
+  );
+
+  const filteredStudents = useMemo(() => {
+    const q = stripVietnamese(accountQuery);
+    return [...students]
+      .filter((s) => {
+        if (!q) return true;
+        return stripVietnamese(`${s.name} ${s.code} ${s.group ?? ''}`).includes(q);
+      })
+      .sort((a, b) => a.code.localeCompare(b.code, 'vi'));
+  }, [students, accountQuery]);
+
+  const handleResetStudentPassword = async (studentId: string, studentName: string) => {
+    const clean = resetPassDraft.trim();
+    if (clean.length < MIN_STUDENT_PASSWORD_LENGTH) {
+      showToast(`Mật khẩu mới cần ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự`, 'warning');
+      return;
+    }
+    try {
+      await updateStudent(studentId, { password: clean });
+      await refreshAccounts();
+      setResetTargetId(null);
+      setResetPassDraft('');
+      showToast(`Đã đặt lại mật khẩu cho ${studentName}! 🔐`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể đặt lại mật khẩu', 'danger');
+    }
+  };
 
   const load = useCallback(async () => {
     if (!auth.isCloudActive || !isTeacher) return;
@@ -103,20 +167,150 @@ export default function MembersScreen() {
           message={'Nhật ký chỉnh sửa và quản lý bảo mật thuộc về GVCN.'}
         />
       ) : !auth.isCloudActive ? (
-        <FadeIn index={0}>
-          <Card style={styles.offlineCard}>
-            <View style={[styles.iconBox, { backgroundColor: theme.accentSoft }]}>
-              <Ionicons name="key" size={22} color={theme.accent} />
-            </View>
-            <Text style={[styles.title, { color: theme.text }]}>
-              Đang bảo vệ bằng mật khẩu lớp 10T4
-            </Text>
-            <Text style={{ color: theme.textSecondary, fontSize: 13, lineHeight: 20 }}>
-              Tất cả người dùng mở khóa ứng dụng bằng mật khẩu lớp. Bạn có thể theo dõi lịch sử
-              chỉnh sửa dữ liệu ở danh sách bên dưới hoặc đăng xuất trong mục Cài đặt.
-            </Text>
-          </Card>
-        </FadeIn>
+        <>
+          <FadeIn index={0}>
+            <Card style={styles.offlineCard}>
+              <View style={styles.memberHead}>
+                <View style={[styles.iconBox, { backgroundColor: theme.accentSoft }]}>
+                  <Ionicons name="shield-checkmark" size={22} color={theme.accent} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={[styles.title, { color: theme.text }]}>
+                    Quản lý Tài khoản Học sinh (GVCN)
+                  </Text>
+                  <Text style={{ color: theme.textSecondary, fontSize: 12.5, lineHeight: 18 }}>
+                    Mỗi học sinh có Số ID & mật khẩu riêng và chỉ thấy trang của chính mình. Chỉ
+                    GVCN mới xem được toàn bộ {students.length} học sinh & đặt lại mật khẩu khi cần.
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.quickRow}>
+                <Button
+                  label={'Thêm học sinh'}
+                  icon={'person-add'}
+                  size={'sm'}
+                  style={styles.flex}
+                  onPress={() => router.push('/student-form' as never)}
+                />
+                <Button
+                  label={'Nhập nhanh DS'}
+                  variant={'soft'}
+                  icon={'list'}
+                  size={'sm'}
+                  onPress={() => router.push('/bulk-students' as never)}
+                />
+              </View>
+            </Card>
+          </FadeIn>
+
+          <TextField
+            icon={'search'}
+            placeholder={'Tìm học sinh theo tên, Số ID, tổ...'}
+            value={accountQuery}
+            onChangeText={setAccountQuery}
+          />
+
+          {filteredStudents.length === 0 ? (
+            <EmptyState
+              icon={'people-outline'}
+              title={'Chưa có tài khoản học sinh nào'}
+              message={'Bấm "Thêm học sinh" ở trên để tạo tài khoản kèm Số ID & mật khẩu riêng.'}
+            />
+          ) : (
+            filteredStudents.map((stu, idx) => {
+              const acc = accountByStudentId.get(stu.id);
+              const stats = statsOfStudent(stu.id);
+              const isResetting = resetTargetId === stu.id;
+
+              return (
+                <FadeIn key={stu.id} index={Math.min(idx + 1, 8)}>
+                  <Card style={styles.memberCard}>
+                    <View style={styles.memberHead}>
+                      <Avatar name={stu.name} size={44} />
+                      <View style={styles.flex}>
+                        <Text style={[styles.memberName, { color: theme.text }]} numberOfLines={1}>
+                          {stu.name}
+                        </Text>
+                        <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
+                          {[
+                            `ID: ${stu.code}`,
+                            stu.group || 'Chưa phân tổ',
+                            `${stats.total} bài · ${stats.points}đ`,
+                          ].join(' · ')}
+                        </Text>
+                        <View style={styles.badgeRow}>
+                          <Badge
+                            label={acc ? 'Đã đặt mật khẩu 🔐' : 'Chưa đặt mật khẩu'}
+                            color={acc ? 'success' : 'warning'}
+                            soft={acc ? 'successSoft' : 'warningSoft'}
+                            icon={acc ? 'key' : 'alert-circle-outline'}
+                          />
+                        </View>
+                      </View>
+                    </View>
+
+                    {isResetting ? (
+                      <View style={[styles.panel, { borderColor: theme.border }]}>
+                        <TextField
+                          label={`Đặt mật khẩu mới cho ${stu.name} (ID: ${stu.code})`}
+                          icon={'key-outline'}
+                          placeholder={'Nhập mật khẩu mới (ít nhất 4 ký tự)...'}
+                          value={resetPassDraft}
+                          onChangeText={setResetPassDraft}
+                          autoCapitalize={'none'}
+                        />
+                        <View style={styles.quickRow}>
+                          <Button
+                            label={'Huỷ'}
+                            variant={'ghost'}
+                            size={'sm'}
+                            onPress={() => {
+                              setResetTargetId(null);
+                              setResetPassDraft('');
+                            }}
+                          />
+                          <Button
+                            label={'Lưu mật khẩu mới'}
+                            size={'sm'}
+                            icon={'checkmark-circle'}
+                            style={styles.flex}
+                            onPress={() => handleResetStudentPassword(stu.id, stu.name)}
+                          />
+                        </View>
+                      </View>
+                    ) : (
+                      <View style={styles.quickRow}>
+                        <Button
+                          label={acc ? 'Đặt lại mật khẩu' : 'Đặt mật khẩu'}
+                          variant={'soft'}
+                          size={'sm'}
+                          icon={'key-outline'}
+                          style={styles.flex}
+                          onPress={() => {
+                            setResetTargetId(stu.id);
+                            setResetPassDraft('');
+                          }}
+                        />
+                        <Button
+                          label={'Xem trang'}
+                          variant={'ghost'}
+                          size={'sm'}
+                          icon={'person-circle-outline'}
+                          onPress={() =>
+                            router.push({
+                              pathname: '/student/[id]',
+                              params: { id: stu.id },
+                            } as never)
+                          }
+                        />
+                      </View>
+                    )}
+                  </Card>
+                </FadeIn>
+              );
+            })
+          )}
+        </>
       ) : (
         <>
           {/* Status filter */}

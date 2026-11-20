@@ -247,6 +247,8 @@ export type FeedbackItem = {
 export type ActivityLogItem = {
   id: string;
   actor: string;
+  /** ID học sinh thực hiện (nếu là học sinh) để lọc riêng tư. */
+  actorStudentId?: string | null;
   action: string;
   createdAt: string;
 };
@@ -264,6 +266,8 @@ export type KudosSticker =
 export type KudosItem = {
   id: string;
   toStudentId: string;
+  /** ID học sinh gửi lời khen (để học sinh chỉ xem được bài mình đăng/nhận). */
+  authorStudentId?: string | null;
   fromName: string;
   anonymous: boolean;
   sticker: KudosSticker;
@@ -285,6 +289,8 @@ export type ClassResource = {
   description: string | null;
   pinned: boolean;
   author: string;
+  /** ID học sinh đăng tài liệu (`null` = tài liệu chung của giáo viên). */
+  ownerStudentId?: string | null;
   createdAt: string;
 };
 

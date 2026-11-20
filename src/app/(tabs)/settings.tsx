@@ -27,6 +27,7 @@ import {
 import { MEMBER_ROLES, SUBJECT_TEACHER_PRESETS } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme, useThemePreference } from '@/hooks/use-theme';
 import { buildClassSummaryReport, exportJsonBackup, shareOrCopyText } from '@/lib/export';
+import { MIN_STUDENT_PASSWORD_LENGTH } from '@/lib/student-accounts';
 import { useAuth, type AccountRole } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
@@ -50,14 +51,14 @@ export default function SettingsScreen() {
   const {
     memberRole,
     isTeacher,
+    canViewAll,
     isSubjectTeacher,
     subjectName,
     canEditClass,
+    canAddStudents,
     classInfo,
     updateClass,
     currentStudent,
-    signInAs,
-    students,
     totals,
     ranking,
     fundSummary,
@@ -99,8 +100,12 @@ export default function SettingsScreen() {
   const [cMotto, setCMotto] = useState(classInfo.motto);
   const [cGoal, setCGoal] = useState(String(classInfo.goalPoints ?? 200));
 
-  // Offline student switcher search
-  const [studentSearch, setStudentSearch] = useState('');
+  // Change personal student password
+  const [changingPass, setChangingPass] = useState(false);
+  const [curPass, setCurPass] = useState('');
+  const [newPass, setNewPass] = useState('');
+  const [confirmNewPass, setConfirmNewPass] = useState('');
+  const [passError, setPassError] = useState<string | null>(null);
 
   // Backup import & reset confirmation
   const [showImport, setShowImport] = useState(false);
@@ -174,11 +179,31 @@ export default function SettingsScreen() {
     }
   };
 
-  const filteredStudents = students.filter((s) =>
-    !studentSearch.trim()
-      ? true
-      : s.name.toLowerCase().includes(studentSearch.trim().toLowerCase()),
-  );
+  const handleChangeOwnPassword = async () => {
+    setPassError(null);
+    if (!curPass.trim()) {
+      setPassError('Vui lòng nhập mật khẩu hiện tại.');
+      return;
+    }
+    if (newPass.trim().length < MIN_STUDENT_PASSWORD_LENGTH) {
+      setPassError(`Mật khẩu mới cần tối thiểu ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`);
+      return;
+    }
+    if (newPass.trim() !== confirmNewPass.trim()) {
+      setPassError('Mật khẩu xác nhận không khớp!');
+      return;
+    }
+    const res = await auth.changeStudentPassword(curPass, newPass);
+    if (!res.ok) {
+      setPassError(res.error ?? 'Không thể đổi mật khẩu');
+      return;
+    }
+    setCurPass('');
+    setNewPass('');
+    setConfirmNewPass('');
+    setChangingPass(false);
+    showToast('Đã đổi mật khẩu cá nhân thành công! 🔐');
+  };
 
   const handleExportSummary = async () => {
     const report = buildClassSummaryReport({
@@ -232,9 +257,10 @@ export default function SettingsScreen() {
   const handleSelectRoleCard = async (target: AccountRole) => {
     setTeacherPassError(null);
     if (target === 'student') {
+      if (auth.accountRole === 'student') return;
       setPendingRole(null);
       await auth.switchAccountRole('student');
-      showToast('Đã chuyển sang chế độ Học sinh', 'info');
+      showToast('Hãy đăng nhập bằng Số ID & mật khẩu riêng của học sinh!', 'info');
       return;
     }
 
@@ -350,19 +376,27 @@ export default function SettingsScreen() {
           </View>
 
           <View style={styles.badgeWrap}>
-            <Badge label={'Đã mở khóa 🔒'} color={'success'} soft={'successSoft'} icon={'checkmark-circle'} />
+            <Badge label={'Đã xác thực 🔒'} color={'success'} soft={'successSoft'} icon={'checkmark-circle'} />
             <Badge
               label={roleMeta.label}
               color={roleMeta.color}
               soft={roleMeta.soft}
               icon={roleMeta.icon}
             />
+            {auth.loginId ? (
+              <Badge
+                label={`ID: ${auth.loginId}`}
+                color={'accentText'}
+                soft={'accentSoft'}
+                icon={'id-card-outline'}
+              />
+            ) : null}
             {currentStudent ? (
               <Badge
-                label={`Hồ sơ: ${currentStudent.name}`}
+                label={`Trang riêng: ${currentStudent.name}`}
                 color={'purple'}
                 soft={'purpleSoft'}
-                icon={'link'}
+                icon={'person-circle-outline'}
               />
             ) : null}
           </View>
@@ -413,12 +447,88 @@ export default function SettingsScreen() {
             </View>
           )}
 
+          {/* Student Personal Password Change */}
+          {auth.accountRole === 'student' && auth.studentId ? (
+            changingPass ? (
+              <View
+                style={[
+                  styles.verifyBox,
+                  { backgroundColor: theme.backgroundElement, borderColor: theme.accent },
+                ]}>
+                <View style={styles.verifyHead}>
+                  <Ionicons name="key" size={16} color={theme.accent} />
+                  <Text style={[styles.verifyTitle, { color: theme.text }]}>
+                    Đổi mật khẩu cá nhân (ID: {auth.loginId})
+                  </Text>
+                  <Pressable onPress={() => setChangingPass(false)} hitSlop={8}>
+                    <Ionicons name="close" size={18} color={theme.textMuted} />
+                  </Pressable>
+                </View>
+                <TextField
+                  label={'Mật khẩu hiện tại'}
+                  value={curPass}
+                  onChangeText={(t) => {
+                    setCurPass(t);
+                    setPassError(null);
+                  }}
+                  secureTextEntry
+                  autoCapitalize={'none'}
+                />
+                <TextField
+                  label={'Mật khẩu mới (tối thiểu 4 ký tự)'}
+                  value={newPass}
+                  onChangeText={(t) => {
+                    setNewPass(t);
+                    setPassError(null);
+                  }}
+                  secureTextEntry
+                  autoCapitalize={'none'}
+                />
+                <TextField
+                  label={'Nhập lại mật khẩu mới'}
+                  value={confirmNewPass}
+                  onChangeText={(t) => {
+                    setConfirmNewPass(t);
+                    setPassError(null);
+                  }}
+                  secureTextEntry
+                  autoCapitalize={'none'}
+                />
+                {passError ? (
+                  <Text style={{ color: theme.danger, fontSize: 12, fontWeight: '700' }}>
+                    {passError}
+                  </Text>
+                ) : null}
+                <Button
+                  label={'Lưu mật khẩu mới'}
+                  icon={'checkmark-circle'}
+                  size={'sm'}
+                  onPress={handleChangeOwnPassword}
+                />
+              </View>
+            ) : (
+              <Button
+                label={'Đổi mật khẩu cá nhân'}
+                variant={'ghost'}
+                size={'sm'}
+                icon={'key-outline'}
+                onPress={() => {
+                  setPassError(null);
+                  setCurPass('');
+                  setNewPass('');
+                  setConfirmNewPass('');
+                  setChangingPass(true);
+                }}
+              />
+            )
+          ) : null}
+
           {isTeacher ? (
             <Button
-              label={'Xem Nhật ký chỉnh sửa & Hoạt động lớp'}
-              variant={'ghost'}
+              label={'Quản lý Tài khoản Học sinh (ID & MK) & Nhật ký'}
+              variant={'soft'}
               size={'sm'}
-              icon={'shield-outline'}
+              icon={'shield-checkmark'}
               onPress={() => router.push('/members' as never)}
             />
           ) : null}
@@ -810,122 +920,95 @@ export default function SettingsScreen() {
 
             {auth.accountRole === 'student' ? (
               <View style={styles.pickWrap}>
-                <Text style={[styles.sub, { color: theme.textSecondary }]}>
-                  Xem với tư cách học sinh ({students.length} bạn)
+                <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 18 }}>
+                  🔒 Mỗi tài khoản học sinh được bảo vệ bằng Số ID & mật khẩu riêng. Để chuyển sang
+                  học sinh khác, hãy Đăng xuất và đăng nhập bằng Số ID + mật khẩu của tài khoản đó.
                 </Text>
-                {students.length > 6 ? (
-                  <TextField
-                    icon={'search'}
-                    placeholder={'Tìm tên bạn...'}
-                    value={studentSearch}
-                    onChangeText={setStudentSearch}
+                {canAddStudents ? (
+                  <Button
+                    label={'Tạo tài khoản học sinh mới'}
+                    variant={'soft'}
+                    size={'sm'}
+                    icon={'person-add-outline'}
+                    onPress={() => router.push('/student-form' as never)}
                   />
                 ) : null}
-                <View style={styles.pickList}>
-                  {filteredStudents.map((s) => {
-                    const selected = currentStudent?.id === s.id;
-                    return (
-                      <Pressable
-                        key={s.id}
-                        onPress={() => {
-                          signInAs(s.id);
-                          showToast(`Đang xem với tư cách ${s.name}`, 'info');
-                        }}
-                        style={({ pressed }) => [
-                          styles.pick,
-                          {
-                            backgroundColor: selected ? theme.accentSoft : theme.backgroundElement,
-                            borderColor: selected ? theme.accent : 'transparent',
-                          },
-                          pressed && styles.pressed,
-                        ]}>
-                        <Avatar name={s.name} size={26} />
-                        <Text
-                          style={[
-                            styles.pickText,
-                            { color: selected ? theme.accentText : theme.textSecondary },
-                          ]}
-                          numberOfLines={1}>
-                          {s.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
               </View>
             ) : null}
           </Card>
         </FadeIn>
       ) : null}
 
-      {/* Export, Backup & Restore */}
-      <FadeIn index={6}>
-        <Card style={styles.card}>
-          <View style={styles.cardHead}>
-            <View style={[styles.cardIcon, { backgroundColor: theme.successSoft }]}>
-              <Ionicons name="cloud-upload" size={18} color={theme.success} />
+      {/* Export, Backup & Restore — Strictly Homeroom Teacher (GVCN) Only */}
+      {canViewAll ? (
+        <FadeIn index={6}>
+          <Card style={styles.card}>
+            <View style={styles.cardHead}>
+              <View style={[styles.cardIcon, { backgroundColor: theme.successSoft }]}>
+                <Ionicons name="cloud-upload" size={18} color={theme.success} />
+              </View>
+              <View style={styles.flex}>
+                <Text style={[styles.label, { color: theme.text }]}>Báo cáo & Sao lưu dữ liệu</Text>
+                <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
+                  Xuất báo cáo toàn lớp hoặc sao lưu / khôi phục dữ liệu JSON (Chỉ GVCN)
+                </Text>
+              </View>
             </View>
-            <View style={styles.flex}>
-              <Text style={[styles.label, { color: theme.text }]}>Báo cáo & Sao lưu dữ liệu</Text>
-              <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
-                Xuất báo cáo lớp hoặc sao lưu / khôi phục dữ liệu JSON
-              </Text>
-            </View>
-          </View>
 
-          <View style={styles.backupActions}>
-            <Button
-              label={'Xuất báo cáo lớp'}
-              variant={'soft'}
-              size={'sm'}
-              icon={'document-text'}
-              style={styles.flex}
-              onPress={handleExportSummary}
-            />
-            <Button
-              label={'Sao lưu JSON'}
-              variant={'soft'}
-              size={'sm'}
-              icon={'download-outline'}
-              style={styles.flex}
-              onPress={handleBackupJson}
-            />
-          </View>
-
-          {isTeacher ? (
-            <>
+            <View style={styles.backupActions}>
               <Button
-                label={showImport ? 'Ẩn khung khôi phục JSON' : 'Khôi phục từ bản sao lưu JSON'}
-                variant={'ghost'}
+                label={'Xuất báo cáo lớp'}
+                variant={'soft'}
                 size={'sm'}
-                icon={'code-slash-outline'}
-                onPress={() => setShowImport((v) => !v)}
+                icon={'document-text'}
+                style={styles.flex}
+                onPress={handleExportSummary}
               />
-
-              {showImport ? (
-                <View style={styles.editor}>
-                  <TextField
-                    label={'Dán nội dung JSON sao lưu'}
-                    placeholder={'{"version":1,"students":[...]}'}
-                    value={importText}
-                    onChangeText={setImportText}
-                    multiline
-                  />
-                  <Button label={'Áp dụng bản sao lưu'} icon={'checkmark'} onPress={handleImportJson} />
-                </View>
-              ) : null}
-
-              <View style={[styles.divider, { backgroundColor: theme.border }]} />
               <Button
-                label={confirmReset ? 'Bấm lần nữa để khôi phục mẫu' : 'Khôi phục dữ liệu mẫu'}
-                variant={'danger'}
-                icon={'refresh'}
-                onPress={handleReset}
+                label={'Sao lưu JSON'}
+                variant={'soft'}
+                size={'sm'}
+                icon={'download-outline'}
+                style={styles.flex}
+                onPress={handleBackupJson}
               />
-            </>
-          ) : null}
-        </Card>
-      </FadeIn>
+            </View>
+
+            {isTeacher ? (
+              <>
+                <Button
+                  label={showImport ? 'Ẩn khung khôi phục JSON' : 'Khôi phục từ bản sao lưu JSON'}
+                  variant={'ghost'}
+                  size={'sm'}
+                  icon={'code-slash-outline'}
+                  onPress={() => setShowImport((v) => !v)}
+                />
+
+                {showImport ? (
+                  <View style={styles.editor}>
+                    <TextField
+                      label={'Dán nội dung JSON sao lưu'}
+                      placeholder={'{"version":1,"students":[...]}'}
+                      value={importText}
+                      onChangeText={setImportText}
+                      multiline
+                    />
+                    <Button label={'Áp dụng bản sao lưu'} icon={'checkmark'} onPress={handleImportJson} />
+                  </View>
+                ) : null}
+
+                <View style={[styles.divider, { backgroundColor: theme.border }]} />
+                <Button
+                  label={confirmReset ? 'Bấm lần nữa để khôi phục mẫu' : 'Khôi phục dữ liệu mẫu'}
+                  variant={'danger'}
+                  icon={'refresh'}
+                  onPress={handleReset}
+                />
+              </>
+            ) : null}
+          </Card>
+        </FadeIn>
+      ) : null}
 
       <FadeIn index={7}>
         <Text style={[styles.footer, { color: theme.textMuted }]}>

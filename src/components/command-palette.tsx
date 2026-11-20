@@ -119,7 +119,9 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
     fundSummary,
     classStreak,
     isTeacher,
+    canViewAll,
     canEditClass,
+    canAddStudents,
   } = useClassStore();
 
   const [query, setQuery] = useState('');
@@ -236,6 +238,36 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
         badge: 'Mới',
         onSelect: () => go('/insights'),
       },
+      ...(canAddStudents
+        ? [
+            {
+              id: 'act-add-student',
+              section: 'Lệnh nhanh & Trí tuệ',
+              title: 'Thêm học sinh mới',
+              subtitle: `Tạo tài khoản học sinh kèm Số ID & mật khẩu riêng`,
+              keywords: 'them hoc sinh moi tao ho so thanh vien student add id mat khau',
+              icon: 'person-add' as IoniconName,
+              color: 'success' as ThemeColor,
+              soft: 'successSoft' as ThemeColor,
+              onSelect: () => go('/student-form'),
+            },
+          ]
+        : []),
+      ...(isTeacher
+        ? [
+            {
+              id: 'act-bulk-students',
+              section: 'Lệnh nhanh & Trí tuệ',
+              title: 'Nhập nhanh danh sách học sinh',
+              subtitle: 'Dán danh sách tên nhiều học sinh để thêm cùng lúc',
+              keywords: 'nhap nhanh danh sach nhieu hoc sinh bulk student import',
+              icon: 'people-circle' as IoniconName,
+              color: 'accent' as ThemeColor,
+              soft: 'accentSoft' as ThemeColor,
+              onSelect: () => go('/bulk-students'),
+            },
+          ]
+        : []),
       {
         id: 'act-entry',
         section: 'Lệnh nhanh & Trí tuệ',
@@ -321,42 +353,52 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
           showToast(isDark ? 'Đã bật chế độ Sáng ☀️' : 'Đã bật chế độ Tối 🌙', 'info');
         },
       },
-      {
-        id: 'act-report',
-        section: 'Lệnh nhanh & Trí tuệ',
-        title: 'Sao chép Báo cáo Tổng kết Lớp',
-        subtitle: 'Tạo bản tóm tắt gửi ngay vào nhóm Zalo lớp / phụ huynh',
-        keywords: 'bao cao xuat zalo tong ket report export',
-        icon: 'share-social',
-        color: 'success',
-        soft: 'successSoft',
-        onSelect: async () => {
-          onClose();
-          const report = buildClassSummaryReport({
-            classInfo,
-            totals,
-            ranking,
-            fundBalance: fundSummary.balance,
-            streak: classStreak,
-          });
-          const res = await shareOrCopyText(report, `Báo cáo lớp ${classInfo.name}`);
-          showToast(res === 'copied' ? 'Đã sao chép báo cáo lớp!' : 'Đã mở chia sẻ báo cáo!');
-        },
-      },
+      ...(canViewAll
+        ? [
+            {
+              id: 'act-report',
+              section: 'Lệnh nhanh & Trí tuệ',
+              title: 'Sao chép Báo cáo Tổng kết Lớp',
+              subtitle: 'Tạo bản tóm tắt gửi ngay vào nhóm Zalo lớp / phụ huynh',
+              keywords: 'bao cao xuat zalo tong ket report export',
+              icon: 'share-social' as IoniconName,
+              color: 'success' as ThemeColor,
+              soft: 'successSoft' as ThemeColor,
+              onSelect: async () => {
+                onClose();
+                const report = buildClassSummaryReport({
+                  classInfo,
+                  totals,
+                  ranking,
+                  fundBalance: fundSummary.balance,
+                  streak: classStreak,
+                });
+                const res = await shareOrCopyText(report, `Báo cáo lớp ${classInfo.name}`);
+                showToast(
+                  res === 'copied' ? 'Đã sao chép báo cáo lớp!' : 'Đã mở chia sẻ báo cáo!',
+                );
+              },
+            },
+          ]
+        : []),
     ];
 
     const nav: CommandEntry[] = [
-      {
-        id: 'nav-randomizer',
-        section: 'Tiện ích lớp học',
-        title: 'Gọi tên ngẫu nhiên & Chia nhóm',
-        subtitle: 'Vòng quay kiểm tra bài cũ & tách nhóm công bằng',
-        keywords: 'goi ten ngau nhien chia nhom quay randomizer',
-        icon: 'shuffle',
-        color: 'purple',
-        soft: 'purpleSoft',
-        onSelect: () => go('/randomizer'),
-      },
+      ...(canViewAll
+        ? [
+            {
+              id: 'nav-randomizer',
+              section: 'Tiện ích lớp học',
+              title: 'Gọi tên ngẫu nhiên & Chia nhóm',
+              subtitle: 'Vòng quay kiểm tra bài cũ & tách nhóm công bằng',
+              keywords: 'goi ten ngau nhien chia nhom quay randomizer',
+              icon: 'shuffle' as IoniconName,
+              color: 'purple' as ThemeColor,
+              soft: 'purpleSoft' as ThemeColor,
+              onSelect: () => go('/randomizer'),
+            },
+          ]
+        : []),
       {
         id: 'nav-fund',
         section: 'Tiện ích lớp học',
@@ -481,6 +523,8 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
   }, [
     go,
     canEditClass,
+    canViewAll,
+    canAddStudents,
     isTeacher,
     isDark,
     toggleDark,

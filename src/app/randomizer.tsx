@@ -40,7 +40,7 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 export default function RandomizerScreen() {
-  const { students, role, quickReward } = useClassStore();
+  const { students, role, canViewAll, quickReward } = useClassStore();
   const theme = useTheme();
   const gradient = useBrandGradient();
   const { showToast } = useToast();
@@ -194,7 +194,15 @@ export default function RandomizerScreen() {
         })}
       </View>
 
-      {students.length === 0 ? (
+      {!canViewAll ? (
+        <EmptyState
+          icon={'lock-closed-outline'}
+          title={'Chỉ Giáo viên chủ nhiệm được sử dụng'}
+          message={
+            'Chế độ riêng tư đang ẩn danh sách học sinh khác. Chỉ GVCN mới có thể quay gọi tên & chia nhóm cả lớp.'
+          }
+        />
+      ) : students.length === 0 ? (
         <EmptyState
           icon={'people-outline'}
           title={'Chưa có học sinh nào'}

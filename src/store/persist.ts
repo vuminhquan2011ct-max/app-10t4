@@ -36,6 +36,7 @@ import type {
 import type { PersistedState } from './types';
 
 export const STORAGE_KEY = 'class10t4:state:v1';
+export const CLEAR_STUDENTS_MIGRATION_KEY = 'class10t4:students-cleared:v1';
 
 export function freshState(): PersistedState {
   const students = buildInitialStudents();

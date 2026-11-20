@@ -68,8 +68,11 @@ export type PersistedState = {
 };
 
 export type StudentInput = {
+  id?: string;
   name: string;
   code?: string;
+  /** Mật khẩu riêng cho tài khoản học sinh (chỉ dùng để băm lưu bảo mật, không lưu thô vào class_state). */
+  password?: string;
   gender: Student['gender'];
   birthDate?: string | null;
   phone?: string | null;
@@ -150,6 +153,7 @@ export type FeedbackInput = {
 
 export type KudosInput = {
   toStudentId: string;
+  authorStudentId?: string | null;
   sticker: KudosSticker;
   message: string;
   anonymous: boolean;
@@ -164,5 +168,6 @@ export type ResourceInput = {
   description?: string | null;
   pinned?: boolean;
   author?: string;
+  ownerStudentId?: string | null;
 };
 

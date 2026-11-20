@@ -41,9 +41,10 @@ import {
   type StickerRarity,
 } from '@/constants/rewards-meta';
 import { shiftIsoDate, todayIso } from '@/lib/date';
+import { useAuth } from '@/store/auth-store';
 import { useThemePreference } from '@/store/theme-store';
 
-const DECOR_STORAGE_KEY = 'class10t4:decor:v1';
+const DECOR_STORAGE_PREFIX = 'class10t4:decor:v2:';
 
 export type AssistantTabKey = 'chat' | 'guide' | 'actions';
 
@@ -318,9 +319,11 @@ function rollWeightedRarity(weights: Partial<Record<StickerRarity, number>>): St
 }
 
 export function DecorProvider({ children }: { children: ReactNode }) {
+  const { accountScopeKey } = useAuth();
   const { setMode, setAccentKey } = useThemePreference();
   const [state, setState] = useState<StoredDecor>(DEFAULT_DECOR);
-  const [loaded, setLoaded] = useState(false);
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
+  const loaded = loadedScope === accountScopeKey;
 
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantTab, setAssistantTab] = useState<AssistantTabKey>('chat');
@@ -328,31 +331,58 @@ export function DecorProvider({ children }: { children: ReactNode }) {
   const [celebrationTrigger, setCelebrationTrigger] = useState(0);
   const [loginRewardModalOpen, setLoginRewardModalOpen] = useState(false);
 
-  // Hydrate from AsyncStorage
+  // Hydrate isolated per-account decor, coins, stickers & missions from AsyncStorage
   useEffect(() => {
     let active = true;
-    AsyncStorage.getItem(DECOR_STORAGE_KEY)
+
+    if (accountScopeKey === 'guest') {
+      Promise.resolve().then(() => {
+        if (!active) return;
+        setState(DEFAULT_DECOR);
+        setAssistantOpen(false);
+        setActiveTourStep(null);
+        setLoginRewardModalOpen(false);
+        setLoadedScope('guest');
+      });
+      return () => {
+        active = false;
+      };
+    }
+
+    const storageKey = `${DECOR_STORAGE_PREFIX}${accountScopeKey}`;
+    AsyncStorage.getItem(storageKey)
       .then((raw) => {
-        if (!active || !raw) return;
+        if (!active) return;
+        setAssistantOpen(false);
+        setActiveTourStep(null);
+        setLoginRewardModalOpen(false);
+
+        if (!raw) {
+          setState(DEFAULT_DECOR);
+          return;
+        }
         const parsed = JSON.parse(raw) as Partial<StoredDecor> | null;
-        if (!parsed || typeof parsed !== 'object') return;
-        setState((prev) => ({
-          ...prev,
+        if (!parsed || typeof parsed !== 'object') {
+          setState(DEFAULT_DECOR);
+          return;
+        }
+        setState({
+          ...DEFAULT_DECOR,
           ...parsed,
           mascotId:
-            parsed.mascotId && parsed.mascotId in MASCOTS ? parsed.mascotId : prev.mascotId,
+            parsed.mascotId && parsed.mascotId in MASCOTS ? parsed.mascotId : DEFAULT_DECOR.mascotId,
           heroStickerIds: Array.isArray(parsed.heroStickerIds)
             ? parsed.heroStickerIds.slice(0, 6)
-            : prev.heroStickerIds,
+            : DEFAULT_DECOR.heroStickerIds,
           canvasItems: Array.isArray(parsed.canvasItems)
             ? parsed.canvasItems
-            : prev.canvasItems,
+            : DEFAULT_DECOR.canvasItems,
           unlockedStickers: Array.isArray(parsed.unlockedStickers)
             ? Array.from(new Set([...STARTER_UNLOCKED_STICKERS, ...parsed.unlockedStickers]))
-            : prev.unlockedStickers,
+            : DEFAULT_DECOR.unlockedStickers,
           completedQuests: Array.isArray(parsed.completedQuests)
             ? parsed.completedQuests
-            : prev.completedQuests,
+            : DEFAULT_DECOR.completedQuests,
           coins: typeof parsed.coins === 'number' && Number.isFinite(parsed.coins) ? parsed.coins : 0,
           totalCoinsEarned:
             typeof parsed.totalCoinsEarned === 'number' && Number.isFinite(parsed.totalCoinsEarned)
@@ -372,22 +402,26 @@ export function DecorProvider({ children }: { children: ReactNode }) {
               ? parsed.missionProgress
               : {},
           claimedMissions: Array.isArray(parsed.claimedMissions) ? parsed.claimedMissions : [],
-        }));
+        });
       })
-      .catch(() => {})
+      .catch(() => {
+        if (active) setState(DEFAULT_DECOR);
+      })
       .finally(() => {
-        if (active) setLoaded(true);
+        if (active) setLoadedScope(accountScopeKey);
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [accountScopeKey]);
 
-  // Persist on changes
+  // Persist changes ONLY to the currently hydrated account scope
   useEffect(() => {
-    if (!loaded) return;
-    AsyncStorage.setItem(DECOR_STORAGE_KEY, JSON.stringify(state)).catch(() => {});
-  }, [state, loaded]);
+    if (!loaded || accountScopeKey === 'guest') return;
+    AsyncStorage.setItem(`${DECOR_STORAGE_PREFIX}${accountScopeKey}`, JSON.stringify(state)).catch(
+      () => {},
+    );
+  }, [state, loaded, accountScopeKey]);
 
   const triggerCelebration = useCallback(() => {
     setCelebrationTrigger((n) => n + 1);

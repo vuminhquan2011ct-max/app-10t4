@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -15,10 +16,12 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
 import { GROUP_PRESETS } from '@/constants/entry-meta';
-import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
+import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { stripVietnamese } from '@/lib/intelligence';
+import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
+import { useDecor } from '@/store/decor-store';
 
 type SortKey = 'points' | 'name' | 'entries';
 type SmartFilter = 'all' | 'officers' | 'unpaid' | 'zero';
@@ -43,17 +46,26 @@ const SMART_FILTERS: { key: SmartFilter; label: string }[] = [
 ];
 
 export default function StudentsScreen() {
+  const auth = useAuth();
+  const decor = useDecor();
   const {
+    classInfo,
     ranking,
+    currentStudent,
     statsOfStudent,
     attendanceStatsOfStudent,
     seatOfStudent,
+    kudosOfStudent,
     fundPaid,
+    isTeacher,
+    canViewAll,
     canEditClass,
+    canAddStudents,
     quickReward,
     pullNow,
   } = useClassStore();
   const theme = useTheme();
+  const gradient = useBrandGradient();
   const { showToast } = useToast();
   const [query, setQuery] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
@@ -101,19 +113,180 @@ export default function StudentsScreen() {
     return filtered;
   }, [ranking, query, groupFilter, smartFilter, sortBy, statsOfStudent, fundPaid]);
 
+  /* ==================== PRIVATE STUDENT VIEW (Non-GVCN) ==================== */
+  if (!canViewAll) {
+    const myStats = currentStudent ? statsOfStudent(currentStudent.id) : null;
+    const myAtt = currentStudent ? attendanceStatsOfStudent(currentStudent.id) : null;
+    const mySeat = currentStudent ? seatOfStudent(currentStudent.id) : null;
+    const myKudos = currentStudent ? kudosOfStudent(currentStudent.id).length : 0;
+
+    return (
+      <Screen onRefresh={pullNow}>
+        <FadeIn index={0}>
+          <SectionHeader
+            large
+            title={'Trang của tôi'}
+            subtitle={'Không gian cá nhân riêng tư · Chỉ bạn & GVCN xem được'}
+          />
+        </FadeIn>
+
+        {currentStudent && myStats ? (
+          <FadeIn index={1}>
+            <LinearGradient
+              colors={gradient}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={[
+                styles.myHero,
+                Shadow.floating,
+                { shadowColor: gradient[0], shadowOpacity: 0.28 },
+              ]}>
+              <View style={styles.myBubbleA} />
+              <View style={styles.myBubbleB} />
+
+              <View style={styles.myHeroTop}>
+                <Avatar name={currentStudent.name} size={66} ring frame={decor.avatarFrame} />
+                <View style={styles.flex}>
+                  <View style={styles.idPill}>
+                    <Ionicons name="id-card" size={12} color="#FFFFFF" />
+                    <Text style={styles.idPillText}>{`ID: ${currentStudent.code}`}</Text>
+                  </View>
+                  <Text style={styles.myHeroName} numberOfLines={2}>
+                    {currentStudent.name}
+                  </Text>
+                  <Text style={styles.myHeroMeta} numberOfLines={1}>
+                    {[
+                      `Lớp ${classInfo.name}`,
+                      currentStudent.group || 'Chưa phân tổ',
+                      currentStudent.position?.trim(),
+                      mySeat?.label,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.myStatsBar}>
+                <View style={styles.myStatBox}>
+                  <Text style={styles.myStatVal}>{myStats.points}</Text>
+                  <Text style={styles.myStatLab}>Điểm</Text>
+                </View>
+                <View style={styles.myStatBox}>
+                  <Text style={styles.myStatVal}>{myStats.total}</Text>
+                  <Text style={styles.myStatLab}>Bài đăng</Text>
+                </View>
+                <View style={styles.myStatBox}>
+                  <Text style={styles.myStatVal}>
+                    {myAtt?.rate !== null && myAtt?.rate !== undefined ? `${myAtt.rate}%` : '--'}
+                  </Text>
+                  <Text style={styles.myStatLab}>Chuyên cần</Text>
+                </View>
+                <View style={styles.myStatBox}>
+                  <Text style={styles.myStatVal}>{myKudos}</Text>
+                  <Text style={styles.myStatLab}>Kudos</Text>
+                </View>
+              </View>
+
+              <View style={styles.myHeroBtns}>
+                <Pressable
+                  onPress={() =>
+                    router.push({
+                      pathname: '/student/[id]',
+                      params: { id: currentStudent.id },
+                    } as never)
+                  }
+                  style={({ pressed }) => [styles.heroWhiteBtn, pressed && { opacity: 0.85 }]}>
+                  <Ionicons name="person-circle" size={16} color={gradient[0]} />
+                  <Text style={[styles.heroWhiteBtnText, { color: gradient[0] }]}>
+                    Mở hồ sơ của tôi
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() =>
+                    router.push({
+                      pathname: '/entry-form',
+                      params: { studentId: currentStudent.id },
+                    } as never)
+                  }
+                  style={({ pressed }) => [styles.heroGlassBtn, pressed && { opacity: 0.85 }]}>
+                  <Ionicons name="add-circle" size={16} color="#FFFFFF" />
+                  <Text style={styles.heroGlassBtnText}>Đăng thành tích</Text>
+                </Pressable>
+              </View>
+            </LinearGradient>
+          </FadeIn>
+        ) : (
+          <FadeIn index={1}>
+            <EmptyState
+              icon={'lock-closed-outline'}
+              title={'Chế độ riêng tư lớp ' + classInfo.name}
+              message={
+                'Chỉ Giáo viên chủ nhiệm mới xem được toàn bộ danh sách học sinh trong lớp.'
+              }
+            />
+          </FadeIn>
+        )}
+
+        {/* Actions: Add new student account (with own unique ID & password) or Switch account */}
+        <FadeIn index={2} style={styles.ctaRow}>
+          {canAddStudents ? (
+            <Button
+              label={'Thêm học sinh mới'}
+              icon={'person-add'}
+              style={styles.flex}
+              onPress={() => router.push('/student-form' as never)}
+            />
+          ) : null}
+          <Button
+            label={'Đổi tài khoản'}
+            variant={'soft'}
+            icon={'log-out-outline'}
+            onPress={() => {
+              auth.signOut();
+              showToast('Đã đăng xuất — hãy nhập Số ID & mật khẩu để vào tài khoản khác', 'info');
+            }}
+          />
+        </FadeIn>
+
+        {/* Privacy Shield Explanation Card */}
+        <FadeIn index={3}>
+          <Card style={[styles.privacyCard, { borderColor: theme.accent }]}>
+            <View style={styles.privacyHead}>
+              <View style={[styles.privacyIcon, { backgroundColor: theme.accentSoft }]}>
+                <Ionicons name="shield-checkmark" size={19} color={theme.accent} />
+              </View>
+              <View style={styles.flex}>
+                <Text style={[styles.privacyTitle, { color: theme.text }]}>
+                  Không gian riêng tư đang được bảo vệ 🔒
+                </Text>
+                <Text style={{ color: theme.textSecondary, fontSize: 12.5, lineHeight: 19 }}>
+                  Mỗi học sinh có Số ID và mật khẩu tự đặt riêng. Bạn chỉ thấy trang tên, bài đăng,
+                  Kudos, Xu & Sticker của chính mình. Khi bạn thêm học sinh mới, tài khoản đó cũng
+                  được bảo vệ riêng biệt — chỉ Giáo viên chủ nhiệm mới xem được tất cả!
+                </Text>
+              </View>
+            </View>
+          </Card>
+        </FadeIn>
+      </Screen>
+    );
+  }
+
+  /* ==================== HOMEROOM TEACHER FULL ROSTER VIEW ==================== */
   return (
     <Screen onRefresh={pullNow}>
       <FadeIn index={0}>
         <SectionHeader
           large
-          title={'Học sinh'}
-          subtitle={rows.length + ' / ' + ranking.length + ' học sinh'}
-          actionLabel={'Sơ đồ ghế'}
-          onAction={() => router.push('/seating' as never)}
+          title={'Tất cả học sinh'}
+          subtitle={rows.length + ' / ' + ranking.length + ' học sinh · Quyền GVCN'}
+          actionLabel={'Tài khoản & MK'}
+          onAction={() => router.push('/members' as never)}
         />
       </FadeIn>
 
-      {canEditClass ? (
+      {canAddStudents ? (
         <FadeIn index={1} style={styles.ctaRow}>
           <Button
             label={'Thêm học sinh'}
@@ -121,19 +294,21 @@ export default function StudentsScreen() {
             style={styles.flex}
             onPress={() => router.push('/student-form' as never)}
           />
-          <Button
-            label={'Nhập nhanh DS'}
-            variant={'soft'}
-            icon={'list'}
-            onPress={() => router.push('/bulk-students' as never)}
-          />
+          {isTeacher ? (
+            <Button
+              label={'Nhập nhanh DS'}
+              variant={'soft'}
+              icon={'list'}
+              onPress={() => router.push('/bulk-students' as never)}
+            />
+          ) : null}
         </FadeIn>
       ) : null}
 
       <FadeIn index={2}>
         <TextField
           icon={'search'}
-          placeholder={'Tìm theo tên, mã số, chức vụ...'}
+          placeholder={'Tìm theo tên, Số ID, chức vụ...'}
           value={query}
           onChangeText={setQuery}
         />
@@ -186,8 +361,12 @@ export default function StudentsScreen() {
       {rows.length === 0 ? (
         <EmptyState
           icon={'people-outline'}
-          title={'Không tìm thấy học sinh'}
-          message={'Thử đổi từ khóa hoặc chọn lại bộ lọc.'}
+          title={ranking.length === 0 ? 'Chưa có học sinh nào' : 'Không tìm thấy học sinh'}
+          message={
+            ranking.length === 0
+              ? 'Bấm "Thêm học sinh" hoặc "Nhập nhanh DS" ở trên để tạo tài khoản học sinh kèm Số ID & mật khẩu riêng.'
+              : 'Thử đổi từ khóa hoặc chọn lại bộ lọc.'
+          }
         />
       ) : (
         rows.map((row, i) => {
@@ -230,7 +409,12 @@ export default function StudentsScreen() {
                     </Text>
                   </View>
                   <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
-                    {[row.student.code, row.student.group ?? 'Chưa phân tổ', seat ? `H${seat.row}·G${seat.col}` : null, `${stats.total} mục`]
+                    {[
+                      `ID: ${row.student.code}`,
+                      row.student.group ?? 'Chưa phân tổ',
+                      seat ? `H${seat.row}·G${seat.col}` : null,
+                      `${stats.total} bài`,
+                    ]
                       .filter(Boolean)
                       .join(' · ')}
                   </Text>
@@ -256,7 +440,14 @@ export default function StudentsScreen() {
                   {canEditClass ? (
                     <Pressable
                       onPress={() => {
-                        quickReward(row.student.id, 'Phát biểu & tích cực trên lớp', 1, 'study', 'activity', 'class');
+                        quickReward(
+                          row.student.id,
+                          'Phát biểu & tích cực trên lớp',
+                          1,
+                          'study',
+                          'activity',
+                          'class',
+                        );
                         showToast(`Đã thưởng nhanh +1đ cho ${row.student.name}! ⚡`);
                       }}
                       hitSlop={6}
@@ -284,6 +475,93 @@ const styles = StyleSheet.create({
   chips: { gap: Spacing.two, paddingRight: Spacing.two },
   sortRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   sortLabel: { fontSize: 12, fontWeight: '700' },
+  myHero: {
+    padding: Spacing.four,
+    borderRadius: Radius.xl,
+    gap: Spacing.three,
+    overflow: 'hidden',
+  },
+  myBubbleA: {
+    position: 'absolute',
+    width: 190,
+    height: 190,
+    borderRadius: 95,
+    top: -80,
+    right: -45,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  myBubbleB: {
+    position: 'absolute',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    bottom: -55,
+    left: -30,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  myHeroTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
+  idPill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: Radius.pill,
+  },
+  idPillText: { color: '#FDE68A', fontSize: 11, fontWeight: '900', letterSpacing: 0.4 },
+  myHeroName: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '900',
+    letterSpacing: -0.4,
+    marginTop: 4,
+  },
+  myHeroMeta: { color: 'rgba(255,255,255,0.88)', fontSize: 12, fontWeight: '600', marginTop: 2 },
+  myStatsBar: { flexDirection: 'row', gap: Spacing.two },
+  myStatBox: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderRadius: Radius.md,
+    paddingVertical: 9,
+    alignItems: 'center',
+  },
+  myStatVal: { color: '#FFFFFF', fontSize: 17, fontWeight: '900' },
+  myStatLab: { color: 'rgba(255,255,255,0.86)', fontSize: 10, fontWeight: '700', marginTop: 1 },
+  myHeroBtns: { flexDirection: 'row', gap: Spacing.two },
+  heroWhiteBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 11,
+    borderRadius: Radius.md,
+  },
+  heroWhiteBtnText: { fontSize: 13, fontWeight: '900' },
+  heroGlassBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    paddingVertical: 11,
+    borderRadius: Radius.md,
+  },
+  heroGlassBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
+  privacyCard: { borderWidth: 1, gap: Spacing.two },
+  privacyHead: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.two + 2 },
+  privacyIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  privacyTitle: { fontSize: 14, fontWeight: '900', marginBottom: 3 },
   row: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
   avatarWrap: { width: 50, height: 50 },
   rankBadge: {

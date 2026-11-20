@@ -42,6 +42,7 @@ export default function KudosScreen() {
     students,
     kudos,
     currentStudentId,
+    canViewAll,
     canEditClass,
     getStudent,
     sendKudos,
@@ -129,8 +130,12 @@ export default function KudosScreen() {
   return (
     <Screen withTabBar={false} onRefresh={pullNow}>
       <PageHeader
-        title={'Bức tường Kudos'}
-        subtitle={`Lan toả năng lượng tích cực lớp ${classInfo.name}`}
+        title={canViewAll ? 'Bức tường Kudos' : 'Kudos của tôi'}
+        subtitle={
+          canViewAll
+            ? `Lan toả năng lượng tích cực lớp ${classInfo.name}`
+            : 'Lời khen bạn đăng & nhận · Chỉ bạn & GVCN thấy'
+        }
         rightIcon={composerOpen ? 'close' : 'heart'}
         rightLabel={composerOpen ? 'Đóng' : 'Gửi khen'}
         onRightPress={() => setComposerOpen((v) => !v)}

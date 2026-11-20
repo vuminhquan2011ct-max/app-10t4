@@ -349,19 +349,19 @@ export function answerAssistantMessage(
         actionRoute: '/studio',
       };
     }
-    if (q.includes('nhieu hoc sinh') || q.includes('nhap nhanh')) {
+    if (q.includes('nhieu hoc sinh') || q.includes('nhap nhanh') || q.includes('them hoc sinh')) {
       return {
-        title: 'Cách thêm nhanh cả lớp cùng lúc 👥',
-        badge: 'GVCN / Cán sự',
-        summary: 'Không cần gõ từng người một — dùng tính năng Nhập nhanh:',
+        title: 'Cách thêm học sinh vào lớp 👥',
+        badge: 'Mọi thành viên',
+        summary: 'Cả GVCN và học sinh đều có thể thêm học sinh mới hoặc nhập nhanh cả danh sách:',
         bullets: [
-          'Mở tab Tiện ích → chọn "Nhập nhanh cả lớp".',
+          'Mở tab Học sinh → bấm "Thêm học sinh" để tạo từng hồ sơ hoặc "Nhập nhanh DS" để thêm nhiều bạn cùng lúc.',
           'Dán danh sách tên học sinh (mỗi dòng 1 tên từ Excel/Zalo).',
           'Hệ thống tự động tạo mã số 10T4 và chia đều vào 4 Tổ chỉ trong 1 giây!',
         ],
         mood: 'happy',
-        actionLabel: 'Mở Nhập nhanh',
-        actionRoute: '/bulk-students',
+        actionLabel: 'Mở Thêm học sinh',
+        actionRoute: '/student-form',
       };
     }
     if (q.includes('sao luu') || q.includes('backup') || q.includes('json')) {

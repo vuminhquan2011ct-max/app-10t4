@@ -30,6 +30,7 @@ export default function FundScreen() {
   const {
     classInfo,
     role,
+    canViewAll,
     students,
     fundTransactions,
     fundPaid,
@@ -160,7 +161,9 @@ export default function FundScreen() {
             { key: 'ledger', label: `Sổ Thu Chi (${fundTransactions.length})`, icon: 'receipt-outline' },
             {
               key: 'dues',
-              label: `Đóng quỹ (${fundSummary.paidCount}/${students.length})`,
+              label: canViewAll
+                ? `Đóng quỹ (${fundSummary.paidCount}/${students.length})`
+                : 'Đóng quỹ của tôi',
               icon: 'people-outline',
             },
           ] as const

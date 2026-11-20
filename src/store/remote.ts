@@ -12,7 +12,7 @@ import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import type { StudentPrivateData } from '@/types/auth';
 import type { ClassResource, Entry, FeedbackCategory, FeedbackItem, KudosItem } from '@/types/models';
 
-import type { PersistedState } from './types';
+import type { PersistedState, StudentInput } from './types';
 
 export const REMOTE_ROW_ID = 'class10t4';
 
@@ -87,6 +87,32 @@ export async function clapKudosRemote(kudosId: string): Promise<void> {
 
 export async function addResourceRemote(resource: ClassResource): Promise<void> {
   const { error } = await supabase.rpc('app_add_resource', { resource });
+  if (error) throw error;
+}
+
+export async function addStudentRemote(student: StudentInput): Promise<void> {
+  const payload = {
+    id: student.id,
+    name: student.name,
+    code: student.code,
+    gender: student.gender,
+    birthDate: student.birthDate ?? null,
+    group: student.group ?? null,
+    position: student.position ?? null,
+  };
+  const { error } = await supabase.rpc('app_add_student', { student: payload });
+  if (error) throw error;
+}
+
+export async function bulkAddStudentsRemote(
+  names: string[],
+  options?: { group?: string | null; autoDistributeGroups?: boolean },
+): Promise<void> {
+  const { error } = await supabase.rpc('app_bulk_add_students', {
+    names,
+    group_name: options?.group ?? null,
+    auto_distribute_groups: Boolean(options?.autoDistributeGroups),
+  });
   if (error) throw error;
 }
 
