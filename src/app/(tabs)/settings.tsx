@@ -83,6 +83,7 @@ export default function SettingsScreen() {
 
   // Teacher / Subject Teacher role switch password verification
   const [pendingRole, setPendingRole] = useState<AccountRole | null>(null);
+  const [teacherSwitchId, setTeacherSwitchId] = useState('');
   const [teacherPass, setTeacherPass] = useState('');
   const [showTeacherPass, setShowTeacherPass] = useState(false);
   const [teacherPassError, setTeacherPassError] = useState<string | null>(null);
@@ -179,6 +180,10 @@ export default function SettingsScreen() {
     }
   };
 
+  const canChangeOwnPass =
+    (auth.accountRole === 'student' && Boolean(auth.studentId)) ||
+    ((isTeacher || isSubjectTeacher) && Boolean(auth.teacherId));
+
   const handleChangeOwnPassword = async () => {
     setPassError(null);
     if (!curPass.trim()) {
@@ -193,7 +198,10 @@ export default function SettingsScreen() {
       setPassError('Mật khẩu xác nhận không khớp!');
       return;
     }
-    const res = await auth.changeStudentPassword(curPass, newPass);
+    const res =
+      auth.accountRole === 'student'
+        ? await auth.changeStudentPassword(curPass, newPass)
+        : await auth.changeTeacherPassword(curPass, newPass);
     if (!res.ok) {
       setPassError(res.error ?? 'Không thể đổi mật khẩu');
       return;
@@ -280,6 +288,7 @@ export default function SettingsScreen() {
     if (target === auth.accountRole && target === 'teacher') return;
 
     setPendingRole(target);
+    setTeacherSwitchId('');
     setTeacherPass('');
     setPickedSubject(subjectName || SUBJECT_TEACHER_PRESETS[0].subject);
     setTeacherDisplayDraft(auth.profile?.displayName ?? '');
@@ -289,6 +298,7 @@ export default function SettingsScreen() {
     if (!pendingRole) return;
     setTeacherPassError(null);
     const res = await auth.switchAccountRole(pendingRole, {
+      loginId: teacherSwitchId.trim() || undefined,
       password: teacherPass,
       subjectName: pendingRole === 'subject_teacher' ? pickedSubject : null,
       displayName: teacherDisplayDraft.trim() || undefined,
@@ -303,10 +313,14 @@ export default function SettingsScreen() {
     if (Platform.OS !== 'web') {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     }
+    const resolvedSubject = res.account?.subject || pickedSubject;
     const label =
       pendingRole === 'subject_teacher'
-        ? `Giáo viên bộ môn (${pickedSubject})`
-        : 'Giáo viên chủ nhiệm';
+        ? `Giáo viên bộ môn (${resolvedSubject})`
+        : res.account
+          ? `Giáo viên chủ nhiệm (${res.account.name})`
+          : 'Giáo viên chủ nhiệm';
+    setTeacherSwitchId('');
     setTeacherPass('');
     setPendingRole(null);
     showToast(`Đã chuyển sang tài khoản ${label}! 🛡️`);
@@ -447,8 +461,8 @@ export default function SettingsScreen() {
             </View>
           )}
 
-          {/* Student Personal Password Change */}
-          {auth.accountRole === 'student' && auth.studentId ? (
+          {/* Personal Password Change (Students & Personal Teacher Accounts) */}
+          {canChangeOwnPass ? (
             changingPass ? (
               <View
                 style={[
@@ -523,9 +537,18 @@ export default function SettingsScreen() {
             )
           ) : null}
 
+          {isTeacher || isSubjectTeacher ? (
+            <Button
+              label={'Tạo tài khoản giáo viên mới'}
+              icon={'person-add'}
+              size={'sm'}
+              onPress={() => router.push('/teacher-form' as never)}
+            />
+          ) : null}
+
           {isTeacher ? (
             <Button
-              label={'Quản lý Tài khoản Học sinh (ID & MK) & Nhật ký'}
+              label={'Quản lý Tài khoản (GV & HS) & Nhật ký'}
               variant={'soft'}
               size={'sm'}
               icon={'shield-checkmark'}
@@ -863,8 +886,22 @@ export default function SettingsScreen() {
                 {(auth.accountRole === 'student' ||
                   (auth.accountRole === 'subject_teacher' && pendingRole === 'teacher')) ? (
                   <View style={styles.passGroup}>
+                    <TextField
+                      label={'Mã ID giáo viên (để trống nếu dùng mã GV lớp)'}
+                      icon={'id-card-outline'}
+                      placeholder={pendingRole === 'subject_teacher' ? 'VD: GVBM-01' : 'VD: GVCN-01'}
+                      value={teacherSwitchId}
+                      onChangeText={(t) => {
+                        if (teacherPassError) setTeacherPassError(null);
+                        setTeacherSwitchId(t);
+                      }}
+                      autoCapitalize={'characters'}
+                      autoCorrect={false}
+                    />
                     <Text style={[styles.sub, { color: theme.textSecondary }]}>
-                      Mật khẩu tài khoản Giáo viên
+                      {teacherSwitchId.trim()
+                        ? 'Mật khẩu riêng của tài khoản Giáo viên'
+                        : 'Mật khẩu xác thực Giáo viên lớp'}
                     </Text>
                     <View
                       style={[
@@ -881,7 +918,11 @@ export default function SettingsScreen() {
                           if (teacherPassError) setTeacherPassError(null);
                           setTeacherPass(t);
                         }}
-                        placeholder={'Nhập mật khẩu giáo viên...'}
+                        placeholder={
+                          teacherSwitchId.trim()
+                            ? 'Nhập mật khẩu cá nhân của tài khoản...'
+                            : 'Nhập mật khẩu giáo viên...'
+                        }
                         placeholderTextColor={theme.textMuted}
                         secureTextEntry={!showTeacherPass}
                         autoCapitalize="none"
@@ -934,7 +975,33 @@ export default function SettingsScreen() {
                   />
                 ) : null}
               </View>
-            ) : null}
+            ) : (
+              <View style={styles.pickWrap}>
+                <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 18 }}>
+                  🛡️ Giáo viên có thể tạo thêm tài khoản giáo viên mới (GV Chủ nhiệm / GV Bộ môn)
+                  với Mã ID & mật khẩu riêng để mỗi Thầy/Cô đăng nhập độc lập.
+                </Text>
+                <View style={styles.backupActions}>
+                  <Button
+                    label={'Tạo TK giáo viên mới'}
+                    variant={'soft'}
+                    size={'sm'}
+                    icon={'person-add'}
+                    style={styles.flex}
+                    onPress={() => router.push('/teacher-form' as never)}
+                  />
+                  {canAddStudents ? (
+                    <Button
+                      label={'Tạo TK học sinh'}
+                      variant={'ghost'}
+                      size={'sm'}
+                      icon={'person-add-outline'}
+                      onPress={() => router.push('/student-form' as never)}
+                    />
+                  ) : null}
+                </View>
+              </View>
+            )}
           </Card>
         </FadeIn>
       ) : null}

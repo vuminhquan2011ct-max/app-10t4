@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { Spacing } from '@/constants/theme';
+import { Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 type SectionHeaderProps = {
@@ -13,14 +13,21 @@ type SectionHeaderProps = {
   large?: boolean;
 };
 
-/** Title row above a block of content, with an optional action link. */
+/** Editorial title row above a block of content, with an accent indicator bar and optional action pill. */
 export function SectionHeader({ title, subtitle, actionLabel, onAction, large }: SectionHeaderProps) {
   const theme = useTheme();
 
   return (
     <View style={[styles.row, large && styles.rowLarge]}>
       <View style={styles.texts}>
-        <Text style={[styles.title, large && styles.titleLarge, { color: theme.text }]}>{title}</Text>
+        <View style={styles.titleRow}>
+          {!large ? (
+            <View style={[styles.accentBar, { backgroundColor: theme.accent }]} />
+          ) : null}
+          <Text style={[styles.title, large && styles.titleLarge, { color: theme.text }]}>
+            {title}
+          </Text>
+        </View>
         {subtitle ? (
           <Text style={[styles.subtitle, { color: theme.textSecondary }]}>{subtitle}</Text>
         ) : null}
@@ -31,7 +38,10 @@ export function SectionHeader({ title, subtitle, actionLabel, onAction, large }:
           hitSlop={8}
           style={({ pressed }) => [
             styles.actionWrap,
-            { backgroundColor: theme.accentSoft },
+            {
+              backgroundColor: theme.accentSoft,
+              borderColor: `${theme.accent}2E`,
+            },
             pressed && styles.pressed,
           ]}>
           <Text style={[styles.action, { color: theme.accentText }]}>{actionLabel}</Text>
@@ -51,19 +61,30 @@ const styles = StyleSheet.create({
     marginTop: Spacing.two,
   },
   rowLarge: { marginTop: Spacing.one },
-  texts: { flex: 1, gap: 2 },
-  title: { fontSize: 18, fontWeight: '800', letterSpacing: -0.2 },
-  titleLarge: { fontSize: 28, fontWeight: '900', letterSpacing: -0.6 },
-  subtitle: { fontSize: 13 },
+  texts: { flex: 1, gap: 3 },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  accentBar: {
+    width: 4,
+    height: 16,
+    borderRadius: 2,
+  },
+  title: { fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
+  titleLarge: { fontSize: 28, fontWeight: '900', letterSpacing: -0.7 },
+  subtitle: { fontSize: 13, lineHeight: 18 },
   actionWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 3,
     paddingLeft: 12,
-    paddingRight: 8,
+    paddingRight: 9,
     paddingVertical: 6,
-    borderRadius: 999,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
   },
-  action: { fontSize: 13, fontWeight: '700' },
-  pressed: { opacity: 0.7 },
+  action: { fontSize: 12.5, fontWeight: '800' },
+  pressed: { opacity: 0.75, transform: [{ scale: 0.97 }] },
 });

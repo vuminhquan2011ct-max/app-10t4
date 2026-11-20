@@ -1,13 +1,13 @@
 /**
- * Role-Aware & Per-Student Private Sign-In Gate rendered before the class workspace.
+ * Role-Aware & Per-Account Private Sign-In Gate rendered before the class workspace.
  *
  * - Students sign in or register with their own unique Login ID (Số ID) &
  *   self-chosen personal password. Duplicate IDs with wrong passwords are
  *   strictly rejected.
- * - Each student only sees their own profile page, own posts, and isolated
- *   personal app usage (Coins, Stickers, Missions, Decor, Focus timer).
- * - Subject Teachers (`subject_teacher`) & Homeroom Teacher (`teacher`)
- *   authenticate using the dedicated teacher password (`K8T4`). Only GVCN sees all.
+ * - Subject Teachers (`subject_teacher`) & Homeroom Teachers (`teacher`) can
+ *   BOTH create their own personal Teacher Account (unique Mã ID + personal
+ *   password, authorized by the class teacher code `K8T4`) AND sign in using
+ *   their personal Mã ID + password (or quick-login via `K8T4`). Only GVCN sees all.
  */
 
 import { Ionicons } from '@expo/vector-icons';
@@ -46,10 +46,17 @@ import {
   suggestNextLoginId,
   validateLoginId,
 } from '@/lib/student-accounts';
+import {
+  MIN_TEACHER_PASSWORD_LENGTH,
+  isTeacherLoginIdTaken,
+  suggestNextTeacherLoginId,
+  validateTeacherLoginId,
+  type TeacherRole,
+} from '@/lib/teacher-accounts';
 import { useAuth, type AccountRole } from '@/store/auth-store';
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
-type StudentAuthTab = 'login' | 'register';
+type AuthSubTab = 'login' | 'register';
 
 const ROLE_TABS: { key: AccountRole; label: string; icon: IoniconName }[] = [
   { key: 'student', label: 'Học sinh', icon: 'person' },
@@ -65,9 +72,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const { showToast } = useToast();
 
   const [mode, setMode] = useState<AccountRole>('student');
-  const [pickedStudentTab, setPickedStudentTab] = useState<StudentAuthTab | null>(null);
-  const studentTab: StudentAuthTab =
+  const [pickedStudentTab, setPickedStudentTab] = useState<AuthSubTab | null>(null);
+  const studentTab: AuthSubTab =
     pickedStudentTab ?? (auth.studentAccountCount === 0 ? 'register' : 'login');
+
+  const [teacherTab, setTeacherTab] = useState<AuthSubTab>('login');
 
   // Student Login / Register fields
   const [studentName, setStudentName] = useState('');
@@ -79,14 +88,20 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [showDuplicateLoginHint, setShowDuplicateLoginHint] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  // Teacher / Subject Teacher fields
+  // Teacher / Subject Teacher Login & Register fields
+  const [teacherLoginId, setTeacherLoginId] = useState('');
   const [teacherPassword, setTeacherPassword] = useState('');
+  const [teacherConfirmPass, setTeacherConfirmPass] = useState('');
+  const [teacherAccessCode, setTeacherAccessCode] = useState('');
   const [teacherDisplayName, setTeacherDisplayName] = useState('');
   const [subject, setSubject] = useState(SUBJECT_TEACHER_PRESETS[0].subject);
   const [customSubject, setCustomSubject] = useState('');
+  const [takenTeacherIdMatch, setTakenTeacherIdMatch] = useState<string | null>(null);
+  const [showTeacherDuplicateHint, setShowTeacherDuplicateHint] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
   const cleanIdPreview = normalizeLoginIdDisplay(studentLoginId);
+  const cleanTeacherIdPreview = normalizeLoginIdDisplay(teacherLoginId);
 
   // Live duplicate-ID check when student is on Register tab
   useEffect(() => {
@@ -105,6 +120,23 @@ export function AuthGate({ children }: { children: ReactNode }) {
     };
   }, [mode, studentTab, cleanIdPreview]);
 
+  // Live duplicate-ID check when teacher is on Register tab
+  useEffect(() => {
+    if (mode === 'student' || teacherTab !== 'register' || !cleanTeacherIdPreview) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      isTeacherLoginIdTaken(cleanTeacherIdPreview)
+        .then((taken) => {
+          if (active) setTakenTeacherIdMatch(taken ? cleanTeacherIdPreview : null);
+        })
+        .catch(() => {});
+    }, 180);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [mode, teacherTab, cleanTeacherIdPreview]);
+
   if (auth.loading) {
     return (
       <View style={[styles.center, { backgroundColor: theme.background }]}>
@@ -122,8 +154,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   const effectiveSubject = customSubject.trim() || subject;
   const isTeacherTab = mode === 'teacher' || mode === 'subject_teacher';
+  const activeTeacherRole: TeacherRole = mode === 'subject_teacher' ? 'subject_teacher' : 'teacher';
   const activeError = localError || auth.error;
   const strength = evaluatePasswordStrength(studentPassword);
+  const teacherStrength = evaluatePasswordStrength(teacherPassword);
+
   const idTaken =
     mode === 'student' &&
     studentTab === 'register' &&
@@ -132,16 +167,33 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const idSyntaxError =
     studentTab === 'register' && cleanIdPreview ? validateLoginId(cleanIdPreview) : null;
 
+  const teacherIdTaken =
+    isTeacherTab &&
+    teacherTab === 'register' &&
+    Boolean(cleanTeacherIdPreview) &&
+    takenTeacherIdMatch === cleanTeacherIdPreview;
+  const teacherIdSyntaxError =
+    isTeacherTab && teacherTab === 'register' && cleanTeacherIdPreview
+      ? validateTeacherLoginId(cleanTeacherIdPreview)
+      : null;
+
   const clearErrors = () => {
     if (localError) setLocalError(null);
     if (auth.error) auth.clearError();
     if (showDuplicateLoginHint) setShowDuplicateLoginHint(false);
+    if (showTeacherDuplicateHint) setShowTeacherDuplicateHint(false);
   };
 
   const handleSuggestId = async () => {
     clearErrors();
     const suggested = await suggestNextLoginId('10T4');
     setStudentLoginId(suggested);
+  };
+
+  const handleSuggestTeacherId = async () => {
+    clearErrors();
+    const suggested = await suggestNextTeacherLoginId(activeTeacherRole);
+    setTeacherLoginId(suggested);
   };
 
   const handleStudentLogin = async () => {
@@ -202,18 +254,38 @@ export function AuthGate({ children }: { children: ReactNode }) {
     }
   };
 
-  const handleTeacherSubmit = async () => {
+  const handleTeacherLogin = async () => {
     clearErrors();
+    // If Mã ID giáo viên is entered, authenticate against personal teacher accounts.
+    // If left blank, support quick login with the class teacher password (K8T4).
+    if (teacherLoginId.trim()) {
+      const ok = await auth.signInAsTeacher(teacherLoginId, teacherPassword, activeTeacherRole);
+      if (ok) {
+        setTeacherPassword('');
+        if (Platform.OS !== 'web') {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        }
+        showToast(
+          activeTeacherRole === 'subject_teacher'
+            ? `Chào mừng trở lại Cổng GV Bộ môn (ID: ${cleanTeacherIdPreview})! 📚`
+            : `Đăng nhập Giáo viên chủ nhiệm (ID: ${cleanTeacherIdPreview}) thành công! 🛡️`,
+        );
+      } else if (Platform.OS !== 'web') {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+      }
+      return;
+    }
+
     const ok = await auth.signInWithPassword(teacherPassword, teacherDisplayName, {
-      mode,
-      subjectName: mode === 'subject_teacher' ? effectiveSubject : null,
+      mode: activeTeacherRole,
+      subjectName: activeTeacherRole === 'subject_teacher' ? effectiveSubject : null,
     });
     if (ok) {
       setTeacherPassword('');
       if (Platform.OS !== 'web') {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       }
-      if (mode === 'subject_teacher') {
+      if (activeTeacherRole === 'subject_teacher') {
         showToast(
           `Chào mừng GV Bộ môn ${effectiveSubject}! Bạn có thể vào Bảng tin đăng thông báo 📚`,
         );
@@ -222,6 +294,65 @@ export function AuthGate({ children }: { children: ReactNode }) {
       }
     } else if (Platform.OS !== 'web') {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+    }
+  };
+
+  const handleTeacherRegister = async () => {
+    clearErrors();
+    if (!teacherDisplayName.trim() || teacherDisplayName.trim().length < 2) {
+      setLocalError('Vui lòng nhập họ và tên đầy đủ của Thầy / Cô.');
+      return;
+    }
+    if (activeTeacherRole === 'subject_teacher' && !effectiveSubject) {
+      setLocalError('Vui lòng chọn hoặc nhập bộ môn giảng dạy.');
+      return;
+    }
+    const syntaxErr = validateTeacherLoginId(teacherLoginId);
+    if (syntaxErr) {
+      setLocalError(syntaxErr);
+      return;
+    }
+    if (teacherPassword.trim().length < MIN_TEACHER_PASSWORD_LENGTH) {
+      setLocalError(`Mật khẩu riêng cần ít nhất ${MIN_TEACHER_PASSWORD_LENGTH} ký tự.`);
+      return;
+    }
+    if (teacherPassword.trim() !== teacherConfirmPass.trim()) {
+      setLocalError('Mật khẩu xác nhận không khớp. Vui lòng nhập lại!');
+      return;
+    }
+    if (!teacherAccessCode.trim()) {
+      setLocalError('Vui lòng nhập Mã xác thực giáo viên của lớp để cấp quyền tạo tài khoản.');
+      return;
+    }
+
+    const res = await auth.registerAndSignInTeacher({
+      name: teacherDisplayName,
+      loginId: teacherLoginId,
+      password: teacherPassword,
+      role: activeTeacherRole,
+      subject: activeTeacherRole === 'subject_teacher' ? effectiveSubject : null,
+      teacherAccessCode,
+    });
+
+    if (res.ok) {
+      setTeacherPassword('');
+      setTeacherConfirmPass('');
+      setTeacherAccessCode('');
+      if (Platform.OS !== 'web') {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      }
+      showToast(
+        activeTeacherRole === 'subject_teacher'
+          ? `Đã tạo tài khoản GV Bộ môn ${effectiveSubject} (ID: ${cleanTeacherIdPreview})! 📚`
+          : `Đã tạo tài khoản GV Chủ nhiệm (ID: ${cleanTeacherIdPreview}) thành công! 🛡️`,
+      );
+    } else {
+      if (res.duplicateId && res.passwordMatched) {
+        setShowTeacherDuplicateHint(true);
+      }
+      if (Platform.OS !== 'web') {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+      }
     }
   };
 
@@ -273,7 +404,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
               <View style={styles.rewardTeaser}>
                 <Text style={{ fontSize: 13 }}>🔒</Text>
                 <Text style={styles.rewardTeaserText}>
-                  Mỗi học sinh 1 Số ID & mật khẩu riêng · Chỉ GVCN xem toàn lớp
+                  Học sinh & Giáo viên đều có Mã ID & mật khẩu riêng · Chỉ GVCN xem toàn lớp
                 </Text>
               </View>
             </LinearGradient>
@@ -303,6 +434,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
                     onPress={() => {
                       clearErrors();
                       setPickedStudentTab('login');
+                    }}
+                  />
+                ) : null}
+                {showTeacherDuplicateHint ? (
+                  <Button
+                    label={`Chuyển sang Đăng nhập ID ${cleanTeacherIdPreview}`}
+                    size={'sm'}
+                    variant={'soft'}
+                    icon={'log-in-outline'}
+                    onPress={() => {
+                      clearErrors();
+                      setTeacherTab('login');
                     }}
                   />
                 ) : null}
@@ -719,113 +862,499 @@ export function AuthGate({ children }: { children: ReactNode }) {
               ) : (
                 /* ==================== TEACHER / SUBJECT TEACHER MODE ==================== */
                 <>
-                  <Text style={[styles.cardDesc, { color: theme.textSecondary }]}>
-                    {mode === 'subject_teacher'
-                      ? 'Cổng dành riêng cho Giáo viên bộ môn — chọn môn giảng dạy & xác thực bằng mật khẩu giáo viên để đăng thông báo lớp.'
-                      : 'Cổng dành cho Giáo viên chủ nhiệm — chỉ GVCN mới thấy được tất cả học sinh, mọi bài đăng, nhật ký & quản lý mật khẩu tài khoản.'}
-                  </Text>
-
-                  {mode === 'subject_teacher' ? (
-                    <View style={styles.subjectWrap}>
-                      <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
-                        Chọn bộ môn giảng dạy
-                      </Text>
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        contentContainerStyle={styles.subjectRow}>
-                        {SUBJECT_TEACHER_PRESETS.map((item) => (
-                          <Chip
-                            key={item.subject}
-                            label={`${item.emoji} ${item.subject}`}
-                            selected={!customSubject.trim() && subject === item.subject}
-                            onPress={() => {
-                              setSubject(item.subject);
-                              setCustomSubject('');
-                            }}
+                  {/* Teacher Sub-mode Switcher: Login vs Register */}
+                  <View style={[styles.subTabs, { backgroundColor: theme.backgroundElement }]}>
+                    {(
+                      [
+                        { key: 'login', label: 'Đăng nhập GV', icon: 'log-in-outline' },
+                        { key: 'register', label: 'Tạo tài khoản mới', icon: 'person-add-outline' },
+                      ] as const
+                    ).map((sub) => {
+                      const active = teacherTab === sub.key;
+                      return (
+                        <Pressable
+                          key={sub.key}
+                          onPress={() => {
+                            clearErrors();
+                            setTeacherTab(sub.key);
+                          }}
+                          style={[
+                            styles.subTab,
+                            active && [styles.roleTabActive, { backgroundColor: theme.card }],
+                          ]}>
+                          <Ionicons
+                            name={sub.icon}
+                            size={15}
+                            color={active ? theme.warning : theme.textMuted}
                           />
-                        ))}
-                      </ScrollView>
-                      <TextField
-                        label={'Hoặc nhập tên môn khác (tuỳ chọn)'}
-                        icon={'book-outline'}
-                        placeholder={'VD: Robotics, Kỹ năng mềm...'}
-                        value={customSubject}
-                        onChangeText={setCustomSubject}
-                      />
-                    </View>
-                  ) : null}
-
-                  <TextField
-                    label={
-                      mode === 'subject_teacher'
-                        ? 'Tên Thầy / Cô hiển thị trên thông báo'
-                        : 'Tên Giáo viên chủ nhiệm (tuỳ chọn)'
-                    }
-                    icon={'person-outline'}
-                    placeholder={
-                      mode === 'subject_teacher'
-                        ? 'Ví dụ: Cô Nguyễn Lan Anh / Thầy Minh'
-                        : 'Ví dụ: Thầy Ngô Vũ Hảo'
-                    }
-                    value={teacherDisplayName}
-                    onChangeText={setTeacherDisplayName}
-                    returnKeyType="next"
-                  />
-
-                  <View style={styles.passGroup}>
-                    <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
-                      Mật khẩu tài khoản Giáo viên
-                    </Text>
-                    <View
-                      style={[
-                        styles.passBox,
-                        {
-                          backgroundColor: theme.backgroundElement,
-                          borderColor: activeError ? theme.danger : theme.border,
-                        },
-                      ]}>
-                      <Ionicons name="shield-outline" size={18} color={theme.warning} />
-                      <TextInput
-                        value={teacherPassword}
-                        onChangeText={(text) => {
-                          clearErrors();
-                          setTeacherPassword(text);
-                        }}
-                        placeholder={'Nhập mật khẩu xác thực giáo viên...'}
-                        placeholderTextColor={theme.textMuted}
-                        secureTextEntry={!showPassword}
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        returnKeyType="go"
-                        onSubmitEditing={handleTeacherSubmit}
-                        style={[styles.passInput, { color: theme.text }]}
-                      />
-                      <Pressable
-                        onPress={() => setShowPassword((v) => !v)}
-                        hitSlop={10}
-                        accessibilityLabel={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}>
-                        <Ionicons
-                          name={showPassword ? 'eye-off-outline' : 'eye-outline'}
-                          size={19}
-                          color={theme.textSecondary}
-                        />
-                      </Pressable>
-                    </View>
+                          <Text
+                            style={[
+                              styles.subTabText,
+                              { color: active ? theme.warning : theme.textSecondary },
+                            ]}>
+                            {sub.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
                   </View>
 
-                  <Button
-                    label={
-                      auth.busy
-                        ? 'Đang xác thực...'
-                        : mode === 'subject_teacher'
-                          ? `Vào Cổng GV ${effectiveSubject}`
-                          : 'Đăng nhập Giáo viên chủ nhiệm'
-                    }
-                    icon={isTeacherTab ? 'shield-checkmark' : 'lock-open'}
-                    disabled={auth.busy}
-                    onPress={handleTeacherSubmit}
-                  />
+                  {teacherTab === 'login' ? (
+                    <>
+                      <Text style={[styles.cardDesc, { color: theme.textSecondary }]}>
+                        {mode === 'subject_teacher'
+                          ? 'Đăng nhập bằng Mã ID & mật khẩu riêng của Thầy/Cô (hoặc để trống Mã ID và nhập mã xác thực giáo viên mặc định để vào nhanh).'
+                          : 'Đăng nhập bằng Mã ID & mật khẩu riêng của GVCN (hoặc để trống Mã ID và nhập mã xác thực giáo viên mặc định). Chỉ GVCN xem toàn bộ lớp.'}
+                      </Text>
+
+                      <TextField
+                        label={'Mã ID giáo viên (nếu đã tạo tài khoản riêng)'}
+                        icon={'id-card-outline'}
+                        placeholder={
+                          mode === 'subject_teacher'
+                            ? 'VD: GVBM-01 (để trống nếu dùng mã GV lớp)'
+                            : 'VD: GVCN-01 (để trống nếu dùng mã GV lớp)'
+                        }
+                        value={teacherLoginId}
+                        onChangeText={(t) => {
+                          clearErrors();
+                          setTeacherLoginId(t);
+                        }}
+                        autoCapitalize={'characters'}
+                        autoCorrect={false}
+                        returnKeyType={'next'}
+                      />
+
+                      {/* Quick login metadata when Mã ID is blank */}
+                      {!teacherLoginId.trim() ? (
+                        <>
+                          {mode === 'subject_teacher' ? (
+                            <View style={styles.subjectWrap}>
+                              <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
+                                Chọn bộ môn giảng dạy
+                              </Text>
+                              <ScrollView
+                                horizontal
+                                showsHorizontalScrollIndicator={false}
+                                contentContainerStyle={styles.subjectRow}>
+                                {SUBJECT_TEACHER_PRESETS.map((item) => (
+                                  <Chip
+                                    key={item.subject}
+                                    label={`${item.emoji} ${item.subject}`}
+                                    selected={!customSubject.trim() && subject === item.subject}
+                                    onPress={() => {
+                                      setSubject(item.subject);
+                                      setCustomSubject('');
+                                    }}
+                                  />
+                                ))}
+                              </ScrollView>
+                              <TextField
+                                label={'Hoặc nhập tên môn khác (tuỳ chọn)'}
+                                icon={'book-outline'}
+                                placeholder={'VD: Robotics, Kỹ năng mềm...'}
+                                value={customSubject}
+                                onChangeText={setCustomSubject}
+                              />
+                            </View>
+                          ) : null}
+
+                          <TextField
+                            label={
+                              mode === 'subject_teacher'
+                                ? 'Tên Thầy / Cô hiển thị trên thông báo'
+                                : 'Tên Giáo viên chủ nhiệm (tuỳ chọn)'
+                            }
+                            icon={'person-outline'}
+                            placeholder={
+                              mode === 'subject_teacher'
+                                ? 'Ví dụ: Cô Nguyễn Lan Anh / Thầy Minh'
+                                : 'Ví dụ: Thầy Ngô Vũ Hảo'
+                            }
+                            value={teacherDisplayName}
+                            onChangeText={setTeacherDisplayName}
+                            returnKeyType="next"
+                          />
+                        </>
+                      ) : null}
+
+                      <View style={styles.passGroup}>
+                        <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
+                          {teacherLoginId.trim()
+                            ? 'Mật khẩu riêng của tài khoản giáo viên'
+                            : 'Mật khẩu xác thực Giáo viên lớp'}
+                        </Text>
+                        <View
+                          style={[
+                            styles.passBox,
+                            {
+                              backgroundColor: theme.backgroundElement,
+                              borderColor: activeError ? theme.danger : theme.border,
+                            },
+                          ]}>
+                          <Ionicons name="shield-outline" size={18} color={theme.warning} />
+                          <TextInput
+                            value={teacherPassword}
+                            onChangeText={(text) => {
+                              clearErrors();
+                              setTeacherPassword(text);
+                            }}
+                            placeholder={
+                              teacherLoginId.trim()
+                                ? 'Nhập mật khẩu cá nhân của bạn...'
+                                : 'Nhập mật khẩu xác thực giáo viên...'
+                            }
+                            placeholderTextColor={theme.textMuted}
+                            secureTextEntry={!showPassword}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            returnKeyType="go"
+                            onSubmitEditing={handleTeacherLogin}
+                            style={[styles.passInput, { color: theme.text }]}
+                          />
+                          <Pressable
+                            onPress={() => setShowPassword((v) => !v)}
+                            hitSlop={10}
+                            accessibilityLabel={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}>
+                            <Ionicons
+                              name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                              size={19}
+                              color={theme.textSecondary}
+                            />
+                          </Pressable>
+                        </View>
+                      </View>
+
+                      <Button
+                        label={
+                          auth.busy
+                            ? 'Đang xác thực...'
+                            : teacherLoginId.trim()
+                              ? `Đăng nhập GV (${cleanTeacherIdPreview}) 🛡️`
+                              : mode === 'subject_teacher'
+                                ? `Vào Cổng GV ${effectiveSubject}`
+                                : 'Đăng nhập Giáo viên chủ nhiệm'
+                        }
+                        icon={isTeacherTab ? 'shield-checkmark' : 'lock-open'}
+                        disabled={auth.busy}
+                        onPress={handleTeacherLogin}
+                      />
+
+                      <Pressable
+                        onPress={() => {
+                          clearErrors();
+                          setTeacherTab('register');
+                        }}
+                        style={[styles.switchBanner, { backgroundColor: theme.warningSoft }]}>
+                        <Ionicons name="person-add" size={15} color={theme.warning} />
+                        <Text style={[styles.switchBannerText, { color: theme.warning }]}>
+                          Chưa có tài khoản giáo viên riêng? Tạo tài khoản mới với Mã ID & mật khẩu
+                          riêng →
+                        </Text>
+                      </Pressable>
+                    </>
+                  ) : (
+                    /* ==================== TEACHER REGISTER TAB ==================== */
+                    <>
+                      <Text style={[styles.cardDesc, { color: theme.textSecondary }]}>
+                        {mode === 'subject_teacher'
+                          ? 'Tạo tài khoản Giáo viên bộ môn riêng với Mã ID & mật khẩu cá nhân. Nhập đúng Mã xác thực giáo viên của lớp để cấp quyền.'
+                          : 'Tạo tài khoản Giáo viên chủ nhiệm riêng với Mã ID & mật khẩu cá nhân. Nhập đúng Mã xác thực giáo viên của lớp để cấp quyền.'}
+                      </Text>
+
+                      {mode === 'subject_teacher' ? (
+                        <View style={styles.subjectWrap}>
+                          <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
+                            Chọn bộ môn giảng dạy
+                          </Text>
+                          <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            contentContainerStyle={styles.subjectRow}>
+                            {SUBJECT_TEACHER_PRESETS.map((item) => (
+                              <Chip
+                                key={item.subject}
+                                label={`${item.emoji} ${item.subject}`}
+                                selected={!customSubject.trim() && subject === item.subject}
+                                onPress={() => {
+                                  clearErrors();
+                                  setSubject(item.subject);
+                                  setCustomSubject('');
+                                }}
+                              />
+                            ))}
+                          </ScrollView>
+                          <TextField
+                            label={'Hoặc nhập tên môn khác (tuỳ chọn)'}
+                            icon={'book-outline'}
+                            placeholder={'VD: Robotics, Kỹ năng mềm...'}
+                            value={customSubject}
+                            onChangeText={(t) => {
+                              clearErrors();
+                              setCustomSubject(t);
+                            }}
+                          />
+                        </View>
+                      ) : null}
+
+                      <TextField
+                        label={'Họ và tên Thầy / Cô'}
+                        icon={'person-outline'}
+                        placeholder={
+                          mode === 'subject_teacher'
+                            ? 'VD: Cô Nguyễn Lan Anh / Thầy Minh'
+                            : 'VD: Thầy Ngô Vũ Hảo'
+                        }
+                        value={teacherDisplayName}
+                        onChangeText={(t) => {
+                          clearErrors();
+                          setTeacherDisplayName(t);
+                        }}
+                        returnKeyType={'next'}
+                      />
+
+                      <View style={styles.idFieldWrap}>
+                        <View style={styles.idLabelRow}>
+                          <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
+                            Mã ID giáo viên tự đặt (duy nhất)
+                          </Text>
+                          <Pressable
+                            onPress={handleSuggestTeacherId}
+                            style={[styles.suggestPill, { backgroundColor: theme.warningSoft }]}>
+                            <Ionicons name="sparkles" size={12} color={theme.warning} />
+                            <Text style={[styles.suggestText, { color: theme.warning }]}>
+                              Gợi ý ID trống
+                            </Text>
+                          </Pressable>
+                        </View>
+                        <View
+                          style={[
+                            styles.passBox,
+                            {
+                              backgroundColor: theme.backgroundElement,
+                              borderColor:
+                                teacherIdTaken || teacherIdSyntaxError
+                                  ? theme.danger
+                                  : cleanTeacherIdPreview
+                                    ? theme.success
+                                    : theme.border,
+                            },
+                          ]}>
+                          <Ionicons
+                            name="id-card-outline"
+                            size={18}
+                            color={
+                              teacherIdTaken || teacherIdSyntaxError
+                                ? theme.danger
+                                : cleanTeacherIdPreview
+                                  ? theme.success
+                                  : theme.warning
+                            }
+                          />
+                          <TextInput
+                            value={teacherLoginId}
+                            onChangeText={(t) => {
+                              clearErrors();
+                              setTeacherLoginId(t);
+                            }}
+                            placeholder={
+                              mode === 'subject_teacher'
+                                ? 'VD: GVBM-01, GV-TOAN...'
+                                : 'VD: GVCN-01, THAYHAO...'
+                            }
+                            placeholderTextColor={theme.textMuted}
+                            autoCapitalize="characters"
+                            autoCorrect={false}
+                            returnKeyType="next"
+                            style={[styles.passInput, { color: theme.text }]}
+                          />
+                          {cleanTeacherIdPreview ? (
+                            <Badge
+                              label={
+                                teacherIdSyntaxError
+                                  ? 'Không hợp lệ'
+                                  : teacherIdTaken
+                                    ? 'Trùng ID'
+                                    : 'Khả dụng'
+                              }
+                              color={teacherIdTaken || teacherIdSyntaxError ? 'danger' : 'success'}
+                              soft={
+                                teacherIdTaken || teacherIdSyntaxError ? 'dangerSoft' : 'successSoft'
+                              }
+                            />
+                          ) : null}
+                        </View>
+                        {teacherIdTaken ? (
+                          <Text style={{ color: theme.danger, fontSize: 11.5, fontWeight: '700' }}>
+                            ⚠️ Mã ID “{cleanTeacherIdPreview}” đã được sử dụng — trùng ID sẽ báo mật
+                            khẩu không đúng! Hãy chọn Mã ID khác.
+                          </Text>
+                        ) : teacherIdSyntaxError ? (
+                          <Text style={{ color: theme.danger, fontSize: 11.5, fontWeight: '700' }}>
+                            {teacherIdSyntaxError}
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      <View style={styles.passGroup}>
+                        <View style={styles.idLabelRow}>
+                          <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
+                            Mật khẩu riêng tự đặt
+                          </Text>
+                          {teacherPassword.length > 0 ? (
+                            <Text
+                              style={{
+                                color: theme[teacherStrength.color],
+                                fontSize: 11,
+                                fontWeight: '800',
+                              }}>
+                              {teacherStrength.label}
+                            </Text>
+                          ) : null}
+                        </View>
+                        <View
+                          style={[
+                            styles.passBox,
+                            {
+                              backgroundColor: theme.backgroundElement,
+                              borderColor: theme.border,
+                            },
+                          ]}>
+                          <Ionicons name="key-outline" size={18} color={theme.warning} />
+                          <TextInput
+                            value={teacherPassword}
+                            onChangeText={(t) => {
+                              clearErrors();
+                              setTeacherPassword(t);
+                            }}
+                            placeholder={'Đặt mật khẩu cá nhân (ít nhất 4 ký tự)...'}
+                            placeholderTextColor={theme.textMuted}
+                            secureTextEntry={!showPassword}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            returnKeyType="next"
+                            style={[styles.passInput, { color: theme.text }]}
+                          />
+                          <Pressable onPress={() => setShowPassword((v) => !v)} hitSlop={10}>
+                            <Ionicons
+                              name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                              size={19}
+                              color={theme.textSecondary}
+                            />
+                          </Pressable>
+                        </View>
+                        {teacherPassword.length > 0 ? (
+                          <View style={styles.strengthRow}>
+                            {[1, 2, 3].map((step) => (
+                              <View
+                                key={step}
+                                style={[
+                                  styles.strengthBar,
+                                  {
+                                    backgroundColor:
+                                      teacherStrength.score >= step
+                                        ? theme[teacherStrength.color]
+                                        : theme.border,
+                                  },
+                                ]}
+                              />
+                            ))}
+                          </View>
+                        ) : null}
+                      </View>
+
+                      <View style={styles.passGroup}>
+                        <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
+                          Nhập lại mật khẩu
+                        </Text>
+                        <View
+                          style={[
+                            styles.passBox,
+                            {
+                              backgroundColor: theme.backgroundElement,
+                              borderColor:
+                                teacherConfirmPass.length > 0 &&
+                                teacherConfirmPass.trim() !== teacherPassword.trim()
+                                  ? theme.danger
+                                  : theme.border,
+                            },
+                          ]}>
+                          <Ionicons
+                            name="checkmark-done-outline"
+                            size={18}
+                            color={
+                              teacherConfirmPass.length > 0 &&
+                              teacherConfirmPass.trim() === teacherPassword.trim()
+                                ? theme.success
+                                : theme.textMuted
+                            }
+                          />
+                          <TextInput
+                            value={teacherConfirmPass}
+                            onChangeText={(t) => {
+                              clearErrors();
+                              setTeacherConfirmPass(t);
+                            }}
+                            placeholder={'Nhập lại mật khẩu vừa đặt...'}
+                            placeholderTextColor={theme.textMuted}
+                            secureTextEntry={!showPassword}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            returnKeyType="next"
+                            style={[styles.passInput, { color: theme.text }]}
+                          />
+                        </View>
+                      </View>
+
+                      <View style={styles.passGroup}>
+                        <Text style={[styles.passLabel, { color: theme.textSecondary }]}>
+                          Mã xác thực giáo viên (mã bảo mật lớp)
+                        </Text>
+                        <View
+                          style={[
+                            styles.passBox,
+                            {
+                              backgroundColor: theme.backgroundElement,
+                              borderColor: theme.warning,
+                            },
+                          ]}>
+                          <Ionicons name="shield-checkmark-outline" size={18} color={theme.warning} />
+                          <TextInput
+                            value={teacherAccessCode}
+                            onChangeText={(t) => {
+                              clearErrors();
+                              setTeacherAccessCode(t);
+                            }}
+                            placeholder={'Nhập mã xác thực giáo viên để cấp quyền...'}
+                            placeholderTextColor={theme.textMuted}
+                            secureTextEntry={!showPassword}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            returnKeyType="go"
+                            onSubmitEditing={handleTeacherRegister}
+                            style={[styles.passInput, { color: theme.text }]}
+                          />
+                        </View>
+                        <Text style={{ color: theme.textMuted, fontSize: 11, lineHeight: 16 }}>
+                          🔒 Bảo vệ quyền giáo viên: chỉ người có mã bảo mật giáo viên lớp mới tạo
+                          được tài khoản GV mới.
+                        </Text>
+                      </View>
+
+                      <Button
+                        label={
+                          auth.busy
+                            ? 'Đang tạo tài khoản...'
+                            : mode === 'subject_teacher'
+                              ? `Tạo tài khoản GV ${effectiveSubject} & Vào lớp ✨`
+                              : 'Tạo tài khoản GV Chủ nhiệm & Vào lớp ✨'
+                        }
+                        icon={'person-add'}
+                        disabled={auth.busy}
+                        onPress={handleTeacherRegister}
+                      />
+                    </>
+                  )}
                 </>
               )}
 
@@ -834,7 +1363,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 {[
                   {
                     icon: 'id-card' as const,
-                    text: 'Mỗi học sinh có Số ID & mật khẩu riêng tự đặt — trùng Số ID sẽ báo mật khẩu không đúng',
+                    text: 'Học sinh & Giáo viên đều tạo được Mã ID & mật khẩu riêng — trùng ID sẽ bị chặn',
                   },
                   {
                     icon: 'lock-closed' as const,

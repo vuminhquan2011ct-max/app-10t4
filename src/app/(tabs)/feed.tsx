@@ -1,8 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -20,8 +22,8 @@ import {
   ENTRY_LEVELS,
   ENTRY_STATUSES,
 } from '@/constants/entry-meta';
-import { Radius, Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { Radius, Shadow, Spacing } from '@/constants/theme';
+import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { formatDate } from '@/lib/date';
 import { stripVietnamese } from '@/lib/intelligence';
 import { useClassStore } from '@/store/class-store';
@@ -30,11 +32,11 @@ import type { EntryCategory, EntryStatus } from '@/types/models';
 type Filter = 'all' | EntryStatus;
 type CatFilter = 'all' | EntryCategory;
 
-const FILTERS: { value: Filter; label: string }[] = [
-  { value: 'all', label: 'Tất cả' },
-  { value: 'pending', label: 'Chờ duyệt' },
-  { value: 'approved', label: 'Đã duyệt' },
-  { value: 'rejected', label: 'Từ chối' },
+const FILTERS: { value: Filter; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+  { value: 'all', label: 'Tất cả', icon: 'layers-outline' },
+  { value: 'pending', label: 'Chờ duyệt', icon: 'time-outline' },
+  { value: 'approved', label: 'Đã duyệt', icon: 'checkmark-circle-outline' },
+  { value: 'rejected', label: 'Từ chối', icon: 'close-circle-outline' },
 ];
 
 export default function FeedScreen() {
@@ -50,13 +52,19 @@ export default function FeedScreen() {
     pullNow,
   } = useClassStore();
   const theme = useTheme();
+  const gradient = useBrandGradient();
   const { showToast } = useToast();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [catFilter, setCatFilter] = useState<CatFilter>('all');
 
   const counts = useMemo(() => {
-    const result: Record<Filter, number> = { all: entries.length, pending: 0, approved: 0, rejected: 0 };
+    const result: Record<Filter, number> = {
+      all: entries.length,
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+    };
     for (const entry of entries) result[entry.status] += 1;
     return result;
   }, [entries]);
@@ -94,70 +102,161 @@ export default function FeedScreen() {
           title={canViewAll ? 'Nhật ký thành tích' : 'Bài đăng của tôi'}
           subtitle={
             canViewAll
-              ? sorted.length + ' / ' + entries.length + ' mục toàn lớp · mới nhất ở trên'
+              ? sorted.length + ' / ' + entries.length + ' mục toàn lớp · Dòng thời gian trực tiếp'
               : sorted.length + ' mục của riêng bạn · Chỉ bạn & GVCN thấy'
           }
         />
       </FadeIn>
 
-      <FadeIn index={1} style={styles.ctaRow}>
-        <Button
-          label={'Ghi thành tích mới'}
-          icon={'add-circle'}
-          style={styles.flex}
-          onPress={() => router.push('/entry-form' as never)}
-        />
-        {role === 'teacher' && counts.pending > 0 ? (
-          <Button
-            label={`Duyệt hết (${counts.pending})`}
-            variant={'soft'}
-            icon={'checkmark-done'}
-            onPress={handleApproveAll}
-          />
-        ) : null}
+      {/* Live Journal KPI Banner */}
+      <FadeIn index={1}>
+        <LinearGradient
+          colors={gradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={[
+            styles.kpiBanner,
+            Shadow.floating,
+            { shadowColor: gradient[0], shadowOpacity: 0.26 },
+          ]}>
+          <View style={styles.bannerOrbA} />
+          <View style={styles.bannerOrbB} />
+
+          <View style={styles.bannerTopRow}>
+            <View style={styles.liveTag}>
+              <View style={styles.liveDot} />
+              <Text style={styles.liveTagText}>
+                {canViewAll ? 'SỔ VÀNG THI ĐUA LỚP 10T4' : 'NHẬT KÝ CÁ NHÂN'}
+              </Text>
+            </View>
+            <Text style={styles.bannerCountHint}>{`Hiển thị ${sorted.length} mục`}</Text>
+          </View>
+
+          <View style={styles.kpiRow}>
+            <Pressable
+              onPress={() => setFilter('all')}
+              style={[
+                styles.kpiBox,
+                filter === 'all' && styles.kpiBoxActive,
+              ]}>
+              <View style={styles.kpiIconBadge}>
+                <Ionicons name="albums" size={14} color="#FFFFFF" />
+              </View>
+              <Text style={styles.kpiVal}>{counts.all}</Text>
+              <Text style={styles.kpiLab}>Tổng ghi nhận</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setFilter('approved')}
+              style={[
+                styles.kpiBox,
+                filter === 'approved' && styles.kpiBoxActive,
+              ]}>
+              <View style={styles.kpiIconBadge}>
+                <Ionicons name="checkmark-circle" size={14} color="#A7F3D0" />
+              </View>
+              <Text style={styles.kpiVal}>{counts.approved}</Text>
+              <Text style={styles.kpiLab}>Đã duyệt</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setFilter('pending')}
+              style={[
+                styles.kpiBox,
+                filter === 'pending' && styles.kpiBoxActive,
+              ]}>
+              <View style={styles.kpiIconBadge}>
+                <Ionicons name="time" size={14} color="#FDE68A" />
+              </View>
+              <Text style={styles.kpiVal}>{counts.pending}</Text>
+              <Text style={styles.kpiLab}>Chờ duyệt</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.bannerActions}>
+            <Pressable
+              onPress={() => router.push('/entry-form' as never)}
+              style={({ pressed }) => [
+                styles.bannerPrimaryBtn,
+                pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+              ]}>
+              <Ionicons name="add-circle" size={17} color={gradient[0]} />
+              <Text style={[styles.bannerPrimaryText, { color: gradient[0] }]}>
+                Ghi thành tích mới
+              </Text>
+            </Pressable>
+
+            {role === 'teacher' && counts.pending > 0 ? (
+              <Pressable
+                onPress={handleApproveAll}
+                style={({ pressed }) => [
+                  styles.bannerGlassBtn,
+                  pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+                ]}>
+                <Ionicons name="checkmark-done" size={17} color="#FFFFFF" />
+                <Text style={styles.bannerGlassText}>{`Duyệt hết (${counts.pending})`}</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </LinearGradient>
       </FadeIn>
 
+      {/* Search & Filter Control Bar */}
       <FadeIn index={2}>
-        <TextField
-          icon={'search'}
-          placeholder={'Tìm thành tích, tên học sinh...'}
-          value={query}
-          onChangeText={setQuery}
-        />
-      </FadeIn>
-
-      {/* Status filter */}
-      <FadeIn index={3}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}>
-          {FILTERS.map((item) => (
-            <Chip
-              key={item.value}
-              label={item.label + ' · ' + counts[item.value]}
-              selected={filter === item.value}
-              onPress={() => setFilter(item.value)}
-            />
-          ))}
-        </ScrollView>
-      </FadeIn>
-
-      {/* Category filter */}
-      <FadeIn index={4}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}>
-          <Chip
-            label={'Mọi lĩnh vực'}
-            selected={catFilter === 'all'}
-            onPress={() => setCatFilter('all')}
+        <Card style={styles.filterCard}>
+          <TextField
+            icon={'search'}
+            placeholder={'Tìm thành tích, tên học sinh, mô tả...'}
+            value={query}
+            onChangeText={setQuery}
           />
-          {ENTRY_CATEGORY_LIST.map((cat) => (
-            <Chip
-              key={cat}
-              label={ENTRY_CATEGORIES[cat].label}
-              icon={ENTRY_CATEGORIES[cat].icon}
-              selected={catFilter === cat}
-              onPress={() => setCatFilter(cat)}
-            />
-          ))}
-        </ScrollView>
+
+          {/* Status Filter Chips */}
+          <View style={styles.filterGroup}>
+            <Text style={[styles.filterHeading, { color: theme.textMuted }]}>TRẠNG THÁI DUYỆT</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.filters}>
+              {FILTERS.map((item) => (
+                <Chip
+                  key={item.value}
+                  label={item.label + ' · ' + counts[item.value]}
+                  icon={item.icon}
+                  selected={filter === item.value}
+                  onPress={() => setFilter(item.value)}
+                />
+              ))}
+            </ScrollView>
+          </View>
+
+          {/* Category Filter Chips */}
+          <View style={styles.filterGroup}>
+            <Text style={[styles.filterHeading, { color: theme.textMuted }]}>
+              LĨNH VỰC HOẠT ĐỘNG
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.filters}>
+              <Chip
+                label={'Mọi lĩnh vực'}
+                icon={'grid-outline'}
+                selected={catFilter === 'all'}
+                onPress={() => setCatFilter('all')}
+              />
+              {ENTRY_CATEGORY_LIST.map((cat) => (
+                <Chip
+                  key={cat}
+                  label={ENTRY_CATEGORIES[cat].label}
+                  icon={ENTRY_CATEGORIES[cat].icon}
+                  selected={catFilter === cat}
+                  onPress={() => setCatFilter(cat)}
+                />
+              ))}
+            </ScrollView>
+          </View>
+        </Card>
       </FadeIn>
 
       {sorted.length === 0 ? (
@@ -170,39 +269,91 @@ export default function FeedScreen() {
           const status = ENTRY_STATUSES[entry.status];
           const kind = ENTRY_KINDS[entry.kind];
           const category = ENTRY_CATEGORIES[entry.category];
+          const student = getStudent(entry.studentId);
+          const studentName = student?.name ?? 'Học sinh đã xoá';
           const canOpenForm =
             canEditClass || (entry.status === 'pending' && entry.studentId === currentStudentId);
           return (
-            <FadeIn key={entry.id} index={Math.min(i + 5, 10)}>
+            <FadeIn key={entry.id} index={Math.min(i + 3, 10)}>
               <Card
-                style={styles.card}
+                style={[
+                  styles.card,
+                  entry.status === 'pending' && {
+                    borderColor: theme.warning,
+                    borderWidth: 1,
+                  },
+                ]}
                 onPress={
                   canOpenForm
-                    ? () => router.push({ pathname: '/entry-form', params: { id: entry.id } } as never)
+                    ? () =>
+                        router.push({ pathname: '/entry-form', params: { id: entry.id } } as never)
                     : () =>
                         router.push({
                           pathname: '/student/[id]',
                           params: { id: entry.studentId },
                         } as never)
                 }>
+                {/* Left Accent Timeline Stripe */}
+                <View
+                  style={[
+                    styles.timelineStripe,
+                    { backgroundColor: theme[kind.color] },
+                  ]}
+                />
+
+                {/* Top Meta Header: Student Avatar + Name + Date + Status */}
+                <View style={styles.metaTopRow}>
+                  <View style={styles.studentPill}>
+                    <Avatar name={studentName} size={24} />
+                    <Text style={[styles.studentNameText, { color: theme.text }]} numberOfLines={1}>
+                      {studentName}
+                    </Text>
+                    {student?.group ? (
+                      <Text style={[styles.studentGroupText, { color: theme.textMuted }]}>
+                        {`· ${student.group}`}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <View style={[styles.dateChip, { backgroundColor: theme.backgroundElement }]}>
+                    <Ionicons name="calendar-outline" size={11} color={theme.textSecondary} />
+                    <Text style={[styles.dateText, { color: theme.textSecondary }]}>
+                      {formatDate(entry.date)}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Main Entry Row: Kind Squircle Icon + Title + Points Pill */}
                 <View style={styles.head}>
-                  <View style={[styles.iconBox, { backgroundColor: theme[kind.soft] }]}>
-                    <Ionicons name={kind.icon} size={20} color={theme[kind.color]} />
+                  <View
+                    style={[
+                      styles.iconBox,
+                      {
+                        backgroundColor: theme[kind.soft],
+                        borderColor: theme[kind.color],
+                      },
+                    ]}>
+                    <Ionicons name={kind.icon} size={21} color={theme[kind.color]} />
                   </View>
                   <View style={styles.headBody}>
                     <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
                       {entry.title}
                     </Text>
-                    <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
-                      {(getStudent(entry.studentId)?.name ?? 'Học sinh đã xoá') +
-                        ' · ' +
-                        formatDate(entry.date)}
+                    <Text style={[styles.kindLabelText, { color: theme[kind.color] }]}>
+                      {kind.label}
                     </Text>
                   </View>
                   {entry.points > 0 ? (
-                    <View style={[styles.points, { backgroundColor: theme[kind.soft] }]}>
+                    <View
+                      style={[
+                        styles.points,
+                        {
+                          backgroundColor: theme[kind.soft],
+                          borderColor: theme[kind.color],
+                        },
+                      ]}>
+                      <Ionicons name="sparkles" size={11} color={theme[kind.color]} />
                       <Text style={[styles.pointsValue, { color: theme[kind.color] }]}>
-                        {'+' + entry.points}
+                        {'+' + entry.points + 'đ'}
                       </Text>
                     </View>
                   ) : null}
@@ -214,33 +365,68 @@ export default function FeedScreen() {
                   </Text>
                 ) : null}
 
+                {/* Badges Row */}
                 <View style={styles.badges}>
-                  <Badge label={status.label} color={status.color} soft={status.soft} icon={status.icon} />
-                  <Badge label={category.label} color={'purple'} soft={'purpleSoft'} icon={category.icon} />
-                  <Badge label={ENTRY_LEVELS[entry.level].label} color={'accentText'} soft={'accentSoft'} />
+                  <Badge
+                    label={status.label}
+                    color={status.color}
+                    soft={status.soft}
+                    icon={status.icon}
+                  />
+                  <Badge
+                    label={category.label}
+                    color={'purple'}
+                    soft={'purpleSoft'}
+                    icon={category.icon}
+                  />
+                  <Badge
+                    label={ENTRY_LEVELS[entry.level].label}
+                    color={'accentText'}
+                    soft={'accentSoft'}
+                  />
                   {entry.proofUrl ? (
                     <Pressable
                       onPress={() => openProof(entry.proofUrl!)}
-                      style={[styles.proofChip, { backgroundColor: theme.backgroundElement }]}>
+                      style={[
+                        styles.proofChip,
+                        {
+                          backgroundColor: theme.accentSoft,
+                          borderColor: theme.accent,
+                        },
+                      ]}>
                       <Ionicons name="link" size={12} color={theme.accentText} />
-                      <Text style={[styles.proofText, { color: theme.accentText }]}>Minh chứng</Text>
+                      <Text style={[styles.proofText, { color: theme.accentText }]}>
+                        Minh chứng
+                      </Text>
                     </Pressable>
                   ) : null}
                 </View>
 
                 {entry.reviewNote ? (
-                  <View style={[styles.noteBox, { backgroundColor: theme.backgroundElement }]}>
-                    <Ionicons name="chatbubble-ellipses-outline" size={13} color={theme.textSecondary} />
+                  <View
+                    style={[
+                      styles.noteBox,
+                      {
+                        backgroundColor: theme.backgroundElement,
+                        borderColor: theme.border,
+                      },
+                    ]}>
+                    <Ionicons
+                      name="chatbubble-ellipses"
+                      size={14}
+                      color={theme.accent}
+                    />
                     <Text style={[styles.noteText, { color: theme.textSecondary }]}>
-                      {'GVCN: ' + entry.reviewNote}
+                      {'Nhận xét GVCN: ' + entry.reviewNote}
                     </Text>
                   </View>
                 ) : null}
 
+                {/* Smooth Teacher Approval Controls */}
                 {role === 'teacher' && entry.status === 'pending' ? (
                   <View style={[styles.actions, { borderColor: theme.border }]}>
                     <Button
-                      label={'Duyệt'}
+                      label={'Duyệt ngay'}
                       size={'sm'}
                       icon={'checkmark-circle'}
                       style={styles.flex}
@@ -272,18 +458,186 @@ export default function FeedScreen() {
 }
 
 const styles = StyleSheet.create({
-  ctaRow: { flexDirection: 'row', gap: Spacing.two },
+  kpiBanner: {
+    padding: Spacing.four,
+    borderRadius: Radius.xl,
+    gap: Spacing.three,
+    overflow: 'hidden',
+  },
+  bannerOrbA: {
+    position: 'absolute',
+    width: 180,
+    height: 180,
+    borderRadius: 90,
+    top: -70,
+    right: -45,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  bannerOrbB: {
+    position: 'absolute',
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    bottom: -55,
+    left: -35,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  bannerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  liveTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.3)',
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#34D399',
+  },
+  liveTagText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+  },
+  bannerCountHint: {
+    color: 'rgba(255,255,255,0.86)',
+    fontSize: 11.5,
+    fontWeight: '700',
+  },
+  kpiRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+  },
+  kpiBox: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.24)',
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    gap: 2,
+  },
+  kpiBoxActive: {
+    backgroundColor: 'rgba(255,255,255,0.28)',
+    borderColor: '#FFFFFF',
+  },
+  kpiIconBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.16)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  kpiVal: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '900',
+    letterSpacing: -0.4,
+  },
+  kpiLab: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
+  bannerActions: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+  },
+  bannerPrimaryBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    borderRadius: Radius.md,
+  },
+  bannerPrimaryText: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  bannerGlassBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderColor: 'rgba(255,255,255,0.38)',
+    borderWidth: 1,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    borderRadius: Radius.md,
+  },
+  bannerGlassText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  filterCard: {
+    gap: Spacing.three,
+    padding: Spacing.three,
+  },
+  filterGroup: {
+    gap: 6,
+  },
+  filterHeading: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+  },
   filters: { gap: Spacing.two, paddingRight: Spacing.three },
-  card: { gap: Spacing.two + 4 },
-  head: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
-  iconBox: { width: 44, height: 44, borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center' },
-  headBody: { flex: 1, gap: 2 },
-  title: { fontSize: 15, fontWeight: '800', lineHeight: 20 },
-  desc: { fontSize: 13, lineHeight: 19 },
-  points: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: Radius.pill },
-  pointsValue: { fontSize: 14, fontWeight: '900' },
-  badges: { flexDirection: 'row', gap: 6, flexWrap: 'wrap', alignItems: 'center' },
-  proofChip: {
+  card: {
+    gap: Spacing.two + 4,
+    overflow: 'hidden',
+  },
+  timelineStripe: {
+    position: 'absolute',
+    left: 0,
+    top: 14,
+    bottom: 14,
+    width: 4,
+    borderTopRightRadius: 4,
+    borderBottomRightRadius: 4,
+  },
+  metaTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
+  studentPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+  },
+  studentNameText: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    flexShrink: 1,
+  },
+  studentGroupText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+  },
+  dateChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
@@ -291,16 +645,54 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: Radius.pill,
   },
-  proofText: { fontSize: 11, fontWeight: '700' },
+  dateText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  head: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
+  iconBox: {
+    width: 46,
+    height: 46,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headBody: { flex: 1, gap: 2 },
+  title: { fontSize: 15.5, fontWeight: '800', lineHeight: 21 },
+  kindLabelText: { fontSize: 11.5, fontWeight: '700' },
+  desc: { fontSize: 13, lineHeight: 19 },
+  points: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  pointsValue: { fontSize: 14, fontWeight: '900' },
+  badges: { flexDirection: 'row', gap: 6, flexWrap: 'wrap', alignItems: 'center' },
+  proofChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 3.5,
+    borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  proofText: { fontSize: 11, fontWeight: '800' },
   noteBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    gap: 7,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
     borderRadius: Radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  noteText: { fontSize: 12, flex: 1 },
+  noteText: { fontSize: 12, flex: 1, fontWeight: '600' },
   actions: {
     flexDirection: 'row',
     gap: Spacing.two,

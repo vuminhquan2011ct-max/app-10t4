@@ -651,9 +651,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     ? (auth.userId ?? 'anon')
     : effectiveStudentId
       ? `stu_${effectiveStudentId}`
-      : isSubjectTeacher
-        ? `subj_${subjectName ?? 'gvbm'}`
-        : 'local_teacher';
+      : auth.teacherId
+        ? `gv_${auth.teacherId}`
+        : isSubjectTeacher
+          ? `subj_${subjectName ?? 'gvbm'}`
+          : 'local_teacher';
 
   const votePoll = useCallback(
     async (pollId: string, optionId: string) => {
@@ -982,6 +984,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       setRole: actions.setRole,
       signInAs: actions.signInAs,
       updateClass: actions.updateClass,
+      logActivity: actions.logActivity,
       addStudent,
       bulkAddStudents,
       updateStudent,

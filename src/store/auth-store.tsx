@@ -1,13 +1,14 @@
 /**
- * Role-aware & per-student password authentication store for Class 10T4.
+ * Role-aware & per-account password authentication store for Class 10T4.
  *
  * - Each Student has their own unique Login ID (Số ID) and self-chosen personal
  *   password. Duplicate IDs with wrong passwords are strictly rejected.
- * - Homeroom Teacher (`teacher`) & Subject Teachers (`subject_teacher`)
- *   authenticate with the dedicated teacher password (`K8T4`).
+ * - Homeroom Teachers (`teacher`) & Subject Teachers (`subject_teacher`) can
+ *   create & sign in with their own personal Teacher Account (unique Mã ID +
+ *   personal password) OR authenticate via the class teacher access code (`K8T4`).
  * - Exposes `accountScopeKey` so personal usage (Decor, Coins, Stickers,
  *   Missions, Task checklists, Saved resources, Pomodoro stats) is 100%
- *   isolated per student account.
+ *   isolated per account.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -27,6 +28,16 @@ import {
   registerStudentAccount,
   verifyStudentLogin,
 } from '@/lib/student-accounts';
+import {
+  changeOwnTeacherPassword,
+  loadTeacherAccounts,
+  registerTeacherAccount,
+  removeTeacherAccount,
+  updateTeacherAccount,
+  verifyTeacherLogin,
+  type TeacherAccountRecord,
+  type TeacherRole,
+} from '@/lib/teacher-accounts';
 import type { MemberRole, MemberUpdatePatch, Profile } from '@/types/auth';
 import type { Gender } from '@/types/models';
 
@@ -44,6 +55,7 @@ type StoredPassSession = {
   accountRole?: AccountRole;
   subjectName?: string | null;
   studentId?: string | null;
+  teacherId?: string | null;
   loginId?: string | null;
   signedInAt: string;
 };
@@ -57,14 +69,19 @@ function makeLocalProfile(
   accountRole: AccountRole,
   subjectName: string | null,
   studentId: string | null,
+  teacherId: string | null,
   createdAt: string,
 ): Profile {
   return {
     id:
       accountRole === 'teacher'
-        ? 'local-teacher'
+        ? teacherId
+          ? `gv_${teacherId}`
+          : 'local-teacher'
         : accountRole === 'subject_teacher'
-          ? 'local-subject-teacher'
+          ? teacherId
+            ? `gv_${teacherId}`
+            : 'local-subject-teacher'
           : studentId
             ? `stu_${studentId}`
             : 'local-student',
@@ -87,6 +104,7 @@ export type SignInOptions = {
 };
 
 export type SwitchRoleOptions = {
+  loginId?: string;
   password?: string;
   subjectName?: string | null;
   displayName?: string;
@@ -98,6 +116,34 @@ export type RegisterStudentInput = {
   password: string;
   gender?: Gender;
   group?: string | null;
+};
+
+export type RegisterTeacherInput = {
+  name: string;
+  loginId: string;
+  password: string;
+  role: TeacherRole;
+  subject?: string | null;
+  teacherAccessCode: string;
+};
+
+export type CreateTeacherAccountInput = {
+  name: string;
+  loginId: string;
+  password: string;
+  role: TeacherRole;
+  subject?: string | null;
+  /** Required only when a Subject Teacher creates a Homeroom Teacher (GVCN) account. */
+  teacherAccessCode?: string;
+};
+
+export type UpdateTeacherAccountInput = {
+  teacherId: string;
+  name?: string;
+  role?: TeacherRole;
+  subject?: string | null;
+  newLoginId?: string;
+  newPassword?: string;
 };
 
 export type AuthStore = {
@@ -115,12 +161,18 @@ export type AuthStore = {
   subjectName: string | null;
   /** Bound student record ID when `accountRole === 'student'`. */
   studentId: string | null;
-  /** Bound student Login ID (Số ID) when `accountRole === 'student'`. */
+  /** Bound personal teacher account ID when signed in via a registered teacher account. */
+  teacherId: string | null;
+  /** Bound Login ID (Số ID) for personal student or teacher accounts. */
   loginId: string | null;
   /** Unique storage namespace key for per-account personal usage data. */
   accountScopeKey: string;
   /** Number of registered student accounts on this device (count only, no names). */
   studentAccountCount: number;
+  /** Number of registered personal teacher accounts on this device. */
+  teacherAccountCount: number;
+  /** Monotonic version counter that increments whenever teacher accounts change. */
+  teacherAccountsVersion: number;
   /** Increments on each explicit sign-in to trigger fresh login rewards. */
   loginEventId: number;
   /** Cloud OAuth is disabled in password-access mode. */
@@ -141,11 +193,37 @@ export type AuthStore = {
     currentPassword: string,
     newPassword: string,
   ) => Promise<{ ok: boolean; error?: string }>;
+  signInAsTeacher: (
+    loginId: string,
+    password: string,
+    expectedRole?: TeacherRole,
+  ) => Promise<boolean>;
+  registerAndSignInTeacher: (
+    input: RegisterTeacherInput,
+  ) => Promise<{ ok: boolean; duplicateId?: boolean; passwordMatched?: boolean; error?: string }>;
+  createTeacherAccount: (input: CreateTeacherAccountInput) => Promise<{
+    ok: boolean;
+    account?: TeacherAccountRecord;
+    duplicateId?: boolean;
+    passwordMatched?: boolean;
+    error?: string;
+  }>;
+  editTeacherAccount: (input: UpdateTeacherAccountInput) => Promise<{
+    ok: boolean;
+    account?: TeacherAccountRecord;
+    error?: string;
+  }>;
+  deleteTeacherAccount: (teacherId: string) => Promise<{ ok: boolean; error?: string }>;
+  changeTeacherPassword: (
+    currentPassword: string,
+    newPassword: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
   refreshStudentAccountCount: () => Promise<void>;
+  refreshTeacherAccountCount: () => Promise<void>;
   switchAccountRole: (
     targetRole: AccountRole,
     options?: SwitchRoleOptions,
-  ) => Promise<{ ok: boolean; error?: string }>;
+  ) => Promise<{ ok: boolean; account?: TeacherAccountRecord; error?: string }>;
   updateSubjectProfile: (subjectName: string, displayName?: string) => Promise<void>;
   verifyTeacherPassword: (password: string) => boolean;
   signOut: () => Promise<void>;
@@ -166,8 +244,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [accountRole, setAccountRole] = useState<AccountRole>('student');
   const [subjectName, setSubjectName] = useState<string | null>(null);
   const [studentId, setStudentId] = useState<string | null>(null);
+  const [teacherId, setTeacherId] = useState<string | null>(null);
   const [loginId, setLoginId] = useState<string | null>(null);
   const [studentAccountCount, setStudentAccountCount] = useState(0);
+  const [teacherAccountCount, setTeacherAccountCount] = useState(0);
+  const [teacherAccountsVersion, setTeacherAccountsVersion] = useState(0);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loginEventId, setLoginEventId] = useState(0);
 
@@ -176,18 +257,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStudentAccountCount(list.length);
   }, []);
 
+  const refreshTeacherAccountCount = useCallback(async () => {
+    const list = await loadTeacherAccounts();
+    setTeacherAccountCount(list.length);
+    setTeacherAccountsVersion((v) => v + 1);
+  }, []);
+
   // Restore saved session on startup.
   useEffect(() => {
     let active = true;
     const init = async () => {
       try {
         await AsyncStorage.removeItem(LEGACY_OFFLINE_KEY).catch(() => {});
-        const [raw, accounts] = await Promise.all([
+        const [raw, studentAccounts, teacherAccounts] = await Promise.all([
           AsyncStorage.getItem(PASS_AUTH_KEY),
           loadStudentAccounts(),
+          loadTeacherAccounts(),
         ]);
         if (!active) return;
-        setStudentAccountCount(accounts.length);
+        setStudentAccountCount(studentAccounts.length);
+        setTeacherAccountCount(teacherAccounts.length);
         if (!raw) return;
 
         const parsed = JSON.parse(raw) as Partial<StoredPassSession> | null;
@@ -198,12 +287,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             : 'student';
           const savedSubject = parsed.subjectName?.trim() || null;
           const savedStudentId = parsed.studentId?.trim() || null;
+          const savedTeacherId = parsed.teacherId?.trim() || null;
           const savedLoginId = parsed.loginId?.trim() || null;
 
           // Enforce personal ID+password login for students: ignore legacy unlinked student sessions.
           if (savedRole === 'student') {
             const linkedAccount = savedStudentId
-              ? accounts.find((a) => a.studentId === savedStudentId)
+              ? studentAccounts.find((a) => a.studentId === savedStudentId)
               : null;
             if (!linkedAccount) {
               await AsyncStorage.removeItem(PASS_AUTH_KEY).catch(() => {});
@@ -215,9 +305,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setAccountRole('student');
             setSubjectName(null);
             setStudentId(linkedAccount.studentId);
+            setTeacherId(null);
             setLoginId(resolvedLoginId);
             setProfile(
-              makeLocalProfile(resolvedName, 'student', null, linkedAccount.studentId, ts),
+              makeLocalProfile(resolvedName, 'student', null, linkedAccount.studentId, null, ts),
+            );
+            return;
+          }
+
+          // Restore personal teacher account if bound to `teacherId`.
+          if (savedTeacherId) {
+            const linkedTeacher = teacherAccounts.find((t) => t.teacherId === savedTeacherId);
+            if (!linkedTeacher) {
+              await AsyncStorage.removeItem(PASS_AUTH_KEY).catch(() => {});
+              return;
+            }
+            setUnlocked(true);
+            setAccountRole(linkedTeacher.role);
+            setSubjectName(linkedTeacher.subject);
+            setStudentId(null);
+            setTeacherId(linkedTeacher.teacherId);
+            setLoginId(linkedTeacher.loginId);
+            setProfile(
+              makeLocalProfile(
+                linkedTeacher.name,
+                linkedTeacher.role,
+                linkedTeacher.subject,
+                null,
+                linkedTeacher.teacherId,
+                ts,
+              ),
             );
             return;
           }
@@ -226,8 +343,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAccountRole(savedRole);
           setSubjectName(savedSubject);
           setStudentId(null);
+          setTeacherId(null);
           setLoginId(null);
-          setProfile(makeLocalProfile(parsed.displayName?.trim() ?? '', savedRole, savedSubject, null, ts));
+          setProfile(
+            makeLocalProfile(parsed.displayName?.trim() ?? '', savedRole, savedSubject, null, null, ts),
+          );
         }
       } catch {
         // Ignore corrupt storage and ask for authentication.
@@ -247,6 +367,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       accountRole: AccountRole;
       subjectName: string | null;
       studentId: string | null;
+      teacherId: string | null;
       loginId: string | null;
       signedInAt?: string;
     }) => {
@@ -257,6 +378,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         accountRole: next.accountRole,
         subjectName: next.subjectName,
         studentId: next.studentId,
+        teacherId: next.teacherId,
         loginId: next.loginId,
         signedInAt: ts,
       };
@@ -265,9 +387,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAccountRole(next.accountRole);
       setSubjectName(next.subjectName);
       setStudentId(next.studentId);
+      setTeacherId(next.teacherId);
       setLoginId(next.loginId);
       setProfile(
-        makeLocalProfile(next.displayName, next.accountRole, next.subjectName, next.studentId, ts),
+        makeLocalProfile(
+          next.displayName,
+          next.accountRole,
+          next.subjectName,
+          next.studentId,
+          next.teacherId,
+          ts,
+        ),
       );
     },
     [],
@@ -312,6 +442,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             accountRole: requestedMode,
             subjectName: finalSubject,
             studentId: null,
+            teacherId: null,
             loginId: null,
           });
           setLoginEventId((n) => n + 1);
@@ -345,6 +476,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           accountRole: 'student',
           subjectName: null,
           studentId: res.account.studentId,
+          teacherId: null,
           loginId: res.account.loginId,
         });
         await refreshStudentAccountCount();
@@ -389,6 +521,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           accountRole: 'student',
           subjectName: null,
           studentId: res.account.studentId,
+          teacherId: null,
           loginId: res.account.loginId,
         });
         await refreshStudentAccountCount();
@@ -419,6 +552,226 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [accountRole, studentId],
   );
 
+  /* ---------- Personal Teacher Accounts ---------- */
+
+  const signInAsTeacher = useCallback(
+    async (
+      rawLoginId: string,
+      rawPassword: string,
+      expectedRole?: TeacherRole,
+    ): Promise<boolean> => {
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await verifyTeacherLogin(rawLoginId, rawPassword, expectedRole);
+        if (!res.ok) {
+          setError(res.error);
+          return false;
+        }
+        await persistSession({
+          displayName: res.account.name,
+          accountRole: res.account.role,
+          subjectName: res.account.subject,
+          studentId: null,
+          teacherId: res.account.teacherId,
+          loginId: res.account.loginId,
+        });
+        await refreshTeacherAccountCount();
+        setLoginEventId((n) => n + 1);
+        return true;
+      } catch {
+        setError('Không thể đăng nhập tài khoản giáo viên lúc này. Vui lòng thử lại.');
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [persistSession, refreshTeacherAccountCount],
+  );
+
+  const registerAndSignInTeacher = useCallback(
+    async (
+      input: RegisterTeacherInput,
+    ): Promise<{ ok: boolean; duplicateId?: boolean; passwordMatched?: boolean; error?: string }> => {
+      setBusy(true);
+      setError(null);
+      try {
+        const code = input.teacherAccessCode.trim();
+        if (!code) {
+          const msg = 'Vui lòng nhập Mã xác thực giáo viên để cấp quyền tạo tài khoản.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+        if (code !== TEACHER_ACCESS_PASSWORD) {
+          const msg =
+            'Mã xác thực giáo viên không chính xác! Chỉ giáo viên được cấp mã bảo mật lớp mới tạo được tài khoản giáo viên.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+
+        const res = await registerTeacherAccount({
+          name: input.name,
+          loginId: input.loginId,
+          password: input.password,
+          role: input.role,
+          subject: input.subject ?? null,
+          writeAuditLog: true,
+        });
+        if (!res.ok) {
+          setError(res.error);
+          return {
+            ok: false,
+            duplicateId: res.duplicateId,
+            passwordMatched: res.passwordMatched,
+            error: res.error,
+          };
+        }
+
+        await persistSession({
+          displayName: res.account.name,
+          accountRole: res.account.role,
+          subjectName: res.account.subject,
+          studentId: null,
+          teacherId: res.account.teacherId,
+          loginId: res.account.loginId,
+        });
+        await refreshTeacherAccountCount();
+        setLoginEventId((n) => n + 1);
+        return { ok: true };
+      } catch {
+        const msg = 'Không thể tạo tài khoản giáo viên. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [persistSession, refreshTeacherAccountCount],
+  );
+
+  const createTeacherAccount = useCallback(
+    async (
+      input: CreateTeacherAccountInput,
+    ): Promise<{
+      ok: boolean;
+      account?: TeacherAccountRecord;
+      duplicateId?: boolean;
+      passwordMatched?: boolean;
+      error?: string;
+    }> => {
+      if (accountRole === 'student') {
+        return {
+          ok: false,
+          error: 'Chỉ tài khoản giáo viên mới có quyền tạo tài khoản giáo viên mới.',
+        };
+      }
+      // Subject Teacher creating a Homeroom Teacher (GVCN) account must verify master teacher code.
+      if (accountRole === 'subject_teacher' && input.role === 'teacher') {
+        const cleanCode = input.teacherAccessCode?.trim() ?? '';
+        if (!cleanCode) {
+          return {
+            ok: false,
+            error: 'Vui lòng nhập Mã xác thực giáo viên chủ nhiệm để tạo tài khoản GVCN.',
+          };
+        }
+        if (cleanCode !== TEACHER_ACCESS_PASSWORD) {
+          return { ok: false, error: 'Mã xác thực giáo viên chủ nhiệm không chính xác!' };
+        }
+      }
+
+      const res = await registerTeacherAccount({
+        name: input.name,
+        loginId: input.loginId,
+        password: input.password,
+        role: input.role,
+        subject: input.subject ?? null,
+        writeAuditLog: false,
+      });
+
+      if (!res.ok) {
+        return {
+          ok: false,
+          duplicateId: res.duplicateId,
+          passwordMatched: res.passwordMatched,
+          error: res.error,
+        };
+      }
+
+      await refreshTeacherAccountCount();
+      return { ok: true, account: res.account };
+    },
+    [accountRole, refreshTeacherAccountCount],
+  );
+
+  const editTeacherAccount = useCallback(
+    async (
+      input: UpdateTeacherAccountInput,
+    ): Promise<{ ok: boolean; account?: TeacherAccountRecord; error?: string }> => {
+      const canEditTarget =
+        accountRole === 'teacher' || (teacherId !== null && teacherId === input.teacherId);
+      if (!canEditTarget) {
+        return { ok: false, error: 'Chỉ GVCN mới có quyền chỉnh sửa tài khoản giáo viên khác.' };
+      }
+      if (accountRole !== 'teacher' && input.role === 'teacher') {
+        return { ok: false, error: 'Bạn không thể tự nâng quyền lên Giáo viên chủ nhiệm.' };
+      }
+
+      const res = await updateTeacherAccount(input);
+      if (!res.ok || !res.account) {
+        return { ok: false, error: res.error ?? 'Không thể cập nhật tài khoản giáo viên.' };
+      }
+
+      // Sync active session immediately if editing the currently logged-in teacher account.
+      if (teacherId && teacherId === res.account.teacherId) {
+        await persistSession({
+          displayName: res.account.name,
+          accountRole: res.account.role,
+          subjectName: res.account.subject,
+          studentId: null,
+          teacherId: res.account.teacherId,
+          loginId: res.account.loginId,
+          signedInAt: profile?.createdAt,
+        });
+      }
+
+      await refreshTeacherAccountCount();
+      return { ok: true, account: res.account };
+    },
+    [accountRole, teacherId, profile?.createdAt, persistSession, refreshTeacherAccountCount],
+  );
+
+  const deleteTeacherAccount = useCallback(
+    async (targetTeacherId: string): Promise<{ ok: boolean; error?: string }> => {
+      if (accountRole !== 'teacher') {
+        return { ok: false, error: 'Chỉ Giáo viên chủ nhiệm mới có quyền xoá tài khoản giáo viên.' };
+      }
+      if (teacherId && teacherId === targetTeacherId) {
+        return { ok: false, error: 'Bạn không thể xoá tài khoản giáo viên đang đăng nhập.' };
+      }
+      await removeTeacherAccount(targetTeacherId);
+      await refreshTeacherAccountCount();
+      return { ok: true };
+    },
+    [accountRole, teacherId, refreshTeacherAccountCount],
+  );
+
+  const changeTeacherPassword = useCallback(
+    async (currentPassword: string, newPassword: string) => {
+      if ((accountRole !== 'teacher' && accountRole !== 'subject_teacher') || !teacherId) {
+        return {
+          ok: false,
+          error: 'Chỉ áp dụng cho tài khoản giáo viên cá nhân (có Mã ID riêng).',
+        };
+      }
+      return changeOwnTeacherPassword({
+        teacherId,
+        currentPassword,
+        newPassword,
+      });
+    },
+    [accountRole, teacherId],
+  );
+
   const signOut = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -428,19 +781,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAccountRole('student');
       setSubjectName(null);
       setStudentId(null);
+      setTeacherId(null);
       setLoginId(null);
       setProfile(null);
-      await refreshStudentAccountCount();
+      await Promise.all([refreshStudentAccountCount(), refreshTeacherAccountCount()]);
     } finally {
       setBusy(false);
     }
-  }, [refreshStudentAccountCount]);
+  }, [refreshStudentAccountCount, refreshTeacherAccountCount]);
 
   const switchAccountRole = useCallback(
     async (
       targetRole: AccountRole,
       options?: SwitchRoleOptions,
-    ): Promise<{ ok: boolean; error?: string }> => {
+    ): Promise<{ ok: boolean; account?: TeacherAccountRecord; error?: string }> => {
       // Switching to Student ALWAYS requires signing in with a personal Số ID + password.
       if (targetRole === 'student') {
         await signOut();
@@ -460,6 +814,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         accountRole === 'student' ||
         (accountRole === 'subject_teacher' && targetRole === 'teacher');
 
+      const providedLoginId = options?.loginId?.trim() ?? '';
+
+      if (providedLoginId) {
+        const res = await verifyTeacherLogin(
+          providedLoginId,
+          options?.password ?? '',
+          targetRole,
+        );
+        if (!res.ok) {
+          return { ok: false, error: res.error };
+        }
+        try {
+          await persistSession({
+            displayName: res.account.name,
+            accountRole: res.account.role,
+            subjectName: res.account.subject,
+            studentId: null,
+            teacherId: res.account.teacherId,
+            loginId: res.account.loginId,
+          });
+          return { ok: true, account: res.account };
+        } catch {
+          return { ok: false, error: 'Không thể chuyển tài khoản giáo viên. Vui lòng thử lại.' };
+        }
+      }
+
       if (needsTeacherAuth) {
         const cleanPass = options?.password?.trim() ?? '';
         if (!cleanPass) {
@@ -476,7 +856,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           accountRole: targetRole,
           subjectName: nextSubject,
           studentId: null,
-          loginId: null,
+          teacherId: targetRole === accountRole ? teacherId : null,
+          loginId: targetRole === accountRole ? loginId : null,
           signedInAt: profile?.createdAt,
         });
         return { ok: true };
@@ -484,7 +865,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: 'Không thể cập nhật vai trò. Vui lòng thử lại.' };
       }
     },
-    [accountRole, subjectName, profile, persistSession, signOut],
+    [accountRole, subjectName, teacherId, loginId, profile, persistSession, signOut],
   );
 
   const updateSubjectProfile = useCallback(
@@ -492,27 +873,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const cleanSub = nextSubject.trim() || 'Toán học';
       const cleanName =
         nextDisplayName !== undefined ? nextDisplayName.trim() : (profile?.displayName ?? '');
+      if (teacherId && accountRole === 'subject_teacher') {
+        await updateTeacherAccount({
+          teacherId,
+          name: cleanName || undefined,
+          subject: cleanSub,
+        }).catch(() => {});
+        await refreshTeacherAccountCount();
+      }
       await persistSession({
         displayName: cleanName,
         accountRole: 'subject_teacher',
         subjectName: cleanSub,
         studentId: null,
-        loginId: null,
+        teacherId: accountRole === 'subject_teacher' ? teacherId : null,
+        loginId: accountRole === 'subject_teacher' ? loginId : null,
         signedInAt: profile?.createdAt,
       });
     },
-    [profile, persistSession],
+    [accountRole, teacherId, loginId, profile, persistSession, refreshTeacherAccountCount],
   );
 
   const renameMe = useCallback(
     async (displayName: string): Promise<boolean> => {
       const clean = displayName.trim();
       try {
+        if (teacherId && clean.length >= 2) {
+          await updateTeacherAccount({ teacherId, name: clean }).catch(() => {});
+          await refreshTeacherAccountCount();
+        }
         await persistSession({
           displayName: clean,
           accountRole,
           subjectName,
           studentId,
+          teacherId,
           loginId,
           signedInAt: profile?.createdAt,
         });
@@ -521,17 +916,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return false;
       }
     },
-    [accountRole, subjectName, studentId, loginId, profile, persistSession],
+    [
+      accountRole,
+      subjectName,
+      studentId,
+      teacherId,
+      loginId,
+      profile,
+      persistSession,
+      refreshTeacherAccountCount,
+    ],
   );
 
   const accountScopeKey = useMemo(() => {
     if (!unlocked) return 'guest';
-    if (accountRole === 'teacher') return 'teacher';
+    if (accountRole === 'teacher') {
+      return teacherId ? `teacher:${teacherId}` : 'teacher';
+    }
     if (accountRole === 'subject_teacher') {
-      return `subject:${(subjectName || 'default').trim().toLowerCase()}`;
+      return teacherId
+        ? `teacher:${teacherId}`
+        : `subject:${(subjectName || 'default').trim().toLowerCase()}`;
     }
     return studentId ? `student:${studentId}` : 'guest';
-  }, [unlocked, accountRole, subjectName, studentId]);
+  }, [unlocked, accountRole, subjectName, studentId, teacherId]);
 
   const refreshProfile = useCallback(async () => {}, []);
   const fetchMembers = useCallback(async (): Promise<Profile[]> => [], []);
@@ -551,9 +959,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       accountRole,
       subjectName,
       studentId,
+      teacherId,
       loginId,
       accountScopeKey,
       studentAccountCount,
+      teacherAccountCount,
+      teacherAccountsVersion,
       loginEventId,
       isCloudActive: false,
       canEnterApp: unlocked,
@@ -562,7 +973,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signInAsStudent,
       registerAndSignInStudent,
       changeStudentPassword,
+      signInAsTeacher,
+      registerAndSignInTeacher,
+      createTeacherAccount,
+      editTeacherAccount,
+      deleteTeacherAccount,
+      changeTeacherPassword,
       refreshStudentAccountCount,
+      refreshTeacherAccountCount,
       switchAccountRole,
       updateSubjectProfile,
       verifyTeacherPassword,
@@ -582,15 +1000,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       accountRole,
       subjectName,
       studentId,
+      teacherId,
       loginId,
       accountScopeKey,
       studentAccountCount,
+      teacherAccountCount,
+      teacherAccountsVersion,
       loginEventId,
       signInWithPassword,
       signInAsStudent,
       registerAndSignInStudent,
       changeStudentPassword,
+      signInAsTeacher,
+      registerAndSignInTeacher,
+      createTeacherAccount,
+      editTeacherAccount,
+      deleteTeacherAccount,
+      changeTeacherPassword,
       refreshStudentAccountCount,
+      refreshTeacherAccountCount,
       switchAccountRole,
       updateSubjectProfile,
       verifyTeacherPassword,

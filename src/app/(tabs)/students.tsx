@@ -26,10 +26,13 @@ import { useDecor } from '@/store/decor-store';
 type SortKey = 'points' | 'name' | 'entries';
 type SmartFilter = 'all' | 'officers' | 'unpaid' | 'zero';
 
-const MEDALS: Record<number, { color: ThemeColor; soft: ThemeColor }> = {
-  1: { color: 'gold', soft: 'goldSoft' },
-  2: { color: 'silver', soft: 'silverSoft' },
-  3: { color: 'bronze', soft: 'bronzeSoft' },
+const MEDALS: Record<
+  number,
+  { color: ThemeColor; soft: ThemeColor; label: string; icon: keyof typeof Ionicons.glyphMap }
+> = {
+  1: { color: 'gold', soft: 'goldSoft', label: 'TOP 1', icon: 'trophy' },
+  2: { color: 'silver', soft: 'silverSoft', label: 'TOP 2', icon: 'medal' },
+  3: { color: 'bronze', soft: 'bronzeSoft', label: 'TOP 3', icon: 'ribbon' },
 };
 
 const SORTS: { key: SortKey; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -38,11 +41,15 @@ const SORTS: { key: SortKey; label: string; icon: keyof typeof Ionicons.glyphMap
   { key: 'entries', label: 'Năng nổ', icon: 'sparkles-outline' },
 ];
 
-const SMART_FILTERS: { key: SmartFilter; label: string }[] = [
-  { key: 'all', label: 'Tất cả' },
-  { key: 'officers', label: 'Ban cán sự' },
-  { key: 'unpaid', label: 'Chưa đóng quỹ' },
-  { key: 'zero', label: 'Cần động viên' },
+const SMART_FILTERS: {
+  key: SmartFilter;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+}[] = [
+  { key: 'all', label: 'Tất cả', icon: 'apps-outline' },
+  { key: 'officers', label: 'Ban cán sự', icon: 'shield-checkmark-outline' },
+  { key: 'unpaid', label: 'Chưa đóng quỹ', icon: 'wallet-outline' },
+  { key: 'zero', label: 'Cần động viên', icon: 'heart-outline' },
 ];
 
 export default function StudentsScreen() {
@@ -58,6 +65,7 @@ export default function StudentsScreen() {
     kudosOfStudent,
     fundPaid,
     isTeacher,
+    isSubjectTeacher,
     canViewAll,
     canEditClass,
     canAddStudents,
@@ -79,6 +87,12 @@ export default function StudentsScreen() {
     }
     return ['all', ...Array.from(set)];
   }, [ranking]);
+
+  const paidCount = useMemo(
+    () => Object.values(fundPaid).filter(Boolean).length,
+    [fundPaid],
+  );
+  const topPoints = ranking[0]?.points ?? 0;
 
   const rows = useMemo(() => {
     const q = stripVietnamese(query);
@@ -139,50 +153,88 @@ export default function StudentsScreen() {
               style={[
                 styles.myHero,
                 Shadow.floating,
-                { shadowColor: gradient[0], shadowOpacity: 0.28 },
+                { shadowColor: gradient[0], shadowOpacity: 0.3 },
               ]}>
               <View style={styles.myBubbleA} />
               <View style={styles.myBubbleB} />
+              <View style={styles.myBubbleC} />
 
-              <View style={styles.myHeroTop}>
-                <Avatar name={currentStudent.name} size={66} ring frame={decor.avatarFrame} />
-                <View style={styles.flex}>
-                  <View style={styles.idPill}>
-                    <Ionicons name="id-card" size={12} color="#FFFFFF" />
-                    <Text style={styles.idPillText}>{`ID: ${currentStudent.code}`}</Text>
-                  </View>
-                  <Text style={styles.myHeroName} numberOfLines={2}>
-                    {currentStudent.name}
-                  </Text>
-                  <Text style={styles.myHeroMeta} numberOfLines={1}>
-                    {[
-                      `Lớp ${classInfo.name}`,
-                      currentStudent.group || 'Chưa phân tổ',
-                      currentStudent.position?.trim(),
-                      mySeat?.label,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </Text>
+              {/* Top Frosted Status Row */}
+              <View style={styles.myHeroStatusRow}>
+                <View style={styles.frostedTag}>
+                  <Ionicons name="lock-closed" size={11} color="#FDE68A" />
+                  <Text style={styles.frostedTagText}>HỒ SƠ CÁ NHÂN BẢO MẬT</Text>
+                </View>
+                <View style={styles.idPill}>
+                  <Ionicons name="id-card" size={12} color="#FDE68A" />
+                  <Text style={styles.idPillText}>{`ID: ${currentStudent.code}`}</Text>
                 </View>
               </View>
 
+              <View style={styles.myHeroTop}>
+                <Avatar name={currentStudent.name} size={70} ring frame={decor.avatarFrame} />
+                <View style={styles.flex}>
+                  <Text style={styles.myHeroName} numberOfLines={2}>
+                    {currentStudent.name}
+                  </Text>
+                  <View style={styles.myMetaPillWrap}>
+                    <View style={styles.myMetaChip}>
+                      <Ionicons name="school-outline" size={11} color="#FFFFFF" />
+                      <Text style={styles.myMetaChipText}>{`Lớp ${classInfo.name}`}</Text>
+                    </View>
+                    <View style={styles.myMetaChip}>
+                      <Ionicons name="people-outline" size={11} color="#FFFFFF" />
+                      <Text style={styles.myMetaChipText}>
+                        {currentStudent.group || 'Chưa phân tổ'}
+                      </Text>
+                    </View>
+                    {currentStudent.position?.trim() ? (
+                      <View style={styles.myMetaChipGold}>
+                        <Ionicons name="star" size={10} color="#FDE68A" />
+                        <Text style={styles.myMetaChipGoldText}>
+                          {currentStudent.position.trim()}
+                        </Text>
+                      </View>
+                    ) : null}
+                    {mySeat?.label ? (
+                      <View style={styles.myMetaChip}>
+                        <Ionicons name="grid-outline" size={11} color="#FFFFFF" />
+                        <Text style={styles.myMetaChipText}>{mySeat.label}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                </View>
+              </View>
+
+              {/* Frosted Glass Stat Pills */}
               <View style={styles.myStatsBar}>
                 <View style={styles.myStatBox}>
+                  <View style={styles.myStatIconCircle}>
+                    <Ionicons name="trophy" size={13} color="#FDE68A" />
+                  </View>
                   <Text style={styles.myStatVal}>{myStats.points}</Text>
-                  <Text style={styles.myStatLab}>Điểm</Text>
+                  <Text style={styles.myStatLab}>Điểm tích lũy</Text>
                 </View>
                 <View style={styles.myStatBox}>
+                  <View style={styles.myStatIconCircle}>
+                    <Ionicons name="ribbon" size={13} color="#FFFFFF" />
+                  </View>
                   <Text style={styles.myStatVal}>{myStats.total}</Text>
                   <Text style={styles.myStatLab}>Bài đăng</Text>
                 </View>
                 <View style={styles.myStatBox}>
+                  <View style={styles.myStatIconCircle}>
+                    <Ionicons name="checkmark-done" size={13} color="#A7F3D0" />
+                  </View>
                   <Text style={styles.myStatVal}>
                     {myAtt?.rate !== null && myAtt?.rate !== undefined ? `${myAtt.rate}%` : '--'}
                   </Text>
                   <Text style={styles.myStatLab}>Chuyên cần</Text>
                 </View>
                 <View style={styles.myStatBox}>
+                  <View style={styles.myStatIconCircle}>
+                    <Ionicons name="heart" size={13} color="#FDA4AF" />
+                  </View>
                   <Text style={styles.myStatVal}>{myKudos}</Text>
                   <Text style={styles.myStatLab}>Kudos</Text>
                 </View>
@@ -197,7 +249,7 @@ export default function StudentsScreen() {
                     } as never)
                   }
                   style={({ pressed }) => [styles.heroWhiteBtn, pressed && { opacity: 0.85 }]}>
-                  <Ionicons name="person-circle" size={16} color={gradient[0]} />
+                  <Ionicons name="person-circle" size={17} color={gradient[0]} />
                   <Text style={[styles.heroWhiteBtnText, { color: gradient[0] }]}>
                     Mở hồ sơ của tôi
                   </Text>
@@ -210,7 +262,7 @@ export default function StudentsScreen() {
                     } as never)
                   }
                   style={({ pressed }) => [styles.heroGlassBtn, pressed && { opacity: 0.85 }]}>
-                  <Ionicons name="add-circle" size={16} color="#FFFFFF" />
+                  <Ionicons name="add-circle" size={17} color="#FFFFFF" />
                   <Text style={styles.heroGlassBtnText}>Đăng thành tích</Text>
                 </Pressable>
               </View>
@@ -228,9 +280,16 @@ export default function StudentsScreen() {
           </FadeIn>
         )}
 
-        {/* Actions: Add new student account (with own unique ID & password) or Switch account */}
+        {/* Actions: Add new account or Switch account */}
         <FadeIn index={2} style={styles.ctaRow}>
-          {canAddStudents ? (
+          {isSubjectTeacher ? (
+            <Button
+              label={'Tạo TK giáo viên'}
+              icon={'shield-checkmark'}
+              style={styles.flex}
+              onPress={() => router.push('/teacher-form' as never)}
+            />
+          ) : canAddStudents ? (
             <Button
               label={'Thêm học sinh mới'}
               icon={'person-add'}
@@ -254,7 +313,7 @@ export default function StudentsScreen() {
           <Card style={[styles.privacyCard, { borderColor: theme.accent }]}>
             <View style={styles.privacyHead}>
               <View style={[styles.privacyIcon, { backgroundColor: theme.accentSoft }]}>
-                <Ionicons name="shield-checkmark" size={19} color={theme.accent} />
+                <Ionicons name="shield-checkmark" size={20} color={theme.accent} />
               </View>
               <View style={styles.flex}>
                 <Text style={[styles.privacyTitle, { color: theme.text }]}>
@@ -279,15 +338,62 @@ export default function StudentsScreen() {
       <FadeIn index={0}>
         <SectionHeader
           large
-          title={'Tất cả học sinh'}
-          subtitle={rows.length + ' / ' + ranking.length + ' học sinh · Quyền GVCN'}
+          title={'Danh bạ & Bảng vàng'}
+          subtitle={rows.length + ' / ' + ranking.length + ' học sinh · Trung tâm điều hành GVCN'}
           actionLabel={'Tài khoản & MK'}
           onAction={() => router.push('/members' as never)}
         />
       </FadeIn>
 
+      {/* Bento Summary Strip */}
+      <FadeIn index={1}>
+        <View style={styles.bentoStrip}>
+          <View
+            style={[
+              styles.bentoItem,
+              Shadow.card,
+              { backgroundColor: theme.card, borderColor: theme.border },
+            ]}>
+            <View style={[styles.bentoGlow, { backgroundColor: theme.accentSoft }]} />
+            <View style={[styles.bentoIconWrap, { backgroundColor: theme.accentSoft }]}>
+              <Ionicons name="people" size={18} color={theme.accent} />
+            </View>
+            <Text style={[styles.bentoValue, { color: theme.text }]}>{ranking.length}</Text>
+            <Text style={[styles.bentoLabel, { color: theme.textSecondary }]}>Sĩ số</Text>
+          </View>
+
+          <View
+            style={[
+              styles.bentoItem,
+              Shadow.card,
+              { backgroundColor: theme.card, borderColor: theme.border },
+            ]}>
+            <View style={[styles.bentoGlow, { backgroundColor: theme.goldSoft }]} />
+            <View style={[styles.bentoIconWrap, { backgroundColor: theme.goldSoft }]}>
+              <Ionicons name="trophy" size={18} color={theme.gold} />
+            </View>
+            <Text style={[styles.bentoValue, { color: theme.gold }]}>{topPoints}</Text>
+            <Text style={[styles.bentoLabel, { color: theme.textSecondary }]}>Điểm cao nhất</Text>
+          </View>
+
+          <View
+            style={[
+              styles.bentoItem,
+              Shadow.card,
+              { backgroundColor: theme.card, borderColor: theme.border },
+            ]}>
+            <View style={[styles.bentoGlow, { backgroundColor: theme.successSoft }]} />
+            <View style={[styles.bentoIconWrap, { backgroundColor: theme.successSoft }]}>
+              <Ionicons name="wallet" size={18} color={theme.success} />
+            </View>
+            <Text style={[styles.bentoValue, { color: theme.success }]}>{paidCount}</Text>
+            <Text style={[styles.bentoLabel, { color: theme.textSecondary }]}>Đã đóng quỹ</Text>
+          </View>
+        </View>
+      </FadeIn>
+
       {canAddStudents ? (
-        <FadeIn index={1} style={styles.ctaRow}>
+        <FadeIn index={2} style={styles.ctaRow}>
           <Button
             label={'Thêm học sinh'}
             icon={'person-add'}
@@ -296,7 +402,15 @@ export default function StudentsScreen() {
           />
           {isTeacher ? (
             <Button
-              label={'Nhập nhanh DS'}
+              label={'Tạo TK GV'}
+              variant={'soft'}
+              icon={'shield-checkmark'}
+              onPress={() => router.push('/teacher-form' as never)}
+            />
+          ) : null}
+          {isTeacher ? (
+            <Button
+              label={'Nhập DS'}
               variant={'soft'}
               icon={'list'}
               onPress={() => router.push('/bulk-students' as never)}
@@ -305,57 +419,96 @@ export default function StudentsScreen() {
         </FadeIn>
       ) : null}
 
-      <FadeIn index={2}>
-        <TextField
-          icon={'search'}
-          placeholder={'Tìm theo tên, Số ID, chức vụ...'}
-          value={query}
-          onChangeText={setQuery}
-        />
-      </FadeIn>
-
-      {/* Group filter */}
+      {/* Search & Filter Control Deck */}
       <FadeIn index={3}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          {groups.map((g) => (
-            <Chip
-              key={g}
-              label={g === 'all' ? 'Tất cả tổ' : g}
-              selected={groupFilter === g}
-              onPress={() => setGroupFilter(g)}
-            />
-          ))}
-        </ScrollView>
-      </FadeIn>
+        <Card style={styles.controlDeck}>
+          <TextField
+            icon={'search'}
+            placeholder={'Tìm theo tên, Số ID, tổ, chức vụ...'}
+            value={query}
+            onChangeText={setQuery}
+          />
 
-      {/* Smart status filter */}
-      <FadeIn index={3}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          {SMART_FILTERS.map((f) => (
-            <Chip
-              key={f.key}
-              label={f.label}
-              selected={smartFilter === f.key}
-              onPress={() => setSmartFilter(f.key)}
-            />
-          ))}
-        </ScrollView>
-      </FadeIn>
+          {/* Group Filter Chips */}
+          <View style={styles.deckSection}>
+            <View style={styles.deckLabelRow}>
+              <Ionicons name="grid-outline" size={13} color={theme.textMuted} />
+              <Text style={[styles.deckLabel, { color: theme.textMuted }]}>LỌC THEO TỔ</Text>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chips}>
+              {groups.map((g) => (
+                <Chip
+                  key={g}
+                  label={g === 'all' ? 'Tất cả tổ' : g}
+                  selected={groupFilter === g}
+                  onPress={() => setGroupFilter(g)}
+                />
+              ))}
+            </ScrollView>
+          </View>
 
-      {/* Sort bar */}
-      <FadeIn index={4} style={styles.sortRow}>
-        <Text style={[styles.sortLabel, { color: theme.textMuted }]}>Sắp xếp:</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          {SORTS.map((s) => (
-            <Chip
-              key={s.key}
-              label={s.label}
-              icon={s.icon}
-              selected={sortBy === s.key}
-              onPress={() => setSortBy(s.key)}
-            />
-          ))}
-        </ScrollView>
+          {/* Smart Filter Pills */}
+          <View style={styles.deckSection}>
+            <View style={styles.deckLabelRow}>
+              <Ionicons name="sparkles-outline" size={13} color={theme.textMuted} />
+              <Text style={[styles.deckLabel, { color: theme.textMuted }]}>BỘ LỌC THÔNG MINH</Text>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chips}>
+              {SMART_FILTERS.map((f) => (
+                <Chip
+                  key={f.key}
+                  label={f.label}
+                  icon={f.icon}
+                  selected={smartFilter === f.key}
+                  onPress={() => setSmartFilter(f.key)}
+                />
+              ))}
+            </ScrollView>
+          </View>
+
+          {/* Sort Segmented Control */}
+          <View
+            style={[
+              styles.segmentedBar,
+              { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+            ]}>
+            {SORTS.map((s) => {
+              const active = sortBy === s.key;
+              return (
+                <Pressable
+                  key={s.key}
+                  onPress={() => setSortBy(s.key)}
+                  style={[
+                    styles.segmentBtn,
+                    active && [
+                      styles.segmentBtnActive,
+                      { backgroundColor: theme.card, borderColor: theme.border },
+                    ],
+                  ]}>
+                  <Ionicons
+                    name={s.icon}
+                    size={13}
+                    color={active ? theme.accent : theme.textSecondary}
+                  />
+                  <Text
+                    style={[
+                      styles.segmentText,
+                      { color: active ? theme.accent : theme.textSecondary },
+                      active && styles.segmentTextActive,
+                    ]}>
+                    {s.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </Card>
       </FadeIn>
 
       {rows.length === 0 ? (
@@ -374,89 +527,173 @@ export default function StudentsScreen() {
           const att = attendanceStatsOfStudent(row.student.id);
           const seat = seatOfStudent(row.student.id);
           const medal = MEDALS[row.rank];
+          const progressPct =
+            topPoints > 0 ? Math.min(100, Math.max(8, Math.round((row.points / topPoints) * 100))) : 8;
+          const isPaid = Boolean(fundPaid[row.student.id]);
 
           return (
-            <FadeIn key={row.student.id} index={Math.min(i + 5, 10)}>
+            <FadeIn key={row.student.id} index={Math.min(i + 4, 10)}>
               <Card
-                style={styles.row}
+                style={[
+                  styles.row,
+                  medal && {
+                    borderColor: theme[medal.color],
+                    borderWidth: 1.5,
+                  },
+                ]}
                 onPress={() =>
                   router.push({ pathname: '/student/[id]', params: { id: row.student.id } } as never)
                 }>
+                {/* Left Avatar + Glowing Medal Rank Badge */}
                 <View style={styles.avatarWrap}>
-                  <Avatar name={row.student.name} size={50} />
+                  <Avatar name={row.student.name} size={54} ring={Boolean(medal)} />
                   <View
                     style={[
                       styles.rankBadge,
+                      medal ? styles.rankBadgeMedal : null,
                       {
                         backgroundColor: medal ? theme[medal.soft] : theme.backgroundElement,
-                        borderColor: theme.card,
+                        borderColor: medal ? theme[medal.color] : theme.card,
+                        shadowColor: medal ? theme[medal.color] : 'transparent',
                       },
                     ]}>
                     {medal ? (
-                      <Ionicons name="trophy" size={10} color={theme[medal.color]} />
+                      <View style={styles.medalInner}>
+                        <Ionicons name={medal.icon} size={10} color={theme[medal.color]} />
+                        <Text style={[styles.medalRankNum, { color: theme[medal.color] }]}>
+                          {row.rank}
+                        </Text>
+                      </View>
                     ) : (
                       <Text style={[styles.rankText, { color: theme.textSecondary }]}>
-                        {row.rank}
+                        #{row.rank}
                       </Text>
                     )}
                   </View>
                 </View>
 
+                {/* Center Body: Name, Group & Officer Pills, Progress Bar */}
                 <View style={styles.body}>
                   <View style={styles.nameLine}>
                     <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
                       {row.student.name}
                     </Text>
+                    {medal ? (
+                      <View
+                        style={[
+                          styles.topCrownPill,
+                          { backgroundColor: theme[medal.soft], borderColor: theme[medal.color] },
+                        ]}>
+                        <Text style={[styles.topCrownText, { color: theme[medal.color] }]}>
+                          {medal.label}
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
-                  <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
+
+                  <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
                     {[
                       `ID: ${row.student.code}`,
-                      row.student.group ?? 'Chưa phân tổ',
-                      seat ? `H${seat.row}·G${seat.col}` : null,
-                      `${stats.total} bài`,
+                      seat ? `Bàn H${seat.row}·G${seat.col}` : null,
+                      `${stats.total} ghi nhận`,
+                      isPaid ? 'Đã đóng quỹ' : null,
                     ]
                       .filter(Boolean)
                       .join(' · ')}
                   </Text>
+
+                  {/* Group & Officer Pills */}
                   <View style={styles.metaBadges}>
+                    <Badge
+                      label={row.student.group?.trim() || 'Chưa phân tổ'}
+                      color={'accentText'}
+                      soft={'accentSoft'}
+                    />
                     {row.student.position?.trim() ? (
-                      <Badge label={row.student.position.trim()} color={'purple'} soft={'purpleSoft'} />
+                      <Badge
+                        label={row.student.position.trim()}
+                        color={'purple'}
+                        soft={'purpleSoft'}
+                        icon={'star'}
+                      />
                     ) : null}
                     {att.rate !== null ? (
                       <Badge
-                        label={`Chuyên cần ${att.rate}%`}
+                        label={`CC ${att.rate}%`}
                         color={att.rate >= 90 ? 'success' : 'warning'}
                         soft={att.rate >= 90 ? 'successSoft' : 'warningSoft'}
                       />
                     ) : null}
                   </View>
+
+                  {/* Smooth Gradient Progress Bar */}
+                  <View
+                    style={[
+                      styles.progressTrack,
+                      { backgroundColor: theme.backgroundElement },
+                    ]}>
+                    <LinearGradient
+                      colors={
+                        medal
+                          ? [theme[medal.color], gradient[1]]
+                          : [gradient[0], gradient[1]]
+                      }
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={[styles.progressFill, { width: `${progressPct}%` }]}
+                    />
+                  </View>
                 </View>
 
+                {/* Right Column: Score Pill & Polished +2đ Quick Reward Pill */}
                 <View style={styles.rightCol}>
-                  <View style={[styles.pointsPill, { backgroundColor: theme.accentSoft }]}>
-                    <Text style={[styles.points, { color: theme.accentText }]}>{row.points}</Text>
-                    <Text style={[styles.pointsUnit, { color: theme.accentText }]}>điểm</Text>
+                  <View
+                    style={[
+                      styles.pointsPill,
+                      {
+                        backgroundColor: medal ? theme[medal.soft] : theme.accentSoft,
+                        borderColor: medal ? theme[medal.color] : theme.border,
+                      },
+                    ]}>
+                    <Text
+                      style={[
+                        styles.points,
+                        { color: medal ? theme[medal.color] : theme.accentText },
+                      ]}>
+                      {row.points}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.pointsUnit,
+                        { color: medal ? theme[medal.color] : theme.accentText },
+                      ]}>
+                      điểm
+                    </Text>
                   </View>
                   {canEditClass ? (
                     <Pressable
                       onPress={() => {
                         quickReward(
                           row.student.id,
-                          'Phát biểu & tích cực trên lớp',
-                          1,
+                          'Phát biểu & tích cực xây dựng bài',
+                          2,
                           'study',
                           'activity',
                           'class',
                         );
-                        showToast(`Đã thưởng nhanh +1đ cho ${row.student.name}! ⚡`);
+                        showToast(`Đã thưởng nhanh +2đ cho ${row.student.name}! ⚡`);
                       }}
                       hitSlop={6}
                       style={({ pressed }) => [
                         styles.quickPlus,
-                        { backgroundColor: theme.successSoft },
-                        pressed && { opacity: 0.7 },
+                        {
+                          backgroundColor: theme.successSoft,
+                          borderColor: theme.success,
+                        },
+                        pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
                       ]}>
-                      <Text style={[styles.quickPlusText, { color: theme.success }]}>+1đ</Text>
+                      <Ionicons name="flash" size={10} color={theme.success} />
+                      <Text style={[styles.quickPlusText, { color: theme.success }]}>+2đ</Text>
                     </Pressable>
                   ) : null}
                 </View>
@@ -473,8 +710,89 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   ctaRow: { flexDirection: 'row', gap: Spacing.two },
   chips: { gap: Spacing.two, paddingRight: Spacing.two },
-  sortRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
-  sortLabel: { fontSize: 12, fontWeight: '700' },
+  bentoStrip: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+  },
+  bentoItem: {
+    flex: 1,
+    paddingVertical: Spacing.three,
+    paddingHorizontal: Spacing.two + 4,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    alignItems: 'flex-start',
+    gap: 4,
+    overflow: 'hidden',
+  },
+  bentoGlow: {
+    position: 'absolute',
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    top: -24,
+    right: -24,
+    opacity: 0.65,
+  },
+  bentoIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: Radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  bentoValue: {
+    fontSize: 21,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+  },
+  bentoLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  controlDeck: {
+    gap: Spacing.three,
+    padding: Spacing.three,
+  },
+  deckSection: {
+    gap: 6,
+  },
+  deckLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  deckLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+  },
+  segmentedBar: {
+    flexDirection: 'row',
+    padding: 4,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: 4,
+  },
+  segmentBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 8,
+    borderRadius: Radius.sm,
+  },
+  segmentBtnActive: {
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  segmentText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  segmentTextActive: {
+    fontWeight: '900',
+  },
   myHero: {
     padding: Spacing.four,
     borderRadius: Radius.xl,
@@ -483,31 +801,64 @@ const styles = StyleSheet.create({
   },
   myBubbleA: {
     position: 'absolute',
-    width: 190,
-    height: 190,
-    borderRadius: 95,
-    top: -80,
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    top: -85,
     right: -45,
-    backgroundColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
   },
   myBubbleB: {
     position: 'absolute',
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    width: 130,
+    height: 130,
+    borderRadius: 65,
     bottom: -55,
     left: -30,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(255,255,255,0.11)',
   },
-  myHeroTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
-  idPill: {
-    alignSelf: 'flex-start',
+  myBubbleC: {
+    position: 'absolute',
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    top: 40,
+    left: '45%',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  myHeroStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
+  frostedTag: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    backgroundColor: 'rgba(0,0,0,0.22)',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.28)',
+    borderWidth: 1,
     paddingHorizontal: 10,
-    paddingVertical: 3,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  frostedTagText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
+  myHeroTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
+  idPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.24)',
+    borderColor: 'rgba(253,230,138,0.35)',
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: Radius.pill,
   },
   idPillText: { color: '#FDE68A', fontSize: 11, fontWeight: '900', letterSpacing: 0.4 },
@@ -516,19 +867,64 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '900',
     letterSpacing: -0.4,
-    marginTop: 4,
   },
-  myHeroMeta: { color: 'rgba(255,255,255,0.88)', fontSize: 12, fontWeight: '600', marginTop: 2 },
+  myMetaPillWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  myMetaChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.pill,
+  },
+  myMetaChipText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  myMetaChipGold: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.pill,
+  },
+  myMetaChipGoldText: {
+    color: '#FDE68A',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   myStatsBar: { flexDirection: 'row', gap: Spacing.two },
   myStatBox: {
     flex: 1,
     backgroundColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.28)',
+    borderWidth: 1,
     borderRadius: Radius.md,
-    paddingVertical: 9,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
     alignItems: 'center',
+    gap: 2,
+  },
+  myStatIconCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.16)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
   },
   myStatVal: { color: '#FFFFFF', fontSize: 17, fontWeight: '900' },
-  myStatLab: { color: 'rgba(255,255,255,0.86)', fontSize: 10, fontWeight: '700', marginTop: 1 },
+  myStatLab: { color: 'rgba(255,255,255,0.88)', fontSize: 10, fontWeight: '700' },
   myHeroBtns: { flexDirection: 'row', gap: Spacing.two },
   heroWhiteBtn: {
     flex: 1,
@@ -537,7 +933,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
     backgroundColor: '#FFFFFF',
-    paddingVertical: 11,
+    paddingVertical: 12,
     borderRadius: Radius.md,
   },
   heroWhiteBtnText: { fontSize: 13, fontWeight: '900' },
@@ -548,7 +944,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
     backgroundColor: 'rgba(255,255,255,0.22)',
-    paddingVertical: 11,
+    borderColor: 'rgba(255,255,255,0.34)',
+    borderWidth: 1,
+    paddingVertical: 12,
     borderRadius: Radius.md,
   },
   heroGlassBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
@@ -563,38 +961,79 @@ const styles = StyleSheet.create({
   },
   privacyTitle: { fontSize: 14, fontWeight: '900', marginBottom: 3 },
   row: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
-  avatarWrap: { width: 50, height: 50 },
+  avatarWrap: { width: 54, height: 54 },
   rankBadge: {
     position: 'absolute',
     right: -6,
     bottom: -4,
-    minWidth: 20,
-    height: 20,
-    borderRadius: 10,
-    borderWidth: 2,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 3,
+    paddingHorizontal: 5,
+  },
+  rankBadgeMedal: {
+    shadowOpacity: 0.45,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  medalInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  medalRankNum: {
+    fontSize: 10,
+    fontWeight: '900',
   },
   rankText: { fontSize: 10, fontWeight: '800' },
-  body: { flex: 1, gap: 3 },
+  body: { flex: 1, gap: 4 },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  name: { fontSize: 15, fontWeight: '800', flexShrink: 1 },
-  metaBadges: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2 },
-  rightCol: { alignItems: 'center', gap: 5 },
+  name: { fontSize: 15.5, fontWeight: '800', flexShrink: 1 },
+  topCrownPill: {
+    paddingHorizontal: 7,
+    paddingVertical: 1.5,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+  },
+  topCrownText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  metaBadges: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 1 },
+  progressTrack: {
+    height: 5,
+    borderRadius: Radius.pill,
+    overflow: 'hidden',
+    marginTop: 3,
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: Radius.pill,
+  },
+  rightCol: { alignItems: 'center', gap: 6 },
   pointsPill: {
     alignItems: 'center',
     paddingHorizontal: 12,
     paddingVertical: 7,
     borderRadius: Radius.md,
-    minWidth: 54,
+    borderWidth: StyleSheet.hairlineWidth,
+    minWidth: 58,
   },
-  points: { fontSize: 17, fontWeight: '900', lineHeight: 19 },
-  pointsUnit: { fontSize: 10, fontWeight: '700', opacity: 0.8 },
+  points: { fontSize: 17, fontWeight: '900', lineHeight: 20 },
+  pointsUnit: { fontSize: 10, fontWeight: '700', opacity: 0.85 },
   quickPlus: {
-    paddingHorizontal: 9,
-    paddingVertical: 3,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  quickPlusText: { fontSize: 10, fontWeight: '900' },
+  quickPlusText: { fontSize: 10.5, fontWeight: '900' },
 });

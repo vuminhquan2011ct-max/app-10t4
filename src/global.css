@@ -8,25 +8,47 @@
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace;
   --font-rounded: 'Be Vietnam Pro', 'SF Pro Rounded', ui-sans-serif, system-ui, sans-serif;
   --font-serif: Georgia, 'Times New Roman', serif;
+  --selection-bg: rgba(47, 107, 255, 0.18);
+  --scrollbar-thumb: rgba(128, 140, 168, 0.32);
+  --scrollbar-thumb-hover: rgba(128, 140, 168, 0.52);
 }
 
 html,
 body {
   font-family: var(--font-display);
+  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior-y: none;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+::selection {
+  background-color: var(--selection-bg);
+  color: inherit;
 }
 
 * {
   scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   box-sizing: border-box;
 }
 
 [role='button'] {
   cursor: pointer;
-  transition: transform 150ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease;
+  user-select: none;
+  transition:
+    transform 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 150ms ease,
+    box-shadow 180ms ease;
+}
+
+[role='button']:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(47, 107, 255, 0.45);
+  outline-offset: 2px;
 }
 
 ::-webkit-scrollbar {
@@ -35,8 +57,13 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(128, 140, 168, 0.3);
+  background: var(--scrollbar-thumb);
   border-radius: 999px;
+  transition: background-color 150ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 ::-webkit-scrollbar-track {

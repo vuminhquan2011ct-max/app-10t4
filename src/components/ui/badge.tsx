@@ -13,14 +13,22 @@ type BadgeProps = {
   icon?: IoniconName;
 };
 
-/** Small colored pill used for entry status, level and category. */
+/** Small colored pill with a delicate 1px tinted border used for entry status, level and category. */
 export function Badge({ label, color, soft, icon }: BadgeProps) {
   const theme = useTheme();
+  const fg = theme[color];
 
   return (
-    <View style={[styles.badge, { backgroundColor: theme[soft] }]}>
-      {icon ? <Ionicons name={icon} size={12} color={theme[color]} /> : null}
-      <Text style={[styles.label, { color: theme[color] }]}>{label}</Text>
+    <View
+      style={[
+        styles.badge,
+        {
+          backgroundColor: theme[soft],
+          borderColor: `${fg}33`,
+        },
+      ]}>
+      {icon ? <Ionicons name={icon} size={12} color={fg} /> : null}
+      <Text style={[styles.label, { color: fg }]}>{label}</Text>
     </View>
   );
 }
@@ -31,12 +39,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     alignSelf: 'flex-start',
     gap: Spacing.one,
-    paddingHorizontal: Spacing.two,
-    paddingVertical: 3,
+    paddingHorizontal: 9,
+    paddingVertical: 3.5,
     borderRadius: Radius.pill,
+    borderWidth: 1,
   },
   label: {
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '800',
+    letterSpacing: 0.15,
   },
 });

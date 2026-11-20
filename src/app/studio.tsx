@@ -1,7 +1,8 @@
 /**
- * App Decoration & Personalization Studio (/studio).
+ * App Decoration & Personalization Studio 3.0 (/studio).
  *
  * Lets every student and teacher customize their own app experience:
+ *  - Interactive Mini-Dashboard Live Preview Hero
  *  - 5 One-Tap Aesthetic Combo Presets
  *  - 10 Brand Color Palettes + Light/Dark/System
  *  - 6 App-Wide SVG Wallpaper Patterns
@@ -74,6 +75,17 @@ export default function DecorationStudioScreen() {
         ? `GV Bộ môn ${subjectName ?? ''}`.trim()
         : (currentStudent?.name ?? 'Thành viên 10T4'));
 
+  const activeWallpaper =
+    WALLPAPER_LIST.find((w) => w.key === decor.wallpaper) ?? WALLPAPER_LIST[0];
+  const activeAmbient =
+    AMBIENT_EFFECT_LIST.find((a) => a.key === decor.ambientEffect) ?? AMBIENT_EFFECT_LIST[0];
+  const activeCardStyle =
+    CARD_STYLE_LIST.find((c) => c.key === decor.cardStyle) ?? CARD_STYLE_LIST[0];
+  const activeFrame =
+    AVATAR_FRAME_LIST.find((f) => f.key === decor.avatarFrame) ?? AVATAR_FRAME_LIST[0];
+  const activeAccent =
+    ACCENT_PRESET_LIST.find((p) => p.key === accentKey) ?? ACCENT_PRESET_LIST[0];
+
   const hapticTap = () => {
     if (Platform.OS !== 'web') Haptics.selectionAsync().catch(() => {});
   };
@@ -88,27 +100,48 @@ export default function DecorationStudioScreen() {
         onRightPress={() => router.push('/creative' as never)}
       />
 
-      {/* Live Preview Hero */}
+      {/* Live Preview Hero — Mini Dashboard Showcase */}
       <FadeIn index={0}>
         <LinearGradient
           colors={gradient}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={[styles.previewHero, Shadow.floating, { shadowColor: gradient[0], shadowOpacity: 0.3 }]}>
+          style={[
+            styles.previewHero,
+            Shadow.floating,
+            { shadowColor: gradient[0], shadowOpacity: 0.34 },
+          ]}>
           <View style={styles.bubbleA} />
           <View style={styles.bubbleB} />
+          <View style={styles.bubbleC} />
+
+          {/* Mini-Dashboard Top Status Strip */}
+          <View style={styles.previewStatusRow}>
+            <View style={styles.previewLiveTag}>
+              <View style={styles.previewLiveDot} />
+              <Text style={styles.previewEyebrow}>MINI-DASHBOARD LIVE PREVIEW</Text>
+            </View>
+            <View style={styles.previewSpecChip}>
+              <Ionicons name="color-palette-outline" size={11} color="#FFFFFF" />
+              <Text style={styles.previewSpecText}>{activeAccent.label}</Text>
+            </View>
+          </View>
+
+          {/* Main Identity & Mascot Showcase */}
           <View style={styles.previewTop}>
             <Avatar
               name={displayName}
               imageUrl={auth.isCloudActive ? auth.profile?.avatarUrl : null}
-              size={60}
+              size={62}
               ring
               frame={decor.avatarFrame}
             />
             <View style={styles.flex}>
-              <Text style={styles.previewEyebrow}>XEM TRƯỚC PHONG CÁCH CỦA BẠN</Text>
               <Text style={styles.previewName} numberOfLines={1}>
                 {displayName}
+              </Text>
+              <Text style={styles.previewSubRole} numberOfLines={1}>
+                {`Lớp ${classInfo.name} · Khung ${activeFrame.label} ${activeFrame.emoji}`}
               </Text>
               <View style={styles.moodGlass}>
                 <Text style={{ fontSize: 13 }}>{decor.moodEmoji}</Text>
@@ -117,20 +150,51 @@ export default function DecorationStudioScreen() {
                 </Text>
               </View>
             </View>
-            <MascotAvatar mascotId={decor.mascotId} size={56} mood="celebrating" />
+            <View style={styles.mascotPedestal}>
+              <MascotAvatar mascotId={decor.mascotId} size={56} mood="celebrating" />
+            </View>
           </View>
 
+          {/* Active Visual Specs Pill Strip (Wallpaper, Card Style, Ambient Effect) */}
+          <View style={styles.previewSpecsRow}>
+            <View style={styles.previewSpecChip}>
+              <Text style={{ fontSize: 11 }}>{activeWallpaper.emoji}</Text>
+              <Text style={styles.previewSpecText}>{`Nền: ${activeWallpaper.label}`}</Text>
+            </View>
+            <View style={styles.previewSpecChip}>
+              <Ionicons name={activeCardStyle.icon} size={11} color="#FFFFFF" />
+              <Text style={styles.previewSpecText}>{`Thẻ: ${activeCardStyle.label}`}</Text>
+            </View>
+            <View style={styles.previewSpecChip}>
+              <Text style={{ fontSize: 11 }}>{activeAmbient.emoji}</Text>
+              <Text style={styles.previewSpecText}>{`Hiệu ứng: ${activeAmbient.label}`}</Text>
+            </View>
+          </View>
+
+          {/* Pinned Stickers Showcase Dock */}
           {decor.heroStickerIds.length > 0 ? (
-            <View style={styles.previewStickers}>
-              {decor.heroStickerIds.map((sid) => (
-                <StickerBadge
-                  key={sid}
-                  id={sid}
-                  size={44}
-                  showRibbon={false}
-                  onPress={() => showToast('Sticker đã được ghim lên Trang Tổng quan! ✨', 'info')}
-                />
-              ))}
+            <View style={styles.previewStickersDock}>
+              <View style={styles.previewStickersHeader}>
+                <Text style={styles.previewStickersTitle}>
+                  {`STICKER GHIM TRANG CHỦ (${decor.heroStickerIds.length}/6)`}
+                </Text>
+                <Pressable onPress={() => router.push('/' as never)}>
+                  <Text style={styles.previewGoHome}>Xem Trang chủ →</Text>
+                </Pressable>
+              </View>
+              <View style={styles.previewStickers}>
+                {decor.heroStickerIds.map((sid) => (
+                  <StickerBadge
+                    key={sid}
+                    id={sid}
+                    size={44}
+                    showRibbon={false}
+                    onPress={() =>
+                      showToast('Sticker đã được ghim lên Trang Tổng quan! ✨', 'info')
+                    }
+                  />
+                ))}
+              </View>
             </View>
           ) : null}
         </LinearGradient>
@@ -149,43 +213,67 @@ export default function DecorationStudioScreen() {
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.comboRow}>
-          {AESTHETIC_COMBOS.map((combo) => (
-            <Pressable
-              key={combo.id}
-              onPress={() => {
-                hapticTap();
-                decor.applyCombo(combo);
-                showToast(`Đã áp dụng phong cách "${combo.name}"! 🎨`);
-              }}
-              style={({ pressed }) => [styles.comboWrap, pressed && styles.pressed]}>
-              <LinearGradient
-                colors={combo.preview}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={[styles.comboCard, Shadow.card]}>
-                <View style={styles.comboHead}>
-                  <View style={styles.comboBadge}>
-                    <Text style={styles.comboBadgeText}>{combo.badge}</Text>
+          {AESTHETIC_COMBOS.map((combo) => {
+            const isComboActive =
+              accentKey === combo.accent &&
+              decor.wallpaper === combo.wallpaper &&
+              decor.cardStyle === combo.cardStyle &&
+              decor.ambientEffect === combo.ambientEffect;
+            return (
+              <Pressable
+                key={combo.id}
+                onPress={() => {
+                  hapticTap();
+                  decor.applyCombo(combo);
+                  showToast(`Đã áp dụng phong cách "${combo.name}"! 🎨`);
+                }}
+                style={({ pressed }) => [styles.comboWrap, pressed && styles.pressed]}>
+                <LinearGradient
+                  colors={combo.preview}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[
+                    styles.comboCard,
+                    Shadow.card,
+                    isComboActive && styles.comboCardActive,
+                  ]}>
+                  <View style={styles.comboHead}>
+                    <View style={styles.comboBadge}>
+                      <Text style={styles.comboBadgeText}>{combo.badge}</Text>
+                    </View>
+                    <MascotAvatar mascotId={combo.mascotId} size={36} animate={false} />
                   </View>
-                  <MascotAvatar mascotId={combo.mascotId} size={34} animate={false} />
-                </View>
-                <Text style={styles.comboTitle}>{combo.name}</Text>
-                <Text style={styles.comboDesc} numberOfLines={2}>
-                  {combo.desc}
-                </Text>
-                <View style={styles.comboCta}>
-                  <Text style={styles.comboCtaText}>Áp dụng ngay →</Text>
-                </View>
-              </LinearGradient>
-            </Pressable>
-          ))}
+                  <Text style={styles.comboTitle}>{combo.name}</Text>
+                  <Text style={styles.comboDesc} numberOfLines={2}>
+                    {combo.desc}
+                  </Text>
+                  <View
+                    style={[
+                      styles.comboCta,
+                      isComboActive && { backgroundColor: 'rgba(255,255,255,0.92)' },
+                    ]}>
+                    <Text
+                      style={[
+                        styles.comboCtaText,
+                        isComboActive && { color: '#0F172A' },
+                      ]}>
+                      {isComboActive ? '✓ Đang dùng' : 'Áp dụng ngay →'}
+                    </Text>
+                  </View>
+                </LinearGradient>
+              </Pressable>
+            );
+          })}
         </ScrollView>
       </FadeIn>
 
       {/* Brand Color & Light/Dark */}
       <FadeIn index={2}>
         <Card style={styles.card}>
-          <Text style={[styles.cardTitle, { color: theme.text }]}>Chế độ & 10 Bảng màu</Text>
+          <View style={styles.cardHead}>
+            <Text style={[styles.cardTitle, { color: theme.text }]}>Chế độ & 10 Bảng màu</Text>
+            <Badge label={`✓ ${activeAccent.label}`} color={'accentText'} soft={'accentSoft'} />
+          </View>
 
           <View style={styles.modeRow}>
             {THEME_MODES.map((m) => {
@@ -214,7 +302,7 @@ export default function DecorationStudioScreen() {
                       styles.modeText,
                       { color: active ? theme.accentText : theme.textSecondary },
                     ]}>
-                    {m.label}
+                    {active ? `✓ ${m.label}` : m.label}
                   </Text>
                 </Pressable>
               );
@@ -233,7 +321,14 @@ export default function DecorationStudioScreen() {
                     decor.completeQuest('decorate');
                     showToast(`Đã đổi bảng màu ${preset.label}`, 'info');
                   }}
-                  style={({ pressed }) => [styles.paletteItem, pressed && styles.pressed]}>
+                  style={({ pressed }) => [
+                    styles.paletteItem,
+                    {
+                      backgroundColor: selected ? theme.accentSoft : theme.backgroundElement,
+                      borderColor: selected ? theme.accent : 'transparent',
+                    },
+                    pressed && styles.pressed,
+                  ]}>
                   <View
                     style={[
                       styles.orbRing,
@@ -250,11 +345,16 @@ export default function DecorationStudioScreen() {
                   <Text
                     style={[
                       styles.paletteName,
-                      { color: selected ? theme.text : theme.textSecondary },
+                      { color: selected ? theme.accentText : theme.textSecondary },
                     ]}
                     numberOfLines={1}>
                     {preset.label}
                   </Text>
+                  {selected ? (
+                    <Text style={[styles.activeMicroTag, { color: theme.accentText }]}>
+                      ✓ Đang dùng
+                    </Text>
+                  ) : null}
                 </Pressable>
               );
             })}
@@ -299,6 +399,13 @@ export default function DecorationStudioScreen() {
                   <Text style={{ color: theme.textMuted, fontSize: 10 }} numberOfLines={1}>
                     {item.desc}
                   </Text>
+                  {active ? (
+                    <View style={[styles.activePillTag, { backgroundColor: theme.card }]}>
+                      <Text style={[styles.activeMicroTag, { color: theme.accentText }]}>
+                        ✓ Đang dùng
+                      </Text>
+                    </View>
+                  ) : null}
                 </Pressable>
               );
             })}
@@ -343,6 +450,13 @@ export default function DecorationStudioScreen() {
                   <Text style={{ color: theme.textMuted, fontSize: 10 }} numberOfLines={1}>
                     {item.desc}
                   </Text>
+                  {active ? (
+                    <View style={[styles.activePillTag, { backgroundColor: theme.card }]}>
+                      <Text style={[styles.activeMicroTag, { color: theme.purple }]}>
+                        ✓ Đang dùng
+                      </Text>
+                    </View>
+                  ) : null}
                 </Pressable>
               );
             })}
@@ -353,7 +467,10 @@ export default function DecorationStudioScreen() {
       {/* Card Visual Style */}
       <FadeIn index={5}>
         <Card style={styles.card}>
-          <Text style={[styles.cardTitle, { color: theme.text }]}>Phong cách Thẻ giao diện</Text>
+          <View style={styles.cardHead}>
+            <Text style={[styles.cardTitle, { color: theme.text }]}>Phong cách Thẻ giao diện</Text>
+            <Badge label={'5 phong cách'} color={'accentText'} soft={'accentSoft'} />
+          </View>
           <View style={styles.cardStyleList}>
             {CARD_STYLE_LIST.map((cs) => {
               const active = decor.cardStyle === cs.key;
@@ -373,15 +490,21 @@ export default function DecorationStudioScreen() {
                     },
                     pressed && styles.pressed,
                   ]}>
-                  <Ionicons
-                    name={cs.icon}
-                    size={19}
-                    color={active ? theme.accentText : theme.textSecondary}
-                  />
+                  <View
+                    style={[
+                      styles.cardStyleIconWell,
+                      { backgroundColor: active ? theme.card : theme.backgroundSelected },
+                    ]}>
+                    <Ionicons
+                      name={cs.icon}
+                      size={19}
+                      color={active ? theme.accentText : theme.textSecondary}
+                    />
+                  </View>
                   <View style={styles.flex}>
                     <Text
                       style={[
-                        styles.tileTitle,
+                        styles.tileTitleLeft,
                         { color: active ? theme.accentText : theme.text },
                       ]}>
                       {cs.label}
@@ -389,8 +512,14 @@ export default function DecorationStudioScreen() {
                     <Text style={{ color: theme.textMuted, fontSize: 11 }}>{cs.desc}</Text>
                   </View>
                   {active ? (
-                    <Ionicons name="checkmark-circle" size={20} color={theme.accent} />
-                  ) : null}
+                    <View style={[styles.activePillTag, { backgroundColor: theme.card }]}>
+                      <Text style={[styles.activeMicroTag, { color: theme.accentText }]}>
+                        ✓ Đang dùng
+                      </Text>
+                    </View>
+                  ) : (
+                    <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+                  )}
                 </Pressable>
               );
             })}
@@ -424,14 +553,14 @@ export default function DecorationStudioScreen() {
                     },
                     pressed && styles.pressed,
                   ]}>
-                  <Avatar name={displayName} size={40} frame={f.key} />
+                  <Avatar name={displayName} size={42} frame={f.key} />
                   <Text
                     style={{
                       color: active ? theme.accentText : theme.textSecondary,
                       fontSize: 11,
                       fontWeight: '800',
                     }}>
-                    {f.label}
+                    {active ? `✓ ${f.label}` : f.label}
                   </Text>
                 </Pressable>
               );
@@ -588,6 +717,13 @@ export default function DecorationStudioScreen() {
                     numberOfLines={2}>
                     {m.roleTitle}
                   </Text>
+                  {active ? (
+                    <View style={[styles.activePillTag, { backgroundColor: theme.card }]}>
+                      <Text style={[styles.activeMicroTag, { color: theme.accentText }]}>
+                        ✓ Đang dùng
+                      </Text>
+                    </View>
+                  ) : null}
                 </Pressable>
               );
             })}
@@ -640,58 +776,142 @@ const styles = StyleSheet.create({
     borderRadius: Radius.xl,
     gap: Spacing.three,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
   },
   bubbleA: {
     position: 'absolute',
-    width: 190,
-    height: 190,
-    borderRadius: 95,
+    width: 195,
+    height: 195,
+    borderRadius: 99,
     top: -80,
     right: -45,
     backgroundColor: 'rgba(255,255,255,0.14)',
   },
   bubbleB: {
     position: 'absolute',
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    width: 130,
+    height: 130,
+    borderRadius: 65,
     bottom: -55,
     left: -25,
     backgroundColor: 'rgba(255,255,255,0.1)',
   },
+  bubbleC: {
+    position: 'absolute',
+    width: 75,
+    height: 75,
+    borderRadius: 40,
+    top: 35,
+    right: 90,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  previewStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  previewLiveTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  previewLiveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#34D399',
+  },
   previewTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
   previewEyebrow: {
-    color: 'rgba(255,255,255,0.82)',
+    color: 'rgba(255,255,255,0.92)',
     fontSize: 9,
     fontWeight: '900',
-    letterSpacing: 0.8,
+    letterSpacing: 0.7,
   },
-  previewName: { color: '#FFFFFF', fontSize: 19, fontWeight: '900', marginTop: 2 },
+  previewName: { color: '#FFFFFF', fontSize: 20, fontWeight: '900', letterSpacing: -0.3 },
+  previewSubRole: { color: 'rgba(255,255,255,0.88)', fontSize: 11, fontWeight: '700', marginTop: 1 },
   moodGlass: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    backgroundColor: 'rgba(0,0,0,0.2)',
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.26)',
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: Radius.pill,
-    marginTop: 4,
+    marginTop: 5,
   },
-  moodGlassText: { color: '#FFFFFF', fontSize: 11, fontWeight: '700', maxWidth: 165 },
+  moodGlassText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800', maxWidth: 165 },
+  mascotPedestal: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.3)',
+    padding: 6,
+    borderRadius: Radius.lg,
+  },
+  previewSpecsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  previewSpecChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.28)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  previewSpecText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
+  previewStickersDock: {
+    backgroundColor: 'rgba(0,0,0,0.18)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.24)',
+    padding: 10,
+    borderRadius: Radius.lg,
+    gap: 8,
+  },
+  previewStickersHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  previewStickersTitle: {
+    color: 'rgba(255,255,255,0.86)',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
+  previewGoHome: { color: '#FDE047', fontSize: 10, fontWeight: '900' },
   previewStickers: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.two,
-    paddingTop: Spacing.one,
   },
   comboRow: { gap: Spacing.two + 2, paddingRight: Spacing.two },
-  comboWrap: { width: 210 },
+  comboWrap: { width: 218 },
   comboCard: {
     padding: Spacing.three,
     borderRadius: Radius.lg,
     gap: 6,
-    minHeight: 158,
+    minHeight: 166,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  comboCardActive: {
+    borderColor: '#FFFFFF',
+    borderWidth: 2,
   },
   comboHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   comboBadge: {
@@ -702,16 +922,16 @@ const styles = StyleSheet.create({
   },
   comboBadgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
   comboTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '900', marginTop: 2 },
-  comboDesc: { color: 'rgba(255,255,255,0.9)', fontSize: 11, lineHeight: 16 },
+  comboDesc: { color: 'rgba(255,255,255,0.92)', fontSize: 11, lineHeight: 16 },
   comboCta: {
     marginTop: 'auto',
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    paddingHorizontal: 10,
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    paddingHorizontal: 11,
     paddingVertical: 5,
     borderRadius: Radius.pill,
   },
-  comboCtaText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  comboCtaText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
   card: { gap: Spacing.three },
   cardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   cardTitle: { fontSize: 15, fontWeight: '900' },
@@ -729,10 +949,27 @@ const styles = StyleSheet.create({
   },
   modeText: { fontSize: 12, fontWeight: '800' },
   paletteGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
-  paletteItem: { width: '18%', minWidth: 62, flexGrow: 1, alignItems: 'center', gap: 5 },
+  paletteItem: {
+    width: '18%',
+    minWidth: 64,
+    flexGrow: 1,
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderRadius: Radius.md,
+    borderWidth: 1.5,
+    gap: 4,
+  },
   orbRing: { padding: 3, borderRadius: 999, borderWidth: 2.5 },
   orb: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
-  paletteName: { fontSize: 10, fontWeight: '700', textAlign: 'center' },
+  paletteName: { fontSize: 10, fontWeight: '800', textAlign: 'center' },
+  activePillTag: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: Radius.pill,
+    marginTop: 2,
+  },
+  activeMicroTag: { fontSize: 9, fontWeight: '900' },
   tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   choiceTile: {
     width: '31%',
@@ -746,6 +983,7 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   tileTitle: { fontSize: 12, fontWeight: '800', textAlign: 'center' },
+  tileTitleLeft: { fontSize: 13, fontWeight: '800' },
   cardStyleList: { gap: Spacing.two },
   cardStyleRow: {
     flexDirection: 'row',
@@ -755,6 +993,13 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     borderWidth: 1.5,
   },
+  cardStyleIconWell: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   frameRow: { gap: Spacing.two, paddingVertical: 6, paddingRight: Spacing.two },
   frameItem: {
     alignItems: 'center',
@@ -763,7 +1008,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: Radius.md,
     borderWidth: 1.5,
-    minWidth: 82,
+    minWidth: 84,
   },
   moodWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   moodChip: {

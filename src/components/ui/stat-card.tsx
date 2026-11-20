@@ -1,8 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { Radius, Shadow, Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { Shadow, Spacing } from '@/constants/theme';
+import { useIsDark, useTheme } from '@/hooks/use-theme';
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
@@ -24,19 +24,53 @@ type StatCardProps = {
   onPress?: () => void;
 };
 
-/** Compact metric tile with a tinted icon badge and optional tap navigation. */
+/** Bento metric tile with dual-layer corner glow, squircle icon badge, and optional tap navigation. */
 export function StatCard({ label, value, icon, tone = 'accent', hint, onPress }: StatCardProps) {
   const theme = useTheme();
+  const isDark = useIsDark();
   const palette = TONES[tone];
+  const mainColor = theme[palette.color];
+  const softColor = theme[palette.soft];
 
   const inner = (
     <>
-      <View style={[styles.glow, { backgroundColor: theme[palette.soft] }]} />
+      <View
+        pointerEvents="none"
+        style={[
+          styles.glowOuter,
+          { backgroundColor: softColor, opacity: isDark ? 0.65 : 0.9 },
+        ]}
+      />
+      <View
+        pointerEvents="none"
+        style={[
+          styles.glowInner,
+          { backgroundColor: mainColor, opacity: isDark ? 0.18 : 0.12 },
+        ]}
+      />
       <View style={styles.topRow}>
-        <View style={[styles.iconBox, { backgroundColor: theme[palette.soft] }]}>
-          <Ionicons name={icon} size={18} color={theme[palette.color]} />
+        <View
+          style={[
+            styles.iconBox,
+            {
+              backgroundColor: softColor,
+              borderColor: `${mainColor}33`,
+            },
+          ]}>
+          <Ionicons name={icon} size={19} color={mainColor} />
         </View>
-        {onPress ? <Ionicons name="arrow-up-outline" size={14} color={theme.textMuted} style={styles.arrow} /> : null}
+        {onPress ? (
+          <View
+            style={[
+              styles.arrowPill,
+              {
+                backgroundColor: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(11, 18, 32, 0.04)',
+                borderColor: theme.border,
+              },
+            ]}>
+            <Ionicons name="arrow-up-outline" size={13} color={mainColor} style={styles.arrow} />
+          </View>
+        ) : null}
       </View>
       <Text style={[styles.value, { color: theme.text }]} numberOfLines={1}>
         {value}
@@ -44,7 +78,11 @@ export function StatCard({ label, value, icon, tone = 'accent', hint, onPress }:
       <Text style={[styles.label, { color: theme.textSecondary }]} numberOfLines={2}>
         {label}
       </Text>
-      {hint ? <Text style={[styles.hint, { color: theme.textMuted }]}>{hint}</Text> : null}
+      {hint ? (
+        <Text style={[styles.hint, { color: theme.textMuted }]} numberOfLines={1}>
+          {hint}
+        </Text>
+      ) : null}
     </>
   );
 
@@ -74,20 +112,27 @@ const styles = StyleSheet.create({
   card: {
     flex: 1,
     minWidth: 140,
-    borderRadius: Radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 24,
+    borderWidth: 1,
     padding: Spacing.three,
-    gap: 2,
+    gap: 3,
     overflow: 'hidden',
   },
-  glow: {
+  glowOuter: {
     position: 'absolute',
-    top: -34,
-    right: -34,
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    opacity: 0.7,
+    top: -38,
+    right: -38,
+    width: 112,
+    height: 112,
+    borderRadius: 56,
+  },
+  glowInner: {
+    position: 'absolute',
+    top: -18,
+    right: -18,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
   },
   topRow: {
     flexDirection: 'row',
@@ -96,15 +141,29 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.two,
   },
   iconBox: {
-    width: 38,
-    height: 38,
-    borderRadius: Radius.sm,
+    width: 40,
+    height: 40,
+    borderRadius: 13,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  arrow: { transform: [{ rotate: '45deg' }], opacity: 0.7 },
-  value: { fontSize: 28, fontWeight: '900', letterSpacing: -0.8 },
-  label: { fontSize: 12, fontWeight: '600', lineHeight: 16 },
-  hint: { fontSize: 11 },
-  pressed: { opacity: 0.86, transform: [{ scale: 0.98 }] },
+  arrowPill: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  arrow: { transform: [{ rotate: '45deg' }] },
+  value: {
+    fontSize: 28,
+    fontWeight: '900',
+    letterSpacing: -0.9,
+    fontVariant: ['tabular-nums'],
+  },
+  label: { fontSize: 12, fontWeight: '700', lineHeight: 16 },
+  hint: { fontSize: 11, fontWeight: '500', marginTop: 1 },
+  pressed: { opacity: 0.88, transform: [{ scale: 0.98 }] },
 });

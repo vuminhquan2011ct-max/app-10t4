@@ -44,6 +44,8 @@ function greetingByHour(): string {
   return 'Chào buổi tối';
 }
 
+const SPOTLIGHT_HINTS = ['Học sinh', 'Sơ đồ', 'AI'] as const;
+
 const QUICK_DOCK: {
   label: string;
   icon: IoniconName;
@@ -122,6 +124,7 @@ export default function DashboardScreen() {
   const maxPoints = Math.max(1, ranking[0]?.points ?? 1);
   const goalPoints = Math.max(10, classInfo.goalPoints ?? 200);
   const goalRatio = Math.min(1, totals.points / goalPoints);
+  const goalPercent = Math.round(goalRatio * 100);
   const featuredAnnouncement = announcements[0] ?? null;
   const activePoll = polls.find((p) => !p.closed) ?? null;
   const nextTask = tasks.find((t) => !doneTaskIds[t.id]) ?? null;
@@ -147,6 +150,15 @@ export default function DashboardScreen() {
           ? theme.danger
           : theme.textMuted;
 
+  const syncStatusLabel =
+    syncStatus === 'synced'
+      ? 'Đồng bộ'
+      : syncStatus === 'syncing'
+        ? 'Đang tải'
+        : syncStatus === 'offline'
+          ? 'Offline'
+          : 'Local';
+
   // Personalized metrics when viewing as an authenticated student
   const myStats = currentStudent ? statsOfStudent(currentStudent.id) : null;
   const myAtt = currentStudent ? attendanceStatsOfStudent(currentStudent.id) : null;
@@ -160,65 +172,111 @@ export default function DashboardScreen() {
 
   return (
     <Screen onRefresh={handleRefresh}>
-      {/* Top Greeting & Controls */}
-      <FadeIn index={0} style={styles.topRow}>
-        <Pressable onPress={() => router.push('/studio' as never)}>
-          <Avatar
-            name={greeting}
-            imageUrl={auth.isCloudActive ? auth.profile?.avatarUrl : null}
-            size={46}
-            ring
-            frame={decor.avatarFrame}
-          />
-        </Pressable>
-        <View style={styles.topTexts}>
-          <Text style={[styles.topSmall, { color: theme.textSecondary }]}>
-            {greetingByHour() + ' 👋'}
-          </Text>
-          <Text style={[styles.topName, { color: theme.text }]} numberOfLines={1}>
-            {greeting}
-          </Text>
-          {decor.moodText ? (
+      {/* Top Greeting & Glassmorphic Utility Bar */}
+      <FadeIn index={0}>
+        <View
+          style={[
+            styles.topHeaderCard,
+            Shadow.card,
+            {
+              backgroundColor: isDark ? 'rgba(18, 24, 38, 0.88)' : 'rgba(255, 255, 255, 0.9)',
+              borderColor: theme.border,
+            },
+          ]}>
+          <View style={styles.topRow}>
             <Pressable
               onPress={() => router.push('/studio' as never)}
-              style={[styles.moodPill, { backgroundColor: theme.accentSoft }]}>
-              <Text style={{ fontSize: 11 }}>{decor.moodEmoji}</Text>
-              <Text style={[styles.moodPillText, { color: theme.accentText }]} numberOfLines={1}>
-                {decor.moodText}
-              </Text>
+              style={({ pressed }) => [styles.avatarWrap, pressed && styles.pressed]}>
+              <Avatar
+                name={greeting}
+                imageUrl={auth.isCloudActive ? auth.profile?.avatarUrl : null}
+                size={48}
+                ring
+                frame={decor.avatarFrame}
+              />
+              <View
+                style={[
+                  styles.onlineBadgeDot,
+                  { backgroundColor: syncDotColor, borderColor: theme.card },
+                ]}
+              />
             </Pressable>
-          ) : null}
-        </View>
 
-        <View style={styles.topControls}>
-          <Pressable
-            onPress={() => router.push('/studio' as never)}
-            accessibilityLabel={'Mở Studio Trang trí App'}
-            style={({ pressed }) => [
-              styles.themeBtn,
-              { backgroundColor: theme.purpleSoft, borderColor: theme.border },
-              pressed && styles.pressed,
-            ]}>
-            <Ionicons name="color-wand" size={17} color={theme.purple} />
-          </Pressable>
-          <Pressable
-            onPress={() => router.push('/settings' as never)}
-            style={[styles.syncPill, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <View style={[styles.syncDot, { backgroundColor: syncDotColor }]} />
-            <Text style={[styles.syncLabel, { color: theme.textSecondary }]}>
-              {MEMBER_ROLES[memberRole].short}
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={toggleDark}
-            accessibilityLabel={'Đổi chế độ sáng tối'}
-            style={({ pressed }) => [
-              styles.themeBtn,
-              { backgroundColor: theme.card, borderColor: theme.border },
-              pressed && styles.pressed,
-            ]}>
-            <Ionicons name={isDark ? 'sunny' : 'moon'} size={18} color={theme.accent} />
-          </Pressable>
+            <View style={styles.topTexts}>
+              <View style={styles.greetingMetaRow}>
+                <Text style={[styles.topSmall, { color: theme.textSecondary }]}>
+                  {greetingByHour() + ' 👋'}
+                </Text>
+                <Pressable
+                  onPress={() => router.push('/settings' as never)}
+                  style={[
+                    styles.roleChip,
+                    { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                  ]}>
+                  <View style={[styles.syncDot, { backgroundColor: syncDotColor }]} />
+                  <Text style={[styles.roleChipText, { color: theme.textSecondary }]}>
+                    {`${MEMBER_ROLES[memberRole].short} · ${syncStatusLabel}`}
+                  </Text>
+                </Pressable>
+              </View>
+
+              <Text style={[styles.topName, { color: theme.text }]} numberOfLines={1}>
+                {greeting}
+              </Text>
+
+              {decor.moodText ? (
+                <Pressable
+                  onPress={() => router.push('/studio' as never)}
+                  style={[
+                    styles.moodPill,
+                    { backgroundColor: theme.accentSoft, borderColor: theme.border },
+                  ]}>
+                  <Text style={{ fontSize: 11 }}>{decor.moodEmoji}</Text>
+                  <Text
+                    style={[styles.moodPillText, { color: theme.accentText }]}
+                    numberOfLines={1}>
+                    {decor.moodText}
+                  </Text>
+                  <Ionicons name="sparkles" size={10} color={theme.accentText} />
+                </Pressable>
+              ) : null}
+            </View>
+
+            <View style={styles.topControls}>
+              <Pressable
+                onPress={() => router.push('/studio' as never)}
+                accessibilityLabel={'Mở Studio Trang trí App'}
+                style={({ pressed }) => [
+                  styles.utilityBtn,
+                  { backgroundColor: theme.purpleSoft, borderColor: theme.border },
+                  pressed && styles.pressed,
+                ]}>
+                <Ionicons name="color-wand" size={17} color={theme.purple} />
+              </Pressable>
+
+              <Pressable
+                onPress={toggleDark}
+                accessibilityLabel={'Đổi chế độ sáng tối'}
+                style={({ pressed }) => [
+                  styles.utilityBtn,
+                  { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                  pressed && styles.pressed,
+                ]}>
+                <Ionicons name={isDark ? 'sunny' : 'moon'} size={17} color={theme.accent} />
+              </Pressable>
+
+              <Pressable
+                onPress={() => router.push('/settings' as never)}
+                accessibilityLabel={'Cài đặt'}
+                style={({ pressed }) => [
+                  styles.utilityBtn,
+                  { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                  pressed && styles.pressed,
+                ]}>
+                <Ionicons name="options-outline" size={17} color={theme.textSecondary} />
+              </Pressable>
+            </View>
+          </View>
         </View>
       </FadeIn>
 
@@ -227,7 +285,7 @@ export default function DashboardScreen() {
         <FadeIn index={1}>
           <Card style={[styles.welcomeTour, { borderColor: theme.accent, borderWidth: 1.5 }]}>
             <View style={styles.welcomeRow}>
-              <MascotAvatar mascotId={decor.mascotId} size={52} mood="waving" />
+              <MascotAvatar mascotId={decor.mascotId} size={54} mood="waving" />
               <View style={styles.flex}>
                 <Text style={[styles.welcomeEyebrow, { color: theme.accentText }]}>
                   {`${activeMascot.name.toUpperCase()} · HƯỚNG DẪN VIÊN 10T4`}
@@ -259,7 +317,7 @@ export default function DashboardScreen() {
         </FadeIn>
       ) : null}
 
-      {/* Global Spotlight Command Trigger */}
+      {/* Raycast-Style Global Spotlight Command Trigger */}
       <FadeIn index={1}>
         <Pressable
           onPress={openPalette}
@@ -269,106 +327,176 @@ export default function DashboardScreen() {
             { backgroundColor: theme.card, borderColor: theme.border },
             pressed && styles.pressed,
           ]}>
-          <View style={[styles.spotIcon, { backgroundColor: theme.accentSoft }]}>
-            <Ionicons name="search" size={15} color={theme.accent} />
-          </View>
+          <LinearGradient
+            colors={gradient}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.spotIcon}>
+            <Ionicons name="search" size={15} color="#FFFFFF" />
+          </LinearGradient>
+
           <Text style={[styles.spotPlaceholder, { color: theme.textMuted }]} numberOfLines={1}>
-            Tìm học sinh, sơ đồ, tài liệu, lệnh nhanh...
+            Tìm nhanh mọi thứ...
           </Text>
-          <View style={[styles.kbdPill, { backgroundColor: theme.backgroundElement }]}>
-            <Text style={[styles.kbdText, { color: theme.textSecondary }]}>
+
+          <View style={styles.spotHintRow}>
+            {SPOTLIGHT_HINTS.map((hint) => (
+              <View
+                key={hint}
+                style={[
+                  styles.spotHintChip,
+                  { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                ]}>
+                <Text style={[styles.spotHintText, { color: theme.textSecondary }]}>{hint}</Text>
+              </View>
+            ))}
+          </View>
+
+          <View
+            style={[
+              styles.kbdPill,
+              { backgroundColor: theme.accentSoft, borderColor: theme.border },
+            ]}>
+            <Text style={[styles.kbdText, { color: theme.accentText }]}>
               {Platform.OS === 'web' ? '⌘K' : 'Nhanh'}
             </Text>
           </View>
         </Pressable>
       </FadeIn>
 
-      {/* Hero Banner 2.0 with Live Period + Health Ring */}
+      {/* Flagship Bento Hero Banner 3.0 */}
       <FadeIn index={2}>
         <LinearGradient
           colors={gradient}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={[styles.hero, Shadow.floating, { shadowColor: gradient[0], shadowOpacity: 0.3 }]}>
+          style={[
+            styles.hero,
+            Shadow.floating,
+            { shadowColor: gradient[0], shadowOpacity: 0.34 },
+          ]}>
+          {/* Multi-layered decorative glass orbs & mesh overlay */}
           <View style={[styles.bubble, styles.bubbleA]} />
           <View style={[styles.bubble, styles.bubbleB]} />
+          <View style={[styles.bubble, styles.bubbleC]} />
+          <View style={styles.heroMeshHighlight} />
 
+          {/* Top Metadata Badges Row */}
+          <View style={styles.heroPills}>
+            <View style={styles.glassPill}>
+              <Ionicons name="calendar-outline" size={11} color="#FFFFFF" />
+              <Text style={styles.glassText}>{classInfo.year}</Text>
+            </View>
+            <View style={styles.glassPill}>
+              <Ionicons name="school-outline" size={11} color="#FFFFFF" />
+              <Text style={styles.glassText}>{'K8T4 · THPT FPT'}</Text>
+            </View>
+            <Pressable
+              onPress={() => router.push('/schedule' as never)}
+              style={({ pressed }) => [
+                styles.glassPill,
+                styles.glassPillInteractive,
+                pressed && styles.pressed,
+              ]}>
+              <Ionicons name="sparkles" size={10} color="#FDE047" />
+              <Text style={styles.glassText}>{'Trực nhật: ' + todayDutyGroup}</Text>
+            </Pressable>
+          </View>
+
+          {/* Editorial Title + Class Health Ring Pedestal */}
           <View style={styles.heroTop}>
             <View style={styles.heroTexts}>
-              <View style={styles.heroPills}>
-                <View style={styles.glassPill}>
-                  <Text style={styles.glassText}>{classInfo.year}</Text>
-                </View>
-                <Pressable
-                  onPress={() => router.push('/schedule' as never)}
-                  style={styles.glassPill}>
-                  <Ionicons name="sparkles" size={10} color="#FFFFFF" />
-                  <Text style={styles.glassText}>{'Trực nhật: ' + todayDutyGroup}</Text>
-                </Pressable>
-              </View>
               <Text style={styles.heroTitle}>{'Lớp ' + classInfo.name}</Text>
               <Text style={styles.heroSmall} numberOfLines={2}>
                 {classInfo.school + ' · GVCN: ' + classInfo.teacherName}
               </Text>
               {classInfo.motto ? (
-                <Text style={styles.heroMotto} numberOfLines={2}>
-                  {'“' + classInfo.motto + '”'}
-                </Text>
+                <View style={styles.heroMottoBox}>
+                  <Ionicons name="ribbon-outline" size={13} color="rgba(255,255,255,0.92)" />
+                  <Text style={styles.heroMotto} numberOfLines={2}>
+                    {'“' + classInfo.motto + '”'}
+                  </Text>
+                </View>
               ) : null}
             </View>
+
             <Pressable
               onPress={() => router.push('/insights' as never)}
-              style={({ pressed }) => [pressed && styles.pressed]}>
+              style={({ pressed }) => [styles.healthPedestal, pressed && styles.pressed]}>
               <ProgressRing
                 progress={health.score / 100}
-                size={92}
+                size={88}
                 color={'#FFFFFF'}
-                trackColor={'rgba(255,255,255,0.25)'}
+                trackColor={'rgba(255,255,255,0.24)'}
                 label={health.grade}
                 caption={`Sức khoẻ ${health.score}`}
                 textColor={'#FFFFFF'}
-                captionColor={'rgba(255,255,255,0.88)'}
+                captionColor={'rgba(255,255,255,0.92)'}
               />
+              <View style={styles.healthMicroPill}>
+                <Text style={styles.healthMicroText}>AI Phân tích →</Text>
+              </View>
             </Pressable>
           </View>
 
-          {/* Live Current / Next Period Strip */}
+          {/* Frosted Glass Live Current / Next Period Ticker */}
           <Pressable
             onPress={() => router.push('/schedule' as never)}
-            style={styles.livePeriodRow}>
+            style={({ pressed }) => [styles.livePeriodRow, pressed && styles.pressed]}>
             <View
               style={[
-                styles.liveDot,
-                { backgroundColor: livePeriod.state === 'live' ? '#34D399' : '#FDE68A' },
-              ]}
-            />
+                styles.liveDotHalo,
+                {
+                  backgroundColor:
+                    livePeriod.state === 'live'
+                      ? 'rgba(52, 211, 153, 0.28)'
+                      : 'rgba(253, 230, 138, 0.25)',
+                },
+              ]}>
+              <View
+                style={[
+                  styles.liveDot,
+                  { backgroundColor: livePeriod.state === 'live' ? '#34D399' : '#FDE68A' },
+                ]}
+              />
+            </View>
             <Text style={styles.livePeriodText} numberOfLines={1}>
               {`${livePeriod.badge}: ${livePeriod.title}`}
             </Text>
-            <Ionicons name="chevron-forward" size={14} color="rgba(255,255,255,0.8)" />
+            <View style={styles.livePeriodCta}>
+              <Text style={styles.livePeriodCtaText}>Thời khóa biểu →</Text>
+            </View>
           </Pressable>
 
-          {/* Class Goal Progress Bar */}
+          {/* Semester Goal Progress Card */}
           <View style={styles.goalWrap}>
             <View style={styles.goalRow}>
-              <Text style={styles.goalLabel}>{'Mục tiêu thi đua học kỳ'}</Text>
-              <Text style={styles.goalValue}>
-                {totals.points + ' / ' + goalPoints + ' điểm (' + Math.round(goalRatio * 100) + '%)'}
-              </Text>
+              <View style={styles.goalTitleWrap}>
+                <Ionicons name="flag" size={12} color="#FDE047" />
+                <Text style={styles.goalLabel}>{'Mục tiêu thi đua học kỳ'}</Text>
+              </View>
+              <View style={styles.goalStatsRight}>
+                <Text style={styles.goalValue}>
+                  {`${totals.points} / ${goalPoints} điểm`}
+                </Text>
+                <View style={styles.goalPctPill}>
+                  <Text style={styles.goalPctText}>{`${goalPercent}%`}</Text>
+                </View>
+              </View>
             </View>
             <View style={styles.goalTrack}>
               <View
                 style={[
                   styles.goalFill,
-                  { width: `${Math.max(4, Math.round(goalRatio * 100))}%` as `${number}%` },
+                  { width: `${Math.max(4, goalPercent)}%` as `${number}%` },
                 ]}
               />
             </View>
           </View>
 
-          {/* Pinned Die-Cut Hero Stickers Strip */}
+          {/* Sleek Frosted Hero Sticker Showcase Dock */}
           {decor.heroStickerIds.length > 0 ? (
-            <View style={styles.heroStickersRow}>
+            <View style={styles.heroStickersDock}>
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -383,7 +511,9 @@ export default function DashboardScreen() {
                       showRibbon={false}
                       onPress={() =>
                         showToast(
-                          meta ? `${meta.label}: ${meta.desc} ✨` : 'Sticker 10T4 siêu dễ thương! ✨',
+                          meta
+                            ? `${meta.label}: ${meta.desc} ✨`
+                            : 'Sticker 10T4 siêu dễ thương! ✨',
                           'info',
                         )
                       }
@@ -393,7 +523,7 @@ export default function DashboardScreen() {
               </ScrollView>
               <Pressable
                 onPress={() => router.push('/studio' as never)}
-                style={styles.decorMiniBtn}>
+                style={({ pressed }) => [styles.decorMiniBtn, pressed && styles.pressed]}>
                 <Ionicons name="color-wand" size={13} color="#FFFFFF" />
                 <Text style={styles.decorMiniText}>Đổi</Text>
               </Pressable>
@@ -402,12 +532,84 @@ export default function DashboardScreen() {
         </LinearGradient>
       </FadeIn>
 
+      {/* Holographic Treasure, 7-Day Login Reward & Rare Sticker Missions Strip */}
+      <FadeIn index={2}>
+        <LinearGradient
+          colors={['#090D1F', '#2E1065', '#831843', '#9D174D']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0.9 }}
+          style={[styles.rewardStrip, Shadow.card]}>
+          <View style={styles.rewardOrbGlow} />
+          <Pressable
+            onPress={decor.openLoginRewardModal}
+            style={({ pressed }) => [styles.rewardWallet, pressed && styles.pressed]}>
+            <View style={styles.rewardCoinCircle}>
+              <Text style={{ fontSize: 19 }}>🪙</Text>
+            </View>
+            <View style={styles.rewardWalletTexts}>
+              <View style={styles.rewardWalletTopRow}>
+                <Text style={styles.rewardCoinVal}>{`${decor.coins} Xu 10T4`}</Text>
+                <View style={styles.streakTag}>
+                  <Text style={styles.streakTagText}>{`🔥 ${decor.loginStreak}N`}</Text>
+                </View>
+              </View>
+              <Text style={styles.rewardCoinSub} numberOfLines={1}>
+                {decor.canClaimLoginReward
+                  ? '🎁 Quà điểm danh hôm nay đã sẵn sàng!'
+                  : `Chuỗi đăng nhập ${decor.loginStreak} ngày liên tiếp`}
+              </Text>
+            </View>
+          </Pressable>
+
+          <View style={styles.rewardBtns}>
+            <Pressable
+              onPress={decor.openLoginRewardModal}
+              style={({ pressed }) => [
+                styles.rewardAction,
+                decor.canClaimLoginReward && styles.rewardActionHot,
+                pressed && styles.pressed,
+              ]}>
+              <Ionicons
+                name="gift"
+                size={14}
+                color={decor.canClaimLoginReward ? '#0F172A' : '#FDE047'}
+              />
+              <Text
+                style={[
+                  styles.rewardActionText,
+                  { color: decor.canClaimLoginReward ? '#0F172A' : '#FDE047' },
+                ]}>
+                {decor.canClaimLoginReward ? 'Điểm danh' : 'Quà 7N'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() =>
+                router.push({ pathname: '/creative', params: { tab: 'missions' } } as never)
+              }
+              style={({ pressed }) => [styles.rewardMissionBtn, pressed && styles.pressed]}>
+              <Ionicons name="trophy" size={14} color="#FFFFFF" />
+              <Text style={styles.rewardMissionText}>
+                {decor.claimableMissionCount > 0
+                  ? `Nhận ${decor.claimableMissionCount} quà!`
+                  : `NV ${decor.claimedMissions.length}/${STUDENT_MISSIONS.length}`}
+              </Text>
+            </Pressable>
+          </View>
+        </LinearGradient>
+      </FadeIn>
+
       {/* Pinned Creative Sticker Board Showcase (when pinned by user) */}
       {decor.pinBoardToHome && decor.canvasItems.length > 0 ? (
         <FadeIn index={3}>
           <Card style={styles.pinnedBoardCard} onPress={() => router.push('/creative' as never)}>
             <View style={styles.announceTop}>
-              <Badge label={'Góc Sticker sáng tạo của bạn'} color={'purple'} soft={'purpleSoft'} icon={'sparkles'} />
+              <Badge
+                label={'Góc Sticker sáng tạo của bạn'}
+                color={'purple'}
+                soft={'purpleSoft'}
+                icon={'sparkles'}
+              />
               <View style={styles.flex} />
               <Text style={[styles.seeAllMini, { color: theme.purple }]}>Chỉnh sửa →</Text>
             </View>
@@ -485,66 +687,7 @@ export default function DashboardScreen() {
         </FadeIn>
       ) : null}
 
-      {/* Coins, Daily Login Reward & Rare Sticker Missions Showcase Strip */}
-      <FadeIn index={2}>
-        <LinearGradient
-          colors={['#0F172A', '#3B0764', '#9D174D']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={[styles.rewardStrip, Shadow.card]}>
-          <Pressable onPress={decor.openLoginRewardModal} style={styles.rewardWallet}>
-            <View style={styles.rewardCoinCircle}>
-              <Text style={{ fontSize: 18 }}>🪙</Text>
-            </View>
-            <View>
-              <Text style={styles.rewardCoinVal}>{`${decor.coins} Xu`}</Text>
-              <Text style={styles.rewardCoinSub}>
-                {decor.canClaimLoginReward
-                  ? '🎁 Nhận quà hôm nay!'
-                  : `🔥 Chuỗi ${decor.loginStreak} ngày`}
-              </Text>
-            </View>
-          </Pressable>
-
-          <View style={styles.rewardBtns}>
-            <Pressable
-              onPress={decor.openLoginRewardModal}
-              style={({ pressed }) => [
-                styles.rewardAction,
-                decor.canClaimLoginReward && styles.rewardActionHot,
-                pressed && styles.pressed,
-              ]}>
-              <Ionicons
-                name="gift"
-                size={14}
-                color={decor.canClaimLoginReward ? '#0F172A' : '#FDE047'}
-              />
-              <Text
-                style={[
-                  styles.rewardActionText,
-                  { color: decor.canClaimLoginReward ? '#0F172A' : '#FDE047' },
-                ]}>
-                {decor.canClaimLoginReward ? 'Điểm danh' : 'Quà 7N'}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() =>
-                router.push({ pathname: '/creative', params: { tab: 'missions' } } as never)
-              }
-              style={({ pressed }) => [styles.rewardMissionBtn, pressed && styles.pressed]}>
-              <Ionicons name="trophy" size={14} color="#FFFFFF" />
-              <Text style={styles.rewardMissionText}>
-                {decor.claimableMissionCount > 0
-                  ? `Nhận ${decor.claimableMissionCount} quà!`
-                  : `NV ${decor.claimedMissions.length}/${STUDENT_MISSIONS.length}`}
-              </Text>
-            </Pressable>
-          </View>
-        </LinearGradient>
-      </FadeIn>
-
-      {/* Vibrant Horizontal Quick-Action Dock */}
+      {/* Modern Squircle Quick-Action Launcher */}
       <FadeIn index={3}>
         <ScrollView
           horizontal
@@ -564,8 +707,12 @@ export default function DashboardScreen() {
                 { backgroundColor: theme.card, borderColor: theme.border },
                 pressed && styles.pressed,
               ]}>
-              <View style={[styles.quickIcon, { backgroundColor: theme[item.soft] }]}>
-                <Ionicons name={item.icon} size={20} color={theme[item.color]} />
+              <View
+                style={[
+                  styles.quickIcon,
+                  { backgroundColor: theme[item.soft], borderColor: theme.border },
+                ]}>
+                <Ionicons name={item.icon} size={22} color={theme[item.color]} />
               </View>
               <Text style={[styles.quickLabel, { color: theme.text }]} numberOfLines={1}>
                 {item.label}
@@ -629,9 +776,7 @@ export default function DashboardScreen() {
       {/* Smart Copilot Spotlight Pill */}
       {health.alerts[0] ? (
         <FadeIn index={4}>
-          <Card
-            style={styles.copilotPill}
-            onPress={() => router.push('/insights' as never)}>
+          <Card style={styles.copilotPill} onPress={() => router.push('/insights' as never)}>
             <View style={[styles.alertIcon, { backgroundColor: theme.purpleSoft }]}>
               <Ionicons name="sparkles" size={18} color={theme.purple} />
             </View>
@@ -654,9 +799,7 @@ export default function DashboardScreen() {
       {/* Pinned Announcement Spotlight */}
       {featuredAnnouncement ? (
         <FadeIn index={5}>
-          <Card
-            style={styles.announceCard}
-            onPress={() => router.push('/announcements' as never)}>
+          <Card style={styles.announceCard} onPress={() => router.push('/announcements' as never)}>
             <View style={styles.announceTop}>
               <Badge
                 label={ANNOUNCEMENT_TAGS[featuredAnnouncement.tag].label}
@@ -697,13 +840,18 @@ export default function DashboardScreen() {
         <FadeIn index={5} style={styles.grid}>
           {activePoll ? (
             <Card style={styles.flex} onPress={() => router.push('/polls' as never)}>
-              <Badge label={'Bình chọn mở'} color={'accent'} soft={'accentSoft'} icon={'bar-chart'} />
+              <Badge
+                label={'Bình chọn mở'}
+                color={'accent'}
+                soft={'accentSoft'}
+                icon={'bar-chart'}
+              />
               <Text
                 style={[styles.announceTitle, { color: theme.text, marginTop: 6 }]}
                 numberOfLines={2}>
                 {activePoll.question}
               </Text>
-              <Text style={{ color: theme.textMuted, fontSize: 11, marginTop: 4 }}>
+              <Text style={{ color: theme.textMuted, fontSize: 11, marginTop: 4, fontWeight: '700' }}>
                 {Object.keys(activePoll.votes ?? {}).length + ' phiếu · Bấm bỏ phiếu →'}
               </Text>
             </Card>
@@ -721,7 +869,7 @@ export default function DashboardScreen() {
                 numberOfLines={2}>
                 {nextTask.title}
               </Text>
-              <Text style={{ color: theme.textMuted, fontSize: 11, marginTop: 4 }}>
+              <Text style={{ color: theme.textMuted, fontSize: 11, marginTop: 4, fontWeight: '700' }}>
                 {nextTask.subject + ' · Xem deadline →'}
               </Text>
             </Card>
@@ -743,12 +891,14 @@ export default function DashboardScreen() {
               <Text style={[styles.seeAllMini, { color: theme.danger }]}>Bức tường khen →</Text>
             </View>
             <View style={styles.kudosBodyRow}>
-              <Avatar name={latestKudosRecipient?.name ?? '?'} size={36} />
+              <Avatar name={latestKudosRecipient?.name ?? '?'} size={40} ring />
               <View style={styles.flex}>
                 <Text style={[styles.announceTitle, { color: theme.text }]} numberOfLines={1}>
                   {'Tới ' + (latestKudosRecipient?.name ?? 'Bạn cùng lớp')}
                 </Text>
-                <Text style={[styles.announceBody, { color: theme.textSecondary }]} numberOfLines={2}>
+                <Text
+                  style={[styles.announceBody, { color: theme.textSecondary }]}
+                  numberOfLines={2}>
                   {'“' + latestKudos.message + '”'}
                 </Text>
               </View>
@@ -793,7 +943,22 @@ export default function DashboardScreen() {
 
       {/* Tabbed Interactive Analytics Deck */}
       <FadeIn index={8} style={styles.analyticsWrap}>
-        <View style={[styles.analyticsTabs, { backgroundColor: theme.card, borderColor: theme.border }]}>
+        <SectionHeader
+          title={'Phân tích & Nhịp độ thi đua'}
+          subtitle={
+            canViewAll
+              ? 'Biểu đồ trực quan theo tổ, tuần và lĩnh vực hoạt động'
+              : 'Thống kê nhịp độ tích lũy điểm của riêng bạn'
+          }
+          actionLabel={'Chi tiết AI'}
+          onAction={() => router.push('/insights' as never)}
+        />
+        <View
+          style={[
+            styles.analyticsTabs,
+            Shadow.card,
+            { backgroundColor: theme.card, borderColor: theme.border },
+          ]}>
           {(
             [
               ...(canViewAll
@@ -816,7 +981,14 @@ export default function DashboardScreen() {
               <Pressable
                 key={t.key}
                 onPress={() => setAnalyticsTab(t.key)}
-                style={[styles.analyticsBtn, active && { backgroundColor: theme.accentSoft }]}>
+                style={[
+                  styles.analyticsBtn,
+                  active && {
+                    backgroundColor: theme.accentSoft,
+                    borderColor: theme.accent,
+                    borderWidth: StyleSheet.hairlineWidth,
+                  },
+                ]}>
                 <Ionicons
                   name={t.icon}
                   size={14}
@@ -886,14 +1058,23 @@ export default function DashboardScreen() {
                               params: { id: row.student.id },
                             } as never)
                           }
-                          style={({ pressed }) => [styles.rankRow, pressed && styles.pressed]}>
-                          <Text style={[styles.rankNum, { color: theme.textMuted }]}>{row.rank}</Text>
+                          style={({ pressed }) => [
+                            styles.rankRow,
+                            { backgroundColor: theme.backgroundElement },
+                            pressed && styles.pressed,
+                          ]}>
+                          <View style={[styles.rankNumBadge, { backgroundColor: theme.card }]}>
+                            <Text style={[styles.rankNum, { color: theme.textSecondary }]}>
+                              {`#${row.rank}`}
+                            </Text>
+                          </View>
                           <Avatar name={row.student.name} size={36} />
                           <View style={styles.rankBody}>
                             <Text style={[styles.rankName, { color: theme.text }]} numberOfLines={1}>
                               {row.student.name}
                             </Text>
-                            <View style={[styles.track, { backgroundColor: theme.backgroundElement }]}>
+                            <View
+                              style={[styles.track, { backgroundColor: theme.backgroundSelected }]}>
                               <LinearGradient
                                 colors={gradient}
                                 start={{ x: 0, y: 0 }}
@@ -907,9 +1088,12 @@ export default function DashboardScreen() {
                               />
                             </View>
                           </View>
-                          <Text style={[styles.rankPts, { color: theme.accentText }]}>
-                            {row.points + ' đ'}
-                          </Text>
+                          <View
+                            style={[styles.rankPtsPill, { backgroundColor: theme.accentSoft }]}>
+                            <Text style={[styles.rankPts, { color: theme.accentText }]}>
+                              {row.points + ' đ'}
+                            </Text>
+                          </View>
                         </Pressable>
                       ))}
                     </View>
@@ -927,7 +1111,7 @@ export default function DashboardScreen() {
           <Card style={styles.bdayCard}>
             <View style={styles.bdayHead}>
               <View style={[styles.bdayIcon, { backgroundColor: theme.purpleSoft }]}>
-                <Ionicons name="gift" size={18} color={theme.purple} />
+                <Ionicons name="gift" size={20} color={theme.purple} />
               </View>
               <View style={styles.flex}>
                 <Text style={[styles.bdayTitle, { color: theme.text }]}>Sinh nhật sắp tới 🎂</Text>
@@ -940,13 +1124,16 @@ export default function DashboardScreen() {
               {upcomingBirthdays.slice(0, 4).map(({ student, daysLeft }) => (
                 <View
                   key={student.id}
-                  style={[styles.bdayRow, { backgroundColor: theme.backgroundElement }]}>
+                  style={[
+                    styles.bdayRow,
+                    { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                  ]}>
                   <Pressable
                     onPress={() =>
                       router.push({ pathname: '/student/[id]', params: { id: student.id } } as never)
                     }
                     style={styles.bdayLeft}>
-                    <Avatar name={student.name} size={34} />
+                    <Avatar name={student.name} size={36} ring={daysLeft === 0} />
                     <View style={styles.flex}>
                       <Text style={[styles.bdayName, { color: theme.text }]} numberOfLines={1}>
                         {student.name}
@@ -971,8 +1158,12 @@ export default function DashboardScreen() {
                         },
                       } as never)
                     }
-                    style={[styles.wishBtn, { backgroundColor: theme.dangerSoft }]}>
-                    <Ionicons name="heart" size={14} color={theme.danger} />
+                    style={({ pressed }) => [
+                      styles.wishBtn,
+                      { backgroundColor: theme.dangerSoft },
+                      pressed && styles.pressed,
+                    ]}>
+                    <Ionicons name="heart" size={15} color={theme.danger} />
                   </Pressable>
                 </View>
               ))}
@@ -986,26 +1177,48 @@ export default function DashboardScreen() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  topRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
-  topTexts: { flex: 1 },
-  topSmall: { fontSize: 12, fontWeight: '600' },
-  topName: { fontSize: 19, fontWeight: '900', letterSpacing: -0.4 },
-  topControls: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
-  syncPill: {
+  topHeaderCard: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + 4,
+    borderRadius: Radius.xl,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  topRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 4 },
+  avatarWrap: { position: 'relative' },
+  onlineBadgeDot: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 2,
+  },
+  topTexts: { flex: 1, gap: 2 },
+  greetingMetaRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: 6,
-    paddingHorizontal: 11,
-    paddingVertical: 8,
+  },
+  topSmall: { fontSize: 12, fontWeight: '700' },
+  roleChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
     borderRadius: Radius.pill,
     borderWidth: StyleSheet.hairlineWidth,
   },
-  syncDot: { width: 8, height: 8, borderRadius: 4 },
-  syncLabel: { fontSize: 12, fontWeight: '800' },
-  themeBtn: {
+  roleChipText: { fontSize: 10, fontWeight: '800' },
+  topName: { fontSize: 19, fontWeight: '900', letterSpacing: -0.4 },
+  topControls: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  syncDot: { width: 7, height: 7, borderRadius: 3.5 },
+  utilityBtn: {
     width: 38,
     height: 38,
-    borderRadius: 19,
+    borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1016,81 +1229,196 @@ const styles = StyleSheet.create({
     gap: Spacing.two + 2,
     paddingHorizontal: 10,
     paddingVertical: 9,
-    borderRadius: Radius.pill,
+    borderRadius: Radius.lg,
     borderWidth: StyleSheet.hairlineWidth,
   },
   spotIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    width: 34,
+    height: 34,
+    borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
   },
   spotPlaceholder: { flex: 1, fontSize: 13, fontWeight: '600' },
+  spotHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  spotHintChip: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: Radius.xs,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  spotHintText: { fontSize: 10, fontWeight: '800' },
   kbdPill: {
     paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: Radius.pill,
+    paddingVertical: 5,
+    borderRadius: Radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  kbdText: { fontSize: 11, fontWeight: '800' },
+  kbdText: { fontSize: 11, fontWeight: '900' },
   hero: {
-    gap: Spacing.two + 4,
+    gap: Spacing.three,
     padding: Spacing.four,
     borderRadius: Radius.xl,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
   },
   heroTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
   bubble: { position: 'absolute', borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.12)' },
-  bubbleA: { width: 200, height: 200, top: -85, right: -55 },
-  bubbleB: { width: 130, height: 130, bottom: -65, left: -35 },
-  heroTexts: { flex: 1, gap: 4 },
+  bubbleA: { width: 220, height: 220, top: -90, right: -55 },
+  bubbleB: { width: 150, height: 150, bottom: -70, left: -40 },
+  bubbleC: {
+    width: 90,
+    height: 90,
+    top: 40,
+    right: 95,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+  },
+  heroMeshHighlight: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 2,
+    backgroundColor: 'rgba(255,255,255,0.35)',
+  },
+  heroTexts: { flex: 1, gap: 5 },
   heroPills: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   glassPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(255,255,255,0.22)',
+    gap: 5,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.34)',
     paddingHorizontal: 10,
-    paddingVertical: 3,
+    paddingVertical: 4,
     borderRadius: Radius.pill,
   },
+  glassPillInteractive: {
+    backgroundColor: 'rgba(0,0,0,0.22)',
+  },
   glassText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800', letterSpacing: 0.2 },
-  heroTitle: { color: '#FFFFFF', fontSize: 34, fontWeight: '900', letterSpacing: -1 },
-  heroSmall: { color: 'rgba(255,255,255,0.9)', fontSize: 13, fontWeight: '600' },
+  heroTitle: { color: '#FFFFFF', fontSize: 34, fontWeight: '900', letterSpacing: -1.1 },
+  heroSmall: { color: 'rgba(255,255,255,0.92)', fontSize: 13, fontWeight: '700' },
+  heroMottoBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.16)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.2)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: Radius.sm,
+    marginTop: 4,
+  },
   heroMotto: {
-    color: 'rgba(255,255,255,0.88)',
+    flex: 1,
+    color: 'rgba(255,255,255,0.94)',
     fontSize: 12,
     fontStyle: 'italic',
-    marginTop: 2,
     lineHeight: 17,
   },
+  healthPedestal: {
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.28)',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: Radius.lg,
+  },
+  healthMicroPill: {
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: Radius.pill,
+  },
+  healthMicroText: { color: '#FFFFFF', fontSize: 9, fontWeight: '800' },
   livePeriodRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    backgroundColor: 'rgba(255,255,255,0.17)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.28)',
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 9,
     borderRadius: Radius.md,
+  },
+  liveDotHalo: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   liveDot: { width: 8, height: 8, borderRadius: 4 },
   livePeriodText: { flex: 1, color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  livePeriodCta: {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.pill,
+  },
+  livePeriodCtaText: { color: 'rgba(255,255,255,0.92)', fontSize: 10, fontWeight: '800' },
   goalWrap: {
-    gap: 6,
-    backgroundColor: 'rgba(0,0,0,0.16)',
+    gap: 8,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.22)',
     padding: Spacing.two + 4,
     borderRadius: Radius.md,
   },
   goalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
-  goalLabel: { color: 'rgba(255,255,255,0.88)', fontSize: 11, fontWeight: '700' },
+  goalTitleWrap: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  goalLabel: { color: 'rgba(255,255,255,0.94)', fontSize: 11, fontWeight: '800' },
+  goalStatsRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   goalValue: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  goalPctPill: {
+    backgroundColor: 'rgba(253, 224, 71, 0.24)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(253, 224, 71, 0.6)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: Radius.pill,
+  },
+  goalPctText: { color: '#FDE047', fontSize: 10, fontWeight: '900' },
   goalTrack: {
-    height: 7,
+    height: 8,
     borderRadius: 4,
-    backgroundColor: 'rgba(255,255,255,0.25)',
+    backgroundColor: 'rgba(255,255,255,0.24)',
     overflow: 'hidden',
   },
-  goalFill: { height: 7, borderRadius: 4, backgroundColor: '#FFFFFF' },
+  goalFill: { height: 8, borderRadius: 4, backgroundColor: '#FFFFFF' },
+  heroStickersDock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.26)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: Radius.lg,
+  },
+  heroStickersScroll: { gap: 8, paddingVertical: 2 },
+  decorMiniBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: Radius.pill,
+  },
+  decorMiniText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
   studentCorner: { gap: Spacing.two + 2 },
   cornerTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   cornerName: { fontSize: 17, fontWeight: '900', marginTop: 4 },
@@ -1103,20 +1431,21 @@ const styles = StyleSheet.create({
   cornerRankVal: { fontSize: 20, fontWeight: '900', lineHeight: 22 },
   cornerRankSub: { fontSize: 11, fontWeight: '800' },
   cornerStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  dockScroll: { gap: Spacing.two, paddingRight: Spacing.two },
+  dockScroll: { gap: Spacing.two + 2, paddingRight: Spacing.two },
   quickTile: {
-    width: 82,
+    width: 86,
     alignItems: 'center',
-    gap: 6,
+    gap: 7,
     paddingVertical: 12,
     paddingHorizontal: 6,
     borderRadius: Radius.lg,
     borderWidth: StyleSheet.hairlineWidth,
   },
   quickIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: Radius.md,
+    width: 46,
+    height: 46,
+    borderRadius: 15,
+    borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1142,13 +1471,19 @@ const styles = StyleSheet.create({
     gap: Spacing.two + 2,
   },
   copilotEyebrow: { fontSize: 10, fontWeight: '900', letterSpacing: 0.7 },
-  alertIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+  alertIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   alertTexts: { flex: 1 },
   alertTitle: { fontSize: 14, fontWeight: '800' },
   alertSub: { fontSize: 12 },
   pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   grid: { flexDirection: 'row', gap: Spacing.three },
-  analyticsWrap: { gap: Spacing.two },
+  analyticsWrap: { gap: Spacing.two + 2 },
   analyticsTabs: {
     flexDirection: 'row',
     padding: 5,
@@ -1167,18 +1502,47 @@ const styles = StyleSheet.create({
   },
   analyticsLabel: { fontSize: 12, fontWeight: '800' },
   rankCard: { gap: Spacing.four, paddingTop: Spacing.four, paddingBottom: Spacing.three },
-  restList: { gap: Spacing.three, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: Spacing.three },
-  rankRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
-  rankNum: { width: 20, fontSize: 14, fontWeight: '800', textAlign: 'center' },
+  restList: {
+    gap: Spacing.two + 2,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.three,
+  },
+  rankRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two + 2,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: Radius.md,
+  },
+  rankNumBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rankNum: { fontSize: 12, fontWeight: '900', textAlign: 'center' },
   rankBody: { flex: 1, gap: 5 },
-  rankName: { fontSize: 14, fontWeight: '700' },
+  rankName: { fontSize: 14, fontWeight: '800' },
   track: { height: 6, borderRadius: 3, overflow: 'hidden' },
   fill: { height: 6, borderRadius: 3 },
-  rankPts: { fontSize: 14, fontWeight: '800' },
+  rankPtsPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  rankPts: { fontSize: 13, fontWeight: '900' },
   bdayCard: { gap: Spacing.three },
-  bdayHead: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
-  bdayIcon: { width: 38, height: 38, borderRadius: Radius.sm, alignItems: 'center', justifyContent: 'center' },
-  bdayTitle: { fontSize: 15, fontWeight: '800' },
+  bdayHead: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
+  bdayIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bdayTitle: { fontSize: 15, fontWeight: '900' },
   bdaySub: { fontSize: 12 },
   bdayList: { gap: Spacing.two },
   bdayRow: {
@@ -1187,14 +1551,15 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
     padding: Spacing.two + 2,
     borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   bdayLeft: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2, flex: 1 },
   bdayName: { fontSize: 14, fontWeight: '800' },
   bdayDate: { fontSize: 11, fontWeight: '600' },
   wishBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1202,35 +1567,19 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
     borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
     marginTop: 2,
   },
-  moodPillText: { fontSize: 10, fontWeight: '800', maxWidth: 160 },
+  moodPillText: { fontSize: 10, fontWeight: '800', maxWidth: 165 },
   welcomeTour: { gap: Spacing.two + 2 },
   welcomeRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
   welcomeEyebrow: { fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   welcomeTitle: { fontSize: 15, fontWeight: '900', marginTop: 2 },
   welcomeBtns: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
-  heroStickersRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    marginTop: 2,
-  },
-  heroStickersScroll: { gap: 8, paddingVertical: 2 },
-  decorMiniBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(255,255,255,0.22)',
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: Radius.pill,
-  },
-  decorMiniText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
   pinnedBoardCard: { gap: Spacing.two + 2 },
   rewardStrip: {
     flexDirection: 'row',
@@ -1238,39 +1587,63 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: Spacing.two,
     paddingHorizontal: Spacing.three,
-    paddingVertical: 11,
-    borderRadius: Radius.lg,
+    paddingVertical: 12,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    borderColor: 'rgba(253, 224, 71, 0.25)',
+    overflow: 'hidden',
+  },
+  rewardOrbGlow: {
+    position: 'absolute',
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    top: -45,
+    right: -30,
+    backgroundColor: 'rgba(236, 72, 153, 0.22)',
   },
   rewardWallet: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.two,
+    gap: Spacing.two + 2,
     flexShrink: 1,
   },
   rewardCoinCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(250, 204, 21, 0.2)',
-    borderWidth: 1,
-    borderColor: 'rgba(250, 204, 21, 0.5)',
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: 'rgba(250, 204, 21, 0.22)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(250, 204, 21, 0.6)',
     alignItems: 'center',
     justifyContent: 'center',
   },
+  rewardWalletTexts: { flexShrink: 1, gap: 1 },
+  rewardWalletTopRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   rewardCoinVal: { color: '#FDE047', fontSize: 15, fontWeight: '900', letterSpacing: -0.2 },
-  rewardCoinSub: { color: 'rgba(255,255,255,0.86)', fontSize: 11, fontWeight: '700' },
+  streakTag: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: Radius.pill,
+  },
+  streakTagText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
+  rewardCoinSub: { color: 'rgba(255,255,255,0.88)', fontSize: 11, fontWeight: '700' },
   rewardBtns: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   rewardAction: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.28)',
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: Radius.pill,
   },
   rewardActionHot: {
     backgroundColor: '#FDE047',
+    borderColor: '#FEF08A',
   },
   rewardActionText: { fontSize: 11, fontWeight: '900' },
   rewardMissionBtn: {
@@ -1278,7 +1651,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     backgroundColor: '#EC4899',
-    paddingHorizontal: 10,
+    paddingHorizontal: 11,
     paddingVertical: 7,
     borderRadius: Radius.pill,
   },

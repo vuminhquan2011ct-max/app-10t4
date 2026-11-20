@@ -119,6 +119,7 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
     fundSummary,
     classStreak,
     isTeacher,
+    isSubjectTeacher,
     canViewAll,
     canEditClass,
     canAddStudents,
@@ -250,6 +251,22 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
               color: 'success' as ThemeColor,
               soft: 'successSoft' as ThemeColor,
               onSelect: () => go('/student-form'),
+            },
+          ]
+        : []),
+      ...(isTeacher || isSubjectTeacher
+        ? [
+            {
+              id: 'act-add-teacher',
+              section: 'Lệnh nhanh & Trí tuệ',
+              title: 'Tạo tài khoản giáo viên mới',
+              subtitle: 'Cấp Mã ID & mật khẩu riêng cho GV Chủ nhiệm / GV Bộ môn',
+              keywords: 'tao tai khoan giao vien moi gvcn gvbm teacher add id mat khau',
+              icon: 'shield-checkmark' as IoniconName,
+              color: 'warning' as ThemeColor,
+              soft: 'warningSoft' as ThemeColor,
+              badge: 'Mới',
+              onSelect: () => go('/teacher-form'),
             },
           ]
         : []),
@@ -526,6 +543,7 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
     canViewAll,
     canAddStudents,
     isTeacher,
+    isSubjectTeacher,
     isDark,
     toggleDark,
     onClose,

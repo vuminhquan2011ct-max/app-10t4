@@ -23,10 +23,10 @@ const TAB_ITEMS: { name: string; label: string; icon: IoniconName; activeIcon: I
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
 /**
- * Floating 5-tab pill bar shared by every platform.
+ * Liquid Glass floating 5-tab pill dock shared by every platform.
  *
- * The active tab expands into a gradient capsule with icon + label while
- * inactive tabs show quiet icons (plus a live pending count badge on Nhật ký).
+ * The active tab expands into a glowing gradient capsule with icon + label while
+ * inactive tabs show crisp icons (plus a live pending count badge on Nhật ký).
  */
 export function AppTabBar({
   state,
@@ -42,9 +42,13 @@ export function AppTabBar({
   const barBg =
     Platform.OS === 'web'
       ? isDark
-        ? 'rgba(18, 24, 38, 0.82)'
+        ? 'rgba(15, 21, 35, 0.82)'
         : 'rgba(255, 255, 255, 0.86)'
-      : theme.card;
+      : isDark
+        ? 'rgba(18, 24, 38, 0.96)'
+        : 'rgba(255, 255, 255, 0.96)';
+
+  const barBorder = isDark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(255, 255, 255, 0.95)';
 
   return (
     <View
@@ -56,10 +60,21 @@ export function AppTabBar({
           Shadow.floating,
           {
             backgroundColor: barBg,
-            borderColor: theme.border,
+            borderColor: barBorder,
           },
-          Platform.OS === 'web' && ({ backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' } as object),
+          Platform.OS === 'web' &&
+            ({
+              backdropFilter: 'blur(26px) saturate(190%)',
+              WebkitBackdropFilter: 'blur(26px) saturate(190%)',
+            } as object),
         ]}>
+        <View
+          pointerEvents="none"
+          style={[
+            styles.topSpec,
+            { backgroundColor: isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(255, 255, 255, 0.85)' },
+          ]}
+        />
         {state.routes.map((route, index) => {
           const item = TAB_ITEMS.find((tab) => tab.name === route.name);
           if (!item) return null;
@@ -80,7 +95,12 @@ export function AppTabBar({
               accessibilityRole="button"
               accessibilityLabel={item.label}
               accessibilityState={focused ? { selected: true } : {}}
-              style={[styles.item, focused ? styles.itemActive : styles.itemIdle]}>
+              style={[
+                styles.item,
+                focused
+                  ? [styles.itemActive, { shadowColor: gradient[0] }]
+                  : styles.itemIdle,
+              ]}>
               {focused ? (
                 <LinearGradient
                   colors={gradient}
@@ -96,7 +116,11 @@ export function AppTabBar({
                   color={focused ? '#FFFFFF' : theme.textMuted}
                 />
                 {badgeCount > 0 && !focused ? (
-                  <View style={[styles.badge, { backgroundColor: theme.danger, borderColor: theme.card }]}>
+                  <View
+                    style={[
+                      styles.badge,
+                      { backgroundColor: theme.danger, borderColor: theme.card },
+                    ]}>
                     <Text style={styles.badgeText}>{badgeCount > 9 ? '9+' : badgeCount}</Text>
                   </View>
                 ) : null}
@@ -105,6 +129,11 @@ export function AppTabBar({
                 <Text numberOfLines={1} style={styles.label}>
                   {item.label}
                 </Text>
+              ) : null}
+              {focused && badgeCount > 0 ? (
+                <View style={styles.activeBadge}>
+                  <Text style={styles.badgeText}>{badgeCount > 9 ? '9+' : badgeCount}</Text>
+                </View>
               ) : null}
             </AnimatedPressable>
           );
@@ -127,11 +156,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
-    maxWidth: 480,
+    maxWidth: 488,
     borderRadius: Radius.pill,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     padding: 6,
     gap: 4,
+    overflow: 'hidden',
+  },
+  topSpec: {
+    position: 'absolute',
+    top: 0,
+    left: 28,
+    right: 28,
+    height: 1,
   },
   item: {
     height: 48,
@@ -142,21 +179,39 @@ const styles = StyleSheet.create({
     borderRadius: Radius.pill,
     overflow: 'hidden',
   },
-  itemActive: { flex: 2.35, paddingHorizontal: 10 },
+  itemActive: {
+    flex: 2.4,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.28)',
+    shadowOpacity: 0.32,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
   itemIdle: { flex: 1 },
   iconBox: { alignItems: 'center', justifyContent: 'center' },
   badge: {
     position: 'absolute',
     top: -6,
     right: -10,
-    minWidth: 16,
-    height: 16,
-    borderRadius: 8,
+    minWidth: 17,
+    height: 17,
+    borderRadius: 8.5,
     borderWidth: 1.5,
-    paddingHorizontal: 3,
+    paddingHorizontal: 3.5,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  badgeText: { color: '#FFFFFF', fontSize: 9, fontWeight: '900' },
-  label: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  activeBadge: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.24)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: { color: '#FFFFFF', fontSize: 9.5, fontWeight: '900' },
+  label: { color: '#FFFFFF', fontSize: 12.5, fontWeight: '800', letterSpacing: -0.1 },
 });

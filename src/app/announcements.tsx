@@ -68,6 +68,7 @@ export default function AnnouncementsScreen() {
     subjectName || SUBJECT_TEACHER_PRESETS[0].subject,
   );
   const [portalCustomSubject, setPortalCustomSubject] = useState('');
+  const [portalLoginId, setPortalLoginId] = useState('');
   const [portalName, setPortalName] = useState(auth.profile?.displayName ?? '');
   const [portalPassword, setPortalPassword] = useState('');
   const [showPortalPass, setShowPortalPass] = useState(false);
@@ -126,13 +127,15 @@ export default function AnnouncementsScreen() {
   const handleUnlockSubjectTeacher = async () => {
     setPortalError(null);
     const chosenSubject = portalCustomSubject.trim() || portalSubject;
-    if (!chosenSubject) {
+    const usingPersonalId = Boolean(portalLoginId.trim());
+    if (!usingPersonalId && !chosenSubject) {
       setPortalError('Vui lòng chọn hoặc nhập bộ môn giảng dạy.');
       return;
     }
     const cleanName = portalName.trim() || `GV Bộ môn ${chosenSubject}`;
 
     const res = await auth.switchAccountRole('subject_teacher', {
+      loginId: portalLoginId.trim() || undefined,
       password: portalPassword,
       subjectName: chosenSubject,
       displayName: cleanName,
@@ -148,14 +151,17 @@ export default function AnnouncementsScreen() {
     if (Platform.OS !== 'web') {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     }
+    const resolvedSubject = res.account?.subject || chosenSubject;
+    const resolvedName = res.account?.name || cleanName;
+    setPortalLoginId('');
     setPortalPassword('');
     setPortalOpen(false);
-    setComposerSubject(chosenSubject);
-    setComposerAuthor(cleanName);
+    setComposerSubject(resolvedSubject);
+    setComposerAuthor(resolvedName);
     setTag('subject');
     setPinned(false);
     setComposerOpen(true);
-    showToast(`Chào mừng ${cleanName} (${chosenSubject})! Đã mở quyền đăng thông báo 📚`);
+    showToast(`Chào mừng ${resolvedName} (${resolvedSubject})! Đã mở quyền đăng thông báo 📚`);
   };
 
   const handlePublish = () => {
@@ -299,44 +305,63 @@ export default function AnnouncementsScreen() {
 
             {portalOpen ? (
               <View style={[styles.portalForm, { borderColor: theme.border }]}>
-                <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
-                  Chọn môn giảng dạy
-                </Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.chips}>
-                  {SUBJECT_TEACHER_PRESETS.map((item) => (
-                    <Chip
-                      key={item.subject}
-                      label={`${item.emoji} ${item.subject}`}
-                      selected={!portalCustomSubject.trim() && portalSubject === item.subject}
-                      onPress={() => {
-                        setPortalSubject(item.subject);
-                        setPortalCustomSubject('');
-                      }}
+                <TextField
+                  label={'Mã ID giáo viên (nếu đã có tài khoản riêng)'}
+                  icon={'id-card-outline'}
+                  placeholder={'VD: GVBM-01 (để trống nếu dùng mã GV lớp)'}
+                  value={portalLoginId}
+                  onChangeText={(t) => {
+                    if (portalError) setPortalError(null);
+                    setPortalLoginId(t);
+                  }}
+                  autoCapitalize={'characters'}
+                  autoCorrect={false}
+                />
+
+                {!portalLoginId.trim() ? (
+                  <>
+                    <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
+                      Chọn môn giảng dạy
+                    </Text>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.chips}>
+                      {SUBJECT_TEACHER_PRESETS.map((item) => (
+                        <Chip
+                          key={item.subject}
+                          label={`${item.emoji} ${item.subject}`}
+                          selected={!portalCustomSubject.trim() && portalSubject === item.subject}
+                          onPress={() => {
+                            setPortalSubject(item.subject);
+                            setPortalCustomSubject('');
+                          }}
+                        />
+                      ))}
+                    </ScrollView>
+
+                    <TextField
+                      label={'Hoặc nhập môn khác (tuỳ chọn)'}
+                      placeholder={'VD: Robotics, Kỹ năng sống...'}
+                      value={portalCustomSubject}
+                      onChangeText={setPortalCustomSubject}
                     />
-                  ))}
-                </ScrollView>
 
-                <TextField
-                  label={'Hoặc nhập môn khác (tuỳ chọn)'}
-                  placeholder={'VD: Robotics, Kỹ năng sống...'}
-                  value={portalCustomSubject}
-                  onChangeText={setPortalCustomSubject}
-                />
-
-                <TextField
-                  label={'Tên Thầy / Cô'}
-                  icon={'person-outline'}
-                  placeholder={'VD: Cô Nguyễn Minh Anh / Thầy Nam'}
-                  value={portalName}
-                  onChangeText={setPortalName}
-                />
+                    <TextField
+                      label={'Tên Thầy / Cô'}
+                      icon={'person-outline'}
+                      placeholder={'VD: Cô Nguyễn Minh Anh / Thầy Nam'}
+                      value={portalName}
+                      onChangeText={setPortalName}
+                    />
+                  </>
+                ) : null}
 
                 <View style={styles.passGroup}>
                   <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
-                    Mật khẩu xác thực Giáo viên
+                    {portalLoginId.trim()
+                      ? 'Mật khẩu riêng của tài khoản Giáo viên'
+                      : 'Mật khẩu xác thực Giáo viên'}
                   </Text>
                   <View
                     style={[

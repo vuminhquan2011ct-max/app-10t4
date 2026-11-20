@@ -86,6 +86,12 @@ export function createActions(
         activityLog: appendLog(prev, actorName(), 'Cập nhật thông tin lớp'),
       })),
 
+    logActivity: (action: string) =>
+      mutate((prev) => ({
+        ...prev,
+        activityLog: appendLog(prev, actorName(), action, actorStudentId()),
+      })),
+
     addStudentLocal: (input: StudentInput) => {
       const id = input.id?.trim() || createId('stu');
       mutate((prev) => {

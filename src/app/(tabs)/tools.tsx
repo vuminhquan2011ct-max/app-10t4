@@ -44,6 +44,7 @@ export default function ToolsScreen() {
     totals,
     ranking,
     isTeacher,
+    isSubjectTeacher,
     canViewAll,
     canEditClass,
     canAddStudents,
@@ -125,7 +126,7 @@ export default function ToolsScreen() {
       color: 'success',
       soft: 'successSoft',
       route: '__daily_login__',
-      tag: 'XU 🪙',
+      tag: 'HOT',
       onPress: () => decor.openLoginRewardModal(),
     },
     {
@@ -136,6 +137,7 @@ export default function ToolsScreen() {
       color: 'purple',
       soft: 'purpleSoft',
       route: '/studio',
+      tag: 'MỚI',
     },
     {
       title: 'Hướng dẫn viên 7 bước',
@@ -156,11 +158,12 @@ export default function ToolsScreen() {
       color: 'accent',
       soft: 'accentSoft',
       route: '__assistant__',
+      tag: 'AI',
       onPress: () => decor.openAssistant('chat'),
     },
   ];
 
-  const smartTools: ToolCardItem[] = [
+  const learningTools: ToolCardItem[] = [
     {
       title: 'Trợ lý Thông minh',
       desc: 'Điểm sức khoẻ lớp, cảnh báo sớm & hỏi đáp tiếng Việt tức thì',
@@ -169,7 +172,7 @@ export default function ToolsScreen() {
       color: 'purple',
       soft: 'purpleSoft',
       route: '/insights',
-      tag: 'MỚI',
+      tag: 'AI',
     },
     {
       title: 'Kho Tài liệu & Đề cương',
@@ -189,7 +192,7 @@ export default function ToolsScreen() {
       color: 'warning',
       soft: 'warningSoft',
       route: '/focus',
-      tag: 'MỚI',
+      tag: 'HOT',
     },
     {
       title: 'Nhiệm vụ & Deadline',
@@ -202,13 +205,27 @@ export default function ToolsScreen() {
     },
   ];
 
-  const opsTools: ToolCardItem[] = [
+  const coreTools: ToolCardItem[] = [
+    ...(isTeacher || isSubjectTeacher
+      ? [
+          {
+            title: 'Tạo Tài khoản Giáo viên',
+            desc: 'Tạo tài khoản mới cho GV Chủ nhiệm / GV Bộ môn với Mã ID & mật khẩu riêng',
+            kpi: 'Mã ID & MK riêng 🛡️',
+            icon: 'person-add' as IoniconName,
+            color: 'warning' as ThemeColor,
+            soft: 'warningSoft' as ThemeColor,
+            route: '/teacher-form',
+            tag: 'MỚI',
+          },
+        ]
+      : []),
     ...(isTeacher
       ? [
           {
-            title: 'Bảo mật & Nhật ký',
-            desc: 'Theo dõi lịch sử chỉnh sửa dữ liệu lớp & trạng thái khóa mật khẩu',
-            kpi: 'Mật khẩu lớp 🔒',
+            title: 'Tài khoản & Nhật ký lớp',
+            desc: 'Quản lý tài khoản Giáo viên, Học sinh (ID & MK) và lịch sử chỉnh sửa lớp',
+            kpi: 'Quản lý GV & HS 🔒',
             icon: 'shield-checkmark' as IoniconName,
             color: 'accent' as ThemeColor,
             soft: 'accentSoft' as ThemeColor,
@@ -297,7 +314,7 @@ export default function ToolsScreen() {
       : []),
   ];
 
-  const communityTools: ToolCardItem[] = [
+  const adminTools: ToolCardItem[] = [
     {
       title: 'Bức tường Kudos',
       desc: 'Gửi thiệp khen, cảm ơn & lan toả năng lượng tích cực',
@@ -306,7 +323,7 @@ export default function ToolsScreen() {
       color: 'danger',
       soft: 'dangerSoft',
       route: '/kudos',
-      tag: 'MỚI',
+      tag: 'HOT',
     },
     ...(canViewAll
       ? [
@@ -352,45 +369,86 @@ export default function ToolsScreen() {
     },
   ];
 
+  const getTagColor = (tag?: string): { bg: ThemeColor; fg: string } => {
+    if (tag === 'HOT') return { bg: 'danger', fg: '#FFFFFF' };
+    if (tag === 'AI') return { bg: 'purple', fg: '#FFFFFF' };
+    if (tag === 'TOUR') return { bg: 'success', fg: '#FFFFFF' };
+    return { bg: 'accent', fg: '#FFFFFF' };
+  };
+
   const renderGrid = (items: ToolCardItem[]) => (
     <View style={styles.bentoGrid}>
-      {items.map((item) => (
-        <Pressable
-          key={item.route}
-          onPress={() => {
-            if (item.onPress) item.onPress();
-            else router.push(item.route as never);
-          }}
-          style={({ pressed }) => [
-            styles.toolCard,
-            Shadow.card,
-            { backgroundColor: theme.card, borderColor: theme.border },
-            pressed && styles.pressed,
-          ]}>
-          <View style={[styles.toolGlow, { backgroundColor: theme[item.soft] }]} />
-          <View style={styles.toolTop}>
-            <View style={[styles.toolIcon, { backgroundColor: theme[item.soft] }]}>
-              <Ionicons name={item.icon} size={22} color={theme[item.color]} />
-            </View>
-            {item.tag ? (
-              <View style={[styles.newBadge, { backgroundColor: theme.accent }]}>
-                <Text style={styles.newText}>{item.tag}</Text>
+      {items.map((item) => {
+        const tagTheme = getTagColor(item.tag);
+        return (
+          <Pressable
+            key={item.route}
+            onPress={() => {
+              if (item.onPress) item.onPress();
+              else router.push(item.route as never);
+            }}
+            style={({ pressed }) => [
+              styles.toolCard,
+              Shadow.card,
+              { backgroundColor: theme.card, borderColor: theme.border },
+              pressed && styles.pressed,
+            ]}>
+            {/* Decorative Corner Glow */}
+            <View style={[styles.toolGlow, { backgroundColor: theme[item.soft] }]} />
+            <View style={[styles.toolGlowInner, { backgroundColor: theme[item.color] }]} />
+
+            {/* Top Row: Crisp Squircle Icon with Border + Ribbon Tag */}
+            <View style={styles.toolTop}>
+              <View
+                style={[
+                  styles.toolIcon,
+                  {
+                    backgroundColor: theme[item.soft],
+                    borderColor: theme[item.color],
+                  },
+                ]}>
+                <Ionicons name={item.icon} size={22} color={theme[item.color]} />
               </View>
-            ) : (
-              <Ionicons name="arrow-forward" size={16} color={theme.textMuted} />
-            )}
-          </View>
-          <Text style={[styles.toolTitle, { color: theme.text }]}>{item.title}</Text>
-          <Text style={[styles.toolDesc, { color: theme.textSecondary }]} numberOfLines={2}>
-            {item.desc}
-          </Text>
-          <View style={[styles.kpiPill, { backgroundColor: theme[item.soft] }]}>
-            <Text style={[styles.kpiText, { color: theme[item.color] }]} numberOfLines={1}>
-              {item.kpi}
+              {item.tag ? (
+                <View style={[styles.ribbonTag, { backgroundColor: theme[tagTheme.bg] }]}>
+                  <Text style={[styles.ribbonText, { color: tagTheme.fg }]}>{item.tag}</Text>
+                </View>
+              ) : (
+                <View
+                  style={[
+                    styles.cornerArrowCircle,
+                    { backgroundColor: theme.backgroundElement },
+                  ]}>
+                  <Ionicons name="arrow-up-outline" size={13} color={theme.textMuted} style={styles.diagIcon} />
+                </View>
+              )}
+            </View>
+
+            {/* Title & Description */}
+            <Text style={[styles.toolTitle, { color: theme.text }]} numberOfLines={1}>
+              {item.title}
             </Text>
-          </View>
-        </Pressable>
-      ))}
+            <Text style={[styles.toolDesc, { color: theme.textSecondary }]} numberOfLines={2}>
+              {item.desc}
+            </Text>
+
+            {/* Bottom Tinted KPI Pill with Right Chevron Indicator */}
+            <View
+              style={[
+                styles.kpiPill,
+                {
+                  backgroundColor: theme[item.soft],
+                  borderColor: theme.border,
+                },
+              ]}>
+              <Text style={[styles.kpiText, { color: theme[item.color] }]} numberOfLines={1}>
+                {item.kpi}
+              </Text>
+              <Ionicons name="chevron-forward" size={13} color={theme[item.color]} />
+            </View>
+          </Pressable>
+        );
+      })}
     </View>
   );
 
@@ -420,29 +478,87 @@ export default function ToolsScreen() {
         />
       </FadeIn>
 
-      {/* Hub Hero */}
+      {/* Upgraded Command & Live-Status Hero Card */}
       <FadeIn index={1}>
         <LinearGradient
           colors={gradient}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={[styles.banner, Shadow.floating, { shadowColor: gradient[0], shadowOpacity: 0.25 }]}>
+          style={[
+            styles.banner,
+            Shadow.floating,
+            { shadowColor: gradient[0], shadowOpacity: 0.28 },
+          ]}>
           <View style={styles.bannerBubble} />
-          <View style={styles.bannerLeft}>
-            <Text style={styles.bannerEyebrow}>HÔM NAY TẠI {classInfo.name.toUpperCase()}</Text>
-            <Text style={styles.bannerTitle} numberOfLines={1}>
-              {livePeriod.title}
-            </Text>
-            <Text style={styles.bannerSub}>
-              {`Trực nhật ${todayDutyGroup} · ${openPolls} bình chọn · ${todoTasks} việc cần làm`}
-            </Text>
+          <View style={styles.bannerBubbleLeft} />
+
+          {/* Top Frosted Status Row: Live Period Indicator + Class Health Badge */}
+          <View style={styles.heroStatusRow}>
+            <View style={styles.frostedLivePill}>
+              <View style={styles.pulseDot} />
+              <Text style={styles.frostedLiveText}>{livePeriod.badge.toUpperCase()}</Text>
+            </View>
+            <Pressable
+              onPress={() => router.push('/insights' as never)}
+              style={({ pressed }) => [styles.healthPill, pressed && { opacity: 0.85 }]}>
+              <Ionicons name="shield-checkmark" size={12} color="#FDE68A" />
+              <Text style={styles.healthPillText}>
+                {`Sức khoẻ lớp: Hạng ${health.grade} (${health.score}đ)`}
+              </Text>
+            </Pressable>
           </View>
-          <Pressable
-            onPress={() => router.push('/insights' as never)}
-            style={({ pressed }) => [styles.spinShortcut, pressed && styles.pressed]}>
-            <Ionicons name="sparkles" size={22} color="#FFFFFF" />
-            <Text style={styles.spinText}>Trợ lý</Text>
-          </Pressable>
+
+          {/* Main Live Period Title & Sub */}
+          <View style={styles.bannerMainRow}>
+            <View style={styles.bannerLeft}>
+              <Text style={styles.bannerEyebrow}>TRUNG TÂM ĐIỀU HÀNH {classInfo.name.toUpperCase()}</Text>
+              <Text style={styles.bannerTitle} numberOfLines={1}>
+                {livePeriod.title}
+              </Text>
+              <Text style={styles.bannerSub}>
+                {`Trực nhật ${todayDutyGroup} · ${openPolls} bình chọn · ${todoTasks} việc cần làm`}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => router.push('/insights' as never)}
+              style={({ pressed }) => [styles.spinShortcut, pressed && styles.pressed]}>
+              <Ionicons name="sparkles" size={20} color="#FFFFFF" />
+              <Text style={styles.spinText}>Trợ lý AI</Text>
+            </Pressable>
+          </View>
+
+          {/* Frosted Glass Pills & Quick Spotlight Search Bar */}
+          <View style={styles.heroCommandBar}>
+            <Pressable
+              onPress={openPalette}
+              style={({ pressed }) => [
+                styles.spotlightBtn,
+                pressed && { opacity: 0.85, transform: [{ scale: 0.99 }] },
+              ]}>
+              <Ionicons name="search" size={15} color="#FFFFFF" />
+              <Text style={styles.spotlightPlaceholder} numberOfLines={1}>
+                Tìm nhanh học sinh, tính năng, lệnh...
+              </Text>
+              <View style={styles.kbdBadge}>
+                <Text style={styles.kbdText}>⌘K</Text>
+              </View>
+            </Pressable>
+
+            <View style={styles.frostedMiniRow}>
+              <View style={styles.frostedMiniPill}>
+                <Ionicons name="flame" size={12} color="#FDE68A" />
+                <Text style={styles.frostedMiniText}>{`Chuỗi ${classStreak} ngày`}</Text>
+              </View>
+              <View style={styles.frostedMiniPill}>
+                <Ionicons name="calendar" size={12} color="#FFFFFF" />
+                <Text style={styles.frostedMiniText}>{`${todayLessons} tiết hôm nay`}</Text>
+              </View>
+              <View style={styles.frostedMiniPill}>
+                <Ionicons name="wallet" size={12} color="#FDE68A" />
+                <Text style={styles.frostedMiniText}>{`🪙 ${decor.coins} Xu`}</Text>
+              </View>
+            </View>
+          </View>
         </LinearGradient>
       </FadeIn>
 
@@ -459,19 +575,19 @@ export default function ToolsScreen() {
       <FadeIn index={2}>
         <SectionHeader title={'Trí tuệ & Học tập'} subtitle={'Phân tích lớp, đề cương & tập trung'} />
       </FadeIn>
-      <FadeIn index={2}>{renderGrid(smartTools)}</FadeIn>
+      <FadeIn index={2}>{renderGrid(learningTools)}</FadeIn>
 
       {/* Section 2: Classroom Operations */}
       <FadeIn index={3}>
         <SectionHeader title={'Điều hành Lớp học'} subtitle={'Sơ đồ ghế, điểm danh, quỹ & lịch học'} />
       </FadeIn>
-      <FadeIn index={3}>{renderGrid(opsTools)}</FadeIn>
+      <FadeIn index={3}>{renderGrid(coreTools)}</FadeIn>
 
       {/* Section 3: Community & Culture */}
       <FadeIn index={4}>
         <SectionHeader title={'Cộng đồng & Tương tác'} subtitle={'Kudos, gọi tên, bình chọn & góp ý'} />
       </FadeIn>
-      <FadeIn index={4}>{renderGrid(communityTools)}</FadeIn>
+      <FadeIn index={4}>{renderGrid(adminTools)}</FadeIn>
 
       {/* Category Distribution Analytics */}
       <FadeIn index={5}>
@@ -510,8 +626,6 @@ export default function ToolsScreen() {
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   banner: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: Spacing.three,
     padding: Spacing.four,
     borderRadius: Radius.xl,
@@ -519,31 +633,143 @@ const styles = StyleSheet.create({
   },
   bannerBubble: {
     position: 'absolute',
-    width: 170,
-    height: 170,
-    borderRadius: 85,
-    top: -65,
-    right: -40,
+    width: 190,
+    height: 190,
+    borderRadius: 95,
+    top: -70,
+    right: -45,
     backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  bannerBubbleLeft: {
+    position: 'absolute',
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    bottom: -60,
+    left: -35,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  heroStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+    flexWrap: 'wrap',
+  },
+  frostedLivePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.3)',
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  pulseDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#34D399',
+  },
+  frostedLiveText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+  },
+  healthPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.24)',
+    borderColor: 'rgba(253,230,138,0.38)',
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  healthPillText: {
+    color: '#FDE68A',
+    fontSize: 10.5,
+    fontWeight: '900',
+  },
+  bannerMainRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
   },
   bannerLeft: { flex: 1, gap: 4 },
   bannerEyebrow: {
-    color: 'rgba(255,255,255,0.8)',
+    color: 'rgba(255,255,255,0.82)',
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 1,
   },
-  bannerTitle: { color: '#FFFFFF', fontSize: 21, fontWeight: '900', letterSpacing: -0.4 },
+  bannerTitle: { color: '#FFFFFF', fontSize: 22, fontWeight: '900', letterSpacing: -0.4 },
   bannerSub: { color: 'rgba(255,255,255,0.9)', fontSize: 12, fontWeight: '600' },
   spinShortcut: {
     backgroundColor: 'rgba(255,255,255,0.22)',
+    borderColor: 'rgba(255,255,255,0.35)',
+    borderWidth: 1,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 11,
     borderRadius: Radius.lg,
     alignItems: 'center',
     gap: 4,
   },
   spinText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  heroCommandBar: {
+    gap: Spacing.two,
+  },
+  spotlightBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.32)',
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: Radius.md,
+  },
+  spotlightPlaceholder: {
+    flex: 1,
+    color: 'rgba(255,255,255,0.94)',
+    fontSize: 12.5,
+    fontWeight: '700',
+  },
+  kbdBadge: {
+    backgroundColor: 'rgba(0,0,0,0.24)',
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: Radius.xs,
+  },
+  kbdText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  frostedMiniRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  frostedMiniPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  frostedMiniText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
   bentoGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -555,46 +781,76 @@ const styles = StyleSheet.create({
     minWidth: 155,
     padding: Spacing.three,
     borderRadius: Radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     gap: Spacing.two,
     overflow: 'hidden',
   },
   toolGlow: {
     position: 'absolute',
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    top: -36,
-    right: -36,
-    opacity: 0.6,
+    width: 112,
+    height: 112,
+    borderRadius: 56,
+    top: -42,
+    right: -42,
+    opacity: 0.7,
+  },
+  toolGlowInner: {
+    position: 'absolute',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    top: -22,
+    right: -22,
+    opacity: 0.14,
   },
   toolTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   toolIcon: {
-    width: 44,
-    height: 44,
+    width: 46,
+    height: 46,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ribbonTag: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.pill,
+  },
+  ribbonText: { fontSize: 9.5, fontWeight: '900', letterSpacing: 0.6 },
+  cornerArrowCircle: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  diagIcon: {
+    transform: [{ rotate: '45deg' }],
+  },
+  toolTitle: { fontSize: 15, fontWeight: '800', marginTop: 2 },
+  toolDesc: { fontSize: 12, lineHeight: 17 },
+  kpiPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5.5,
+    borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginTop: 'auto',
+  },
+  kpiText: { fontSize: 11, fontWeight: '800', flex: 1 },
+  reportCard: { gap: Spacing.three },
+  reportHead: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.three },
+  reportIcon: {
+    width: 42,
+    height: 42,
     borderRadius: Radius.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  newBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: Radius.pill,
-  },
-  newText: { color: '#FFFFFF', fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
-  toolTitle: { fontSize: 15, fontWeight: '800', marginTop: 2 },
-  toolDesc: { fontSize: 12, lineHeight: 17 },
-  kpiPill: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: Radius.pill,
-    marginTop: 'auto',
-  },
-  kpiText: { fontSize: 11, fontWeight: '800' },
-  reportCard: { gap: Spacing.three },
-  reportHead: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.three },
-  reportIcon: { width: 42, height: 42, borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center' },
   reportTitle: { fontSize: 15, fontWeight: '800' },
   reportSub: { fontSize: 12, lineHeight: 18, marginTop: 2 },
   pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },

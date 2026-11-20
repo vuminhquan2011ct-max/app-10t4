@@ -17,7 +17,7 @@ type ButtonProps = {
   style?: StyleProp<ViewStyle>;
 };
 
-/** Pill-shaped action button; the primary variant uses the brand gradient. */
+/** Pill-shaped action button; the primary variant uses the brand gradient with an inner highlight border. */
 export function Button({
   label,
   onPress,
@@ -31,10 +31,10 @@ export function Button({
   const gradient = useBrandGradient();
 
   const palette = {
-    primary: { bg: theme.accent, fg: '#FFFFFF' },
-    soft: { bg: theme.accentSoft, fg: theme.accentText },
-    danger: { bg: theme.dangerSoft, fg: theme.danger },
-    ghost: { bg: 'transparent', fg: theme.textSecondary },
+    primary: { bg: theme.accent, fg: '#FFFFFF', border: 'rgba(255, 255, 255, 0.28)' },
+    soft: { bg: theme.accentSoft, fg: theme.accentText, border: `${theme.accent}2E` },
+    danger: { bg: theme.dangerSoft, fg: theme.danger, border: `${theme.danger}2E` },
+    ghost: { bg: 'transparent', fg: theme.textSecondary, border: 'transparent' },
   }[variant];
 
   const isPrimary = variant === 'primary';
@@ -46,8 +46,12 @@ export function Button({
       style={({ pressed }) => [
         styles.button,
         size === 'sm' ? styles.small : styles.medium,
-        isPrimary ? styles.primaryShadow : null,
-        { backgroundColor: isPrimary ? gradient[0] : palette.bg },
+        isPrimary ? [styles.primaryShadow, { shadowColor: gradient[0] }] : null,
+        {
+          backgroundColor: isPrimary ? gradient[0] : palette.bg,
+          borderColor: palette.border,
+          borderWidth: variant === 'ghost' ? 0 : 1,
+        },
         pressed && styles.pressed,
         disabled && styles.disabled,
         style,
@@ -78,11 +82,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   medium: { paddingHorizontal: Spacing.four, minHeight: 50 },
-  small: { paddingHorizontal: Spacing.three, minHeight: 38 },
+  small: { paddingHorizontal: Spacing.three, minHeight: 38, gap: 6 },
   primaryShadow: {
     shadowColor: '#4C6FFF',
-    shadowOpacity: 0.32,
-    shadowRadius: 14,
+    shadowOpacity: 0.34,
+    shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
     elevation: 4,
   },
