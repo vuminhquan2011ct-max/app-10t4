@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useCallback, useMemo, useRef, useState, type ReactElement } from 'react';
 import {
@@ -23,16 +24,19 @@ import {
   type UploadedDriveFile,
 } from '@/components/ui/drive-upload-button';
 import { useToast } from '@/components/ui/toast';
-import { Radius, Spacing } from '@/constants/theme';
-import { useIsDark, useTheme } from '@/hooks/use-theme';
+import { Radius, Shadow, Spacing } from '@/constants/theme';
+import { useBrandGradient, useIsDark, useTheme } from '@/hooks/use-theme';
 import {
   DRIVE_CONFIG,
+  formatBytes,
   formatUploaderRoleLabel,
+  getFileVisualMeta,
 } from '@/lib/drive';
 import {
   buildOptimisticDriveMediaItem,
   saveUploadedFilesToGallery,
   useDriveGallery,
+  type DriveMediaCategory,
   type DriveMediaItem,
   type SaveDriveMediaMeta,
 } from '@/lib/drive-gallery';
@@ -56,10 +60,18 @@ function isVeryRecent(iso: string): boolean {
   return Date.now() - ts < 15 * 60_000;
 }
 
+function categoryForKind(kind: 'image' | 'photo' | 'video' | 'document'): DriveMediaCategory {
+  if (kind === 'image' || kind === 'photo') return 'class_photo';
+  if (kind === 'video') return 'media';
+  return 'lecture';
+}
+
 /**
- * Self-contained live "Ảnh lớp mới nhất" strip mounted on the Home Dashboard.
- * Supports one-tap quick photo uploads with <50ms optimistic previews, cached
- * `expo-image` rendering, and sub-second cross-device Realtime updates.
+ * Prominent Photo & File Upload Hub mounted exclusively on the Overview (Tổng quan) tab.
+ *
+ * Replaces the old 5 historical photos showcase with direct 1-tap buttons to upload
+ * photos, videos, PDFs, Word/PowerPoint/ZIP documents to Google Drive `K8T4_app`
+ * with <50ms optimistic previews, parallel compression, and live Realtime updates.
  */
 export function LiveRecentPhotosStrip(): ReactElement | null {
   const auth = useAuth();
@@ -67,6 +79,7 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
     useClassStore();
   const theme = useTheme();
   const isDark = useIsDark();
+  const gradient = useBrandGradient();
   const { showToast } = useToast();
 
   const {
@@ -97,21 +110,28 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
     currentStudent?.name,
   ]);
 
-  const recentPhotos = useMemo(
-    () => items.filter((item) => item.itemType === 'photo').slice(0, 12),
-    [items],
-  );
+  const recentItems = useMemo(() => items.slice(0, 12), [items]);
+
+  const counts = useMemo(() => {
+    let photos = 0;
+    let files = 0;
+    for (const item of items) {
+      if (item.itemType === 'photo') photos += 1;
+      else files += 1;
+    }
+    return { photos, files, total: items.length };
+  }, [items]);
 
   const handleSelectionStart = useCallback(
     (pending: PendingUploadPreview[]) => {
-      const meta: SaveDriveMediaMeta = {
-        uploaderName,
-        uploaderRole: memberRole,
-        uploaderSubject: isSubjectTeacher ? subjectName : null,
-        caption: '',
-        category: 'class_photo',
-      };
       const optItems = pending.map((p) => {
+        const meta: SaveDriveMediaMeta = {
+          uploaderName,
+          uploaderRole: memberRole,
+          uploaderSubject: isSubjectTeacher ? subjectName : null,
+          caption: '',
+          category: categoryForKind(p.kind),
+        };
         metaSnapshotsRef.current.set(p.tempId, meta);
         return buildOptimisticDriveMediaItem({
           tempId: p.tempId,
@@ -140,7 +160,7 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
         uploaderRole: memberRole,
         uploaderSubject: isSubjectTeacher ? subjectName : null,
         caption: '',
-        category: 'class_photo' as const,
+        category: categoryForKind(file.kind),
       };
       metaSnapshotsRef.current.delete(tempId);
 
@@ -178,58 +198,86 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
 
   const handleBatchDone = useCallback(
     (files: UploadedDriveFile[]) => {
-      if (files.length > 0) {
-        showToast(
-          `Đã cập nhật ${files.length} ảnh mới lên lớp tức thì! ⚡`,
-          'success',
-        );
-      }
+      if (files.length === 0) return;
+      const allPhotos = files.every((f) => f.kind === 'photo');
+      showToast(
+        allPhotos
+          ? `Đã đăng ${files.length} ảnh mới lên lớp tức thì! ⚡`
+          : `Đã đăng ${files.length} ảnh / tệp lên Drive ${DRIVE_CONFIG.folderName} tức thì! ⚡`,
+        'success',
+      );
     },
     [showToast],
   );
 
   const openLink = (url: string) => {
+    if (!url) return;
     Linking.openURL(url).catch(() => showToast('Không thể mở liên kết tệp', 'warning'));
   };
 
   return (
     <Card style={styles.card}>
-      {/* Header Row */}
-      <View style={styles.headRow}>
-        <View style={[styles.iconWell, { backgroundColor: theme.accentSoft }]}>
-          <Ionicons name="images" size={18} color={theme.accent} />
-        </View>
-        <View style={styles.flex}>
-          <View style={styles.titleRow}>
-            <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
-              Ảnh lớp mới nhất
-            </Text>
-            <View style={[styles.livePill, { backgroundColor: theme.successSoft }]}>
-              <View style={[styles.liveDot, { backgroundColor: theme.success }]} />
-              <Text style={[styles.liveText, { color: theme.success }]}>Trực tiếp</Text>
-            </View>
-          </View>
-          <Text style={{ color: theme.textMuted, fontSize: 11.5, fontWeight: '600' }} numberOfLines={1}>
-            {recentPhotos.length > 0
-              ? `${recentPhotos.length} ảnh gần đây · Đồng bộ tức thì qua Drive ${DRIVE_CONFIG.folderName}`
-              : `Đăng ảnh là hiển thị ngay trên máy cả lớp`}
-          </Text>
-        </View>
-        <Pressable
-          onPress={() => router.push('/gallery' as never)}
-          hitSlop={8}
-          style={({ pressed }) => [styles.seeAllBtn, pressed && styles.pressed]}>
-          <Text style={[styles.seeAllText, { color: theme.accentText }]}>Xem tất cả →</Text>
-        </Pressable>
-      </View>
+      {/* Prominent Quick-Upload Hero Banner */}
+      <LinearGradient
+        colors={gradient}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[styles.banner, Shadow.card, { shadowColor: gradient[0], shadowOpacity: 0.24 }]}>
+        <View pointerEvents="none" style={styles.bannerOrbA} />
+        <View pointerEvents="none" style={styles.bannerOrbB} />
 
-      {/* Instant 1-Tap Quick Upload */}
+        <View style={styles.bannerTop}>
+          <View style={styles.livePill}>
+            <View style={styles.liveDot} />
+            <Text style={styles.livePillText}>
+              {`ĐĂNG NHANH · DRIVE ${DRIVE_CONFIG.folderName}`}
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => router.push('/gallery' as never)}
+            hitSlop={8}
+            style={({ pressed }) => [styles.seeAllPill, pressed && styles.pressed]}>
+            <Text style={styles.seeAllPillText}>Kho lớp →</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.bannerBody}>
+          <View style={styles.bannerIconWell}>
+            <Ionicons name="cloud-upload" size={22} color="#FFFFFF" />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.bannerTitle} numberOfLines={1}>
+              Đăng Ảnh, Video & Tài liệu lên lớp
+            </Text>
+            <Text style={styles.bannerSub} numberOfLines={2}>
+              Chọn ảnh, video, PDF, Word, PowerPoint, ZIP... — tự nén siêu nhanh & hiện ngay cho cả lớp!
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.bannerStats}>
+          <View style={styles.statChip}>
+            <Ionicons name="images-outline" size={12} color="#FFFFFF" />
+            <Text style={styles.statChipText}>{`${counts.photos} ảnh`}</Text>
+          </View>
+          <View style={styles.statChip}>
+            <Ionicons name="document-text-outline" size={12} color="#FFFFFF" />
+            <Text style={styles.statChipText}>{`${counts.files} file & video`}</Text>
+          </View>
+          <View style={styles.statChip}>
+            <Ionicons name="flash" size={12} color="#FDE047" />
+            <Text style={styles.statChipText}>Đồng bộ tức thì</Text>
+          </View>
+        </View>
+      </LinearGradient>
+
+      {/* Dual 1-Tap Upload Buttons: Photos/Videos AND Files/Documents */}
       <DriveUploadButton
-        mode="media"
-        compact
+        mode="both"
         multiple
-        accept="image/*"
-        label="Đăng ảnh nhanh lên lớp"
+        accept="*/*"
+        mediaLabel="Đăng Ảnh / Video"
+        fileLabel="Đăng File / Tài liệu"
         uploaderName={uploaderName}
         uploaderRole={memberRole}
         category="class_photo"
@@ -239,24 +287,37 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
         onUploaded={handleBatchDone}
       />
 
-      {/* Horizontal Photo Strip */}
-      {loading && recentPhotos.length === 0 ? (
+      {/* Live Feed Header */}
+      <View style={styles.feedHead}>
+        <Text style={[styles.feedTitle, { color: theme.text }]}>
+          {counts.total > 0 ? `Ảnh & File mới nhất (${counts.total})` : 'Ảnh & File mới nhất'}
+        </Text>
+        <Pressable
+          onPress={() => router.push('/gallery' as never)}
+          hitSlop={8}
+          style={({ pressed }) => [pressed && styles.pressed]}>
+          <Text style={[styles.seeAllLink, { color: theme.accentText }]}>Xem tất cả →</Text>
+        </Pressable>
+      </View>
+
+      {/* Horizontal Recent Photos & Files Strip */}
+      {loading && recentItems.length === 0 ? (
         <View style={styles.emptyBox}>
           <ActivityIndicator size="small" color={theme.accent} />
           <Text style={{ color: theme.textMuted, fontSize: 12, fontWeight: '600' }}>
-            Đang tải ảnh mới nhất...
+            Đang tải ảnh & tài liệu mới nhất...
           </Text>
         </View>
-      ) : recentPhotos.length === 0 ? (
+      ) : recentItems.length === 0 ? (
         <Pressable
           onPress={() => router.push('/gallery' as never)}
           style={[
             styles.emptyBox,
             { backgroundColor: theme.backgroundElement, borderColor: theme.border },
           ]}>
-          <Ionicons name="camera-outline" size={20} color={theme.textMuted} />
+          <Ionicons name="cloud-upload-outline" size={20} color={theme.textMuted} />
           <Text style={{ color: theme.textSecondary, fontSize: 12, fontWeight: '700', flex: 1 }}>
-            {'Chưa có ảnh lớp nào — bấm “Đăng ảnh nhanh” để chia sẻ ngay cho cả lớp 10T4!'}
+            {'Chưa có ảnh hoặc tệp nào — bấm “Đăng Ảnh / Video” hoặc “Đăng File / Tài liệu” ở trên để chia sẻ ngay!'}
           </Text>
         </Pressable>
       ) : (
@@ -264,46 +325,111 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.strip}>
-          {recentPhotos.map((photo) => {
-            const fresh = !photo.pending && isVeryRecent(photo.createdAt);
+          {recentItems.map((item) => {
+            const fresh = !item.pending && isVeryRecent(item.createdAt);
+
+            if (item.itemType === 'photo') {
+              return (
+                <Pressable
+                  key={item.id}
+                  disabled={Boolean(item.pending)}
+                  onPress={() => setPreviewItem(item)}
+                  style={({ pressed }) => [
+                    styles.thumbCard,
+                    { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                    pressed && styles.pressed,
+                  ]}>
+                  <DriveImage
+                    driveFileId={item.driveFileId}
+                    primaryUri={item.imageUrl}
+                    localUri={item.localPreviewUri}
+                    width={480}
+                    contentFit="cover"
+                    style={styles.thumbImg}
+                  />
+
+                  {item.pending ? (
+                    <View style={styles.pendingPill}>
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                      <Text style={styles.pendingText}>Đang tải...</Text>
+                    </View>
+                  ) : fresh ? (
+                    <View style={styles.newPill}>
+                      <Text style={styles.newPillText}>MỚI</Text>
+                    </View>
+                  ) : null}
+
+                  <View style={styles.thumbScrim}>
+                    <Text style={styles.thumbAuthor} numberOfLines={1}>
+                      {item.uploaderName}
+                    </Text>
+                    <Text style={styles.thumbTime} numberOfLines={1}>
+                      {item.pending ? 'Đang đồng bộ' : formatShortTime(item.createdAt)}
+                    </Text>
+                  </View>
+                </Pressable>
+              );
+            }
+
+            const fileVisual = getFileVisualMeta(item.fileName, item.mimeType);
+            const fileSoftKey = `${fileVisual.tone}Soft` as
+              | 'accentSoft'
+              | 'dangerSoft'
+              | 'successSoft'
+              | 'warningSoft'
+              | 'purpleSoft';
+
             return (
               <Pressable
-                key={photo.id}
-                disabled={Boolean(photo.pending)}
-                onPress={() => setPreviewItem(photo)}
+                key={item.id}
+                disabled={Boolean(item.pending)}
+                onPress={() => openLink(item.driveUrl)}
                 style={({ pressed }) => [
-                  styles.thumbCard,
+                  styles.fileCard,
                   { backgroundColor: theme.backgroundElement, borderColor: theme.border },
                   pressed && styles.pressed,
                 ]}>
-                <DriveImage
-                  driveFileId={photo.driveFileId}
-                  primaryUri={photo.imageUrl}
-                  localUri={photo.localPreviewUri}
-                  width={480}
-                  contentFit="cover"
-                  style={styles.thumbImg}
-                />
-
-                {photo.pending ? (
-                  <View style={styles.pendingPill}>
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                    <Text style={styles.pendingText}>Đang tải...</Text>
+                <View style={styles.fileCardTop}>
+                  <View style={[styles.fileIconBox, { backgroundColor: theme[fileSoftKey] }]}>
+                    {item.pending ? (
+                      <ActivityIndicator size="small" color={theme[fileVisual.tone]} />
+                    ) : (
+                      <Ionicons name={fileVisual.icon} size={20} color={theme[fileVisual.tone]} />
+                    )}
                   </View>
-                ) : fresh ? (
-                  <View style={styles.newPill}>
-                    <Text style={styles.newPillText}>MỚI</Text>
-                  </View>
-                ) : null}
-
-                <View style={styles.thumbScrim}>
-                  <Text style={styles.thumbAuthor} numberOfLines={1}>
-                    {photo.uploaderName}
-                  </Text>
-                  <Text style={styles.thumbTime} numberOfLines={1}>
-                    {photo.pending ? 'Đang đồng bộ' : formatShortTime(photo.createdAt)}
-                  </Text>
+                  {item.pending ? (
+                    <View style={[styles.fileBadge, { backgroundColor: theme.accentSoft }]}>
+                      <Text style={[styles.fileBadgeText, { color: theme.accentText }]}>
+                        Đang tải
+                      </Text>
+                    </View>
+                  ) : fresh ? (
+                    <View style={styles.newPillInline}>
+                      <Text style={styles.newPillText}>MỚI</Text>
+                    </View>
+                  ) : (
+                    <View style={[styles.fileBadge, { backgroundColor: theme[fileSoftKey] }]}>
+                      <Text style={[styles.fileBadgeText, { color: theme[fileVisual.tone] }]}>
+                        {fileVisual.badge}
+                      </Text>
+                    </View>
+                  )}
                 </View>
+
+                <Text style={[styles.fileCardName, { color: theme.text }]} numberOfLines={2}>
+                  {item.fileName}
+                </Text>
+
+                <Text style={[styles.fileCardMeta, { color: theme.textMuted }]} numberOfLines={1}>
+                  {item.pending
+                    ? 'Đang đồng bộ...'
+                    : [
+                        item.uploaderName,
+                        item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : formatShortTime(item.createdAt),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                </Text>
               </Pressable>
             );
           })}
@@ -316,7 +442,7 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
               pressed && styles.pressed,
             ]}>
             <Ionicons name="arrow-forward-circle" size={26} color={theme.accent} />
-            <Text style={[styles.moreTileText, { color: theme.accentText }]}>Kho ảnh</Text>
+            <Text style={[styles.moreTileText, { color: theme.accentText }]}>Kho lớp</Text>
           </Pressable>
         </ScrollView>
       )}
@@ -374,9 +500,9 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
                   onPress={() => openLink(previewItem.driveUrl)}
                 />
                 <Button
-                  label={'Vào Kho ảnh'}
+                  label={'Vào Kho lớp'}
                   variant={'soft'}
-                  icon={'images-outline'}
+                  icon={'folder-open-outline'}
                   size={'sm'}
                   onPress={() => {
                     setPreviewItem(null);
@@ -394,51 +520,128 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  card: { gap: Spacing.two + 2 },
-  headRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  card: { gap: Spacing.two + 4 },
+  banner: {
+    borderRadius: Radius.lg,
+    padding: Spacing.three,
     gap: Spacing.two + 2,
+    overflow: 'hidden',
   },
-  iconWell: {
-    width: 38,
-    height: 38,
-    borderRadius: Radius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
+  bannerOrbA: {
+    position: 'absolute',
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    top: -60,
+    right: -35,
+    backgroundColor: 'rgba(255,255,255,0.16)',
   },
-  titleRow: {
+  bannerOrbB: {
+    position: 'absolute',
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    bottom: -50,
+    left: -25,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  bannerTop: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-  },
-  title: {
-    fontSize: 15,
-    fontWeight: '900',
-    flexShrink: 1,
+    justifyContent: 'space-between',
+    gap: 8,
   },
   livePill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.34)',
+    paddingHorizontal: 9,
+    paddingVertical: 3.5,
     borderRadius: Radius.pill,
   },
   liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#34D399',
   },
-  liveText: {
+  livePillText: {
+    color: '#FFFFFF',
     fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  seeAllPill: {
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  seeAllPillText: {
+    color: '#FFFFFF',
+    fontSize: 11,
     fontWeight: '800',
   },
-  seeAllBtn: {
-    paddingVertical: 4,
-    paddingLeft: 4,
+  bannerBody: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two + 2,
   },
-  seeAllText: {
+  bannerIconWell: {
+    width: 44,
+    height: 44,
+    borderRadius: Radius.md,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.34)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bannerTitle: {
+    color: '#FFFFFF',
+    fontSize: 16.5,
+    fontWeight: '900',
+    letterSpacing: -0.3,
+  },
+  bannerSub: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 2,
+  },
+  bannerStats: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  statChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.18)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  statChipText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  feedHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  feedTitle: {
+    fontSize: 13.5,
+    fontWeight: '900',
+  },
+  seeAllLink: {
     fontSize: 12,
     fontWeight: '800',
   },
@@ -493,6 +696,12 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: Radius.pill,
   },
+  newPillInline: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: Radius.pill,
+  },
   newPillText: {
     color: '#FFFFFF',
     fontSize: 9,
@@ -516,6 +725,46 @@ const styles = StyleSheet.create({
   thumbTime: {
     color: 'rgba(255,255,255,0.82)',
     fontSize: 9.5,
+    fontWeight: '600',
+  },
+  fileCard: {
+    width: 146,
+    height: 132,
+    borderRadius: Radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.two + 2,
+    justifyContent: 'space-between',
+    gap: 6,
+  },
+  fileCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+  },
+  fileIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: Radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fileBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: Radius.pill,
+  },
+  fileBadgeText: {
+    fontSize: 9.5,
+    fontWeight: '900',
+  },
+  fileCardName: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    lineHeight: 16.5,
+  },
+  fileCardMeta: {
+    fontSize: 10,
     fontWeight: '600',
   },
   moreTile: {

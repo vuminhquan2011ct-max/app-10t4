@@ -10,8 +10,6 @@ import { CategoryBars } from '@/components/charts/category-bars';
 import { GroupBattle } from '@/components/charts/group-battle';
 import { WeeklyChart } from '@/components/charts/weekly-chart';
 import { useCommandPalette } from '@/components/command-palette';
-import { IndependenceCinematicModal } from '@/components/heritage/independence-cinematic-modal';
-import { IndependenceHeroCard } from '@/components/heritage/independence-hero-card';
 import { LiveRecentPhotosStrip } from '@/components/live-recent-photos-strip';
 import { Podium } from '@/components/podium';
 import { StickerBadge } from '@/components/stickers/sticker-art';
@@ -30,7 +28,6 @@ import { MASCOTS, STICKER_MAP } from '@/constants/decor-meta';
 import { STUDENT_MISSIONS } from '@/constants/rewards-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { ANNOUNCEMENT_TAGS, KUDOS_STICKERS, MEMBER_ROLES } from '@/constants/utilities-meta';
-import type { IndependenceEpochId } from '@/constants/vietnam-independence-meta';
 import { useBrandGradient, useIsDark, useTheme, useThemePreference } from '@/hooks/use-theme';
 import { formatDayMonth, relativeDay } from '@/lib/date';
 import { computeClassHealth, getLivePeriodStatus } from '@/lib/intelligence';
@@ -114,8 +111,6 @@ const QUICK_DOCK: {
   { label: 'Quỹ lớp', icon: 'wallet', route: '/fund', color: 'warning', soft: 'warningSoft' },
 ];
 
-let lastDismissedLoginEventId: number | null = null;
-
 export default function DashboardScreen() {
   const auth = useAuth();
   const store = useClassStore();
@@ -163,19 +158,6 @@ export default function DashboardScreen() {
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>(canViewAll ? 'groups' : 'weekly');
   const activeAnalyticsTab: AnalyticsTab =
     !canViewAll && analyticsTab === 'groups' ? 'weekly' : analyticsTab;
-  const [cinemaOpen, setCinemaOpen] = useState(false);
-  const [cinemaEpoch, setCinemaEpoch] = useState<IndependenceEpochId | undefined>(undefined);
-  const [dismissedLoginEventId, setDismissedLoginEventId] = useState<number | null>(
-    () => lastDismissedLoginEventId,
-  );
-  const isCinemaVisible =
-    cinemaOpen || (auth.canEnterApp && dismissedLoginEventId !== auth.loginEventId);
-
-  const handleCloseCinema = () => {
-    lastDismissedLoginEventId = auth.loginEventId;
-    setDismissedLoginEventId(auth.loginEventId);
-    setCinemaOpen(false);
-  };
 
   const health = useMemo(() => computeClassHealth(store), [store]);
   const livePeriod = useMemo(() => getLivePeriodStatus(schedule), [schedule]);
@@ -519,19 +501,9 @@ export default function DashboardScreen() {
         </Card>
       </FadeIn>
 
-      {/* Live Recent Class Photos Strip — instant upload & Realtime broadcast */}
+      {/* Live Class Photo & File Upload Hub — replaces historical showcase, Overview tab only */}
       <FadeIn index={1}>
         <LiveRecentPhotosStrip />
-      </FadeIn>
-
-      {/* Vietnam Independence Struggle Live Animated Hero Showcase */}
-      <FadeIn index={1}>
-        <IndependenceHeroCard
-          onOpenCinema={(epochId) => {
-            setCinemaEpoch(epochId);
-            setCinemaOpen(true);
-          }}
-        />
       </FadeIn>
 
       {/* First-Time Mascot Welcome & Interactive Guided Tour Invite */}
@@ -1582,13 +1554,6 @@ export default function DashboardScreen() {
           </Card>
         </FadeIn>
       ) : null}
-
-      {/* Post-Login & On-Demand Fullscreen Vietnam Independence Struggle Cinematic Modal */}
-      <IndependenceCinematicModal
-        visible={isCinemaVisible}
-        initialEpochId={cinemaEpoch}
-        onClose={handleCloseCinema}
-      />
     </Screen>
   );
 }
