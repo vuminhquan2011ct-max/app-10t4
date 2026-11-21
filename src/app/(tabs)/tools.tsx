@@ -165,6 +165,16 @@ export default function ToolsScreen() {
 
   const learningTools: ToolCardItem[] = [
     {
+      title: 'Kho Ảnh & File Drive',
+      desc: 'Học sinh & Thầy Cô cùng tải ảnh, video, tài liệu (GB) thẳng lên Google Drive K8T4_app',
+      kpi: 'Google Drive · K8T4_app ☁️',
+      icon: 'cloud-upload',
+      color: 'accent',
+      soft: 'accentSoft',
+      route: '/gallery',
+      tag: 'HOT',
+    },
+    {
       title: 'Trợ lý Thông minh',
       desc: 'Điểm sức khoẻ lớp, cảnh báo sớm & hỏi đáp tiếng Việt tức thì',
       kpi: `Hạng ${health.grade} · ${health.score}/100`,

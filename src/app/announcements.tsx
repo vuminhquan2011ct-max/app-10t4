@@ -20,6 +20,8 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { DatePickerField } from '@/components/ui/date-picker-field';
+import { DriveAttachmentList } from '@/components/ui/drive-attachment-list';
+import { DriveUploadButton, type UploadedDriveFile } from '@/components/ui/drive-upload-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -34,10 +36,12 @@ import {
 } from '@/constants/utilities-meta';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDate, relativeDay } from '@/lib/date';
+import { DRIVE_CONFIG } from '@/lib/drive';
+import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
-import type { Announcement, AnnouncementTag } from '@/types/models';
+import type { Announcement, AnnouncementTag, DriveAttachment } from '@/types/models';
 
 type AnnFilter = 'all' | 'subject_teachers' | 'homeroom' | AnnouncementTag;
 
@@ -46,6 +50,7 @@ export default function AnnouncementsScreen() {
   const decor = useDecor();
   const {
     announcements,
+    memberRole,
     isTeacher,
     isSubjectTeacher,
     subjectName,
@@ -86,6 +91,7 @@ export default function AnnouncementsScreen() {
   );
   const [eventDate, setEventDate] = useState<string | null>(null);
   const [pinned, setPinned] = useState(isTeacher);
+  const [attachments, setAttachments] = useState<DriveAttachment[]>([]);
   const [likedIds, setLikedIds] = useState<Record<string, boolean>>({});
 
   const subjectAnnCount = useMemo(
@@ -164,6 +170,28 @@ export default function AnnouncementsScreen() {
     showToast(`Chào mừng ${resolvedName} (${resolvedSubject})! Đã mở quyền đăng thông báo 📚`);
   };
 
+  const handleAttachmentUploaded = async (files: UploadedDriveFile[]) => {
+    const mapped: DriveAttachment[] = files.map((f) => ({
+      id: f.id,
+      name: f.name,
+      url: f.url,
+      thumbnailUrl: f.thumbnailUrl,
+      downloadUrl: f.downloadUrl,
+      mimeType: f.mimeType,
+      sizeBytes: f.sizeBytes,
+      kind: f.kind,
+    }));
+    setAttachments((prev) => [...prev, ...mapped]);
+    await saveUploadedFilesToGallery(files, {
+      uploaderName: composerAuthor.trim() || auth.profile?.displayName?.trim() || classInfo.teacherName,
+      uploaderRole: memberRole,
+      uploaderSubject: isSubjectTeacher ? composerSubject : null,
+      caption: title.trim() ? `Thông báo: ${title.trim()}` : 'Đính kèm bảng tin lớp 10T4',
+      category: 'lecture',
+    }).catch(() => {});
+    showToast(`Đã đính kèm ${files.length} tệp lưu trên Drive ${DRIVE_CONFIG.folderName}! ☁️`);
+  };
+
   const handlePublish = () => {
     if (!title.trim() || !content.trim()) {
       showToast('Vui lòng nhập tiêu đề và nội dung thông báo', 'warning');
@@ -188,10 +216,12 @@ export default function AnnouncementsScreen() {
       author: effectiveAuthor,
       subject: effectiveSubject,
       authorRole: isSubjectTeacher ? 'subject_teacher' : 'teacher',
+      attachments,
     });
     setTitle('');
     setContent('');
     setEventDate(null);
+    setAttachments([]);
     setComposerOpen(false);
     showToast(
       effectiveSubject
@@ -492,6 +522,27 @@ export default function AnnouncementsScreen() {
               clearable
               onClear={() => setEventDate(null)}
             />
+            <View style={styles.subjectPickWrap}>
+              <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
+                {`Đính kèm ảnh / file lên Google Drive ${DRIVE_CONFIG.folderName} (tuỳ chọn)`}
+              </Text>
+              <DriveUploadButton
+                mode={'both'}
+                compact
+                multiple
+                mediaLabel={'Đính kèm ảnh'}
+                fileLabel={'Đính kèm file'}
+                uploaderName={composerAuthor.trim() || classInfo.teacherName}
+                uploaderRole={memberRole}
+                category={'lecture'}
+                onUploaded={handleAttachmentUploaded}
+              />
+              <DriveAttachmentList
+                attachments={attachments}
+                editable
+                onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+              />
+            </View>
             <Pressable
               onPress={() => setPinned((p) => !p)}
               style={[styles.pinToggle, { backgroundColor: theme.backgroundElement }]}>
@@ -599,6 +650,9 @@ export default function AnnouncementsScreen() {
 
                 <Text style={[styles.title, { color: theme.text }]}>{item.title}</Text>
                 <Text style={[styles.body, { color: theme.textSecondary }]}>{item.content}</Text>
+                {item.attachments && item.attachments.length > 0 ? (
+                  <DriveAttachmentList attachments={item.attachments} />
+                ) : null}
 
                 <View style={[styles.footer, { borderColor: theme.border }]}>
                   <Text style={[styles.author, { color: theme.textMuted }]}>

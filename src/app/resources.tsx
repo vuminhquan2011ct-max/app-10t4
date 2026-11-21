@@ -4,6 +4,7 @@
 
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -12,6 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
+import { DriveUploadButton, type UploadedDriveFile } from '@/components/ui/drive-upload-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -25,17 +27,35 @@ import {
   RESOURCE_TYPE_LIST,
 } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
+import { DRIVE_CONFIG, formatBytes } from '@/lib/drive';
+import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { shareOrCopyText } from '@/lib/export';
 import { stripVietnamese } from '@/lib/intelligence';
+import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
 import type { ResourceType } from '@/types/models';
 
+function inferResourceType(file: UploadedDriveFile): ResourceType {
+  if (file.kind === 'video') return 'video';
+  const lower = file.name.toLowerCase();
+  if (/\.(ppt|pptx|key)$/i.test(lower)) return 'slide';
+  if (/(bai.?tap|de.?thi|kiem.?tra|exercise)/i.test(lower)) return 'exercise';
+  if (/\.(pdf|doc|docx|xls|xlsx|txt|md)$/i.test(lower)) return 'outline';
+  return 'link';
+}
+
 export default function ResourcesScreen() {
+  const auth = useAuth();
   const {
     classInfo,
     resources,
     savedResourceIds,
+    memberRole,
+    isTeacher,
+    isSubjectTeacher,
+    subjectName,
+    currentStudent,
     canEditClass,
     toggleResourceSaved,
     addResource,
@@ -99,6 +119,35 @@ export default function ResourcesScreen() {
     Linking.openURL(target).catch(() => showToast('Không thể mở liên kết này', 'warning'));
   };
 
+  const uploaderDisplayName =
+    auth.profile?.displayName?.trim() ||
+    (isTeacher
+      ? classInfo.teacherName
+      : isSubjectTeacher
+        ? `GV ${subjectName ?? 'Bộ môn'}`
+        : currentStudent?.name || 'Thành viên 10T4');
+
+  const handleDriveUploaded = async (files: UploadedDriveFile[]) => {
+    const first = files[0];
+    if (!first) return;
+    setUrl(first.url);
+    if (!title.trim()) {
+      setTitle(first.name.replace(/\.[^.]+$/, ''));
+    }
+    setType(inferResourceType(first));
+    if (!description.trim() && first.sizeBytes > 0) {
+      setDescription(`Tệp lưu trên Google Drive ${DRIVE_CONFIG.folderName} (${formatBytes(first.sizeBytes)})`);
+    }
+    await saveUploadedFilesToGallery(files, {
+      uploaderName: uploaderDisplayName,
+      uploaderRole: memberRole,
+      uploaderSubject: isSubjectTeacher ? subjectName : null,
+      caption: `${subject} · ${title.trim() || first.name}`,
+      category: 'lecture',
+    }).catch(() => {});
+    showToast(`Đã tải "${first.name}" lên Google Drive ${DRIVE_CONFIG.folderName}! ☁️`);
+  };
+
   const handlePublish = async () => {
     if (!title.trim() || !url.trim()) {
       showToast('Hãy nhập tiêu đề và đường link tài liệu', 'warning');
@@ -149,6 +198,14 @@ export default function ResourcesScreen() {
             <Text style={styles.heroSub}>
               {`${pinnedCount} đề cương ghim quan trọng · ${savedCount} mục bạn đã lưu ⭐`}
             </Text>
+            <Pressable
+              onPress={() => router.push('/gallery' as never)}
+              style={styles.heroDrivePill}>
+              <Ionicons name="cloud-upload-outline" size={13} color="#FFFFFF" />
+              <Text style={styles.heroDriveText}>
+                {`Mở Kho Ảnh & File Drive ${DRIVE_CONFIG.folderName} →`}
+              </Text>
+            </Pressable>
           </View>
           <View style={styles.heroIcon}>
             <Ionicons name="library" size={28} color="#FFFFFF" />
@@ -188,10 +245,21 @@ export default function ResourcesScreen() {
             <TextField
               label={'Đường link (Google Drive, PDF, YouTube...)'}
               icon={'link-outline'}
-              placeholder={'https://drive.google.com/...'}
+              placeholder={'https://drive.google.com/... hoặc tải file trực tiếp bên dưới'}
               value={url}
               onChangeText={setUrl}
               autoCapitalize={'none'}
+            />
+            <DriveUploadButton
+              mode={'both'}
+              compact
+              multiple={false}
+              mediaLabel={'Tải ảnh/video lên Drive'}
+              fileLabel={`Tải file lên ${DRIVE_CONFIG.folderName}`}
+              uploaderName={uploaderDisplayName}
+              uploaderRole={memberRole}
+              category={'lecture'}
+              onUploaded={handleDriveUploaded}
             />
             <TextField
               label={'Mô tả ngắn (tuỳ chọn)'}
@@ -386,6 +454,20 @@ const styles = StyleSheet.create({
   heroEyebrow: { color: 'rgba(255,255,255,0.8)', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   heroTitle: { color: '#FFFFFF', fontSize: 24, fontWeight: '900', letterSpacing: -0.5, marginTop: 2 },
   heroSub: { color: 'rgba(255,255,255,0.9)', fontSize: 12, marginTop: 3 },
+  heroDrivePill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: Radius.pill,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderColor: 'rgba(255,255,255,0.34)',
+    borderWidth: 1,
+  },
+  heroDriveText: { color: '#FFFFFF', fontSize: 11.5, fontWeight: '800' },
   heroIcon: {
     width: 56,
     height: 56,

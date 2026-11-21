@@ -25,6 +25,7 @@ import {
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { formatDate } from '@/lib/date';
+import { isGoogleDriveUrl } from '@/lib/drive';
 import { stripVietnamese } from '@/lib/intelligence';
 import { useClassStore } from '@/store/class-store';
 import type { EntryCategory, EntryStatus } from '@/types/models';
@@ -394,9 +395,13 @@ export default function FeedScreen() {
                           borderColor: theme.accent,
                         },
                       ]}>
-                      <Ionicons name="link" size={12} color={theme.accentText} />
+                      <Ionicons
+                        name={isGoogleDriveUrl(entry.proofUrl) ? 'cloud-done-outline' : 'link'}
+                        size={12}
+                        color={theme.accentText}
+                      />
                       <Text style={[styles.proofText, { color: theme.accentText }]}>
-                        Minh chứng
+                        {isGoogleDriveUrl(entry.proofUrl) ? 'Minh chứng Drive' : 'Minh chứng'}
                       </Text>
                     </Pressable>
                   ) : null}

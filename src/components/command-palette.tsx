@@ -332,6 +332,18 @@ function CommandPaletteModal({ onClose }: { onClose: () => void }) {
         onSelect: () => go('/kudos'),
       },
       {
+        id: 'act-gallery-drive',
+        section: 'Lệnh nhanh & Trí tuệ',
+        title: 'Kho Ảnh & File Google Drive K8T4_app',
+        subtitle: 'Học sinh & Thầy Cô cùng tải ảnh, video, tài liệu nặng (GB) lên Drive K8T4_app',
+        keywords: 'drive google drive anh file tai len upload gallery k8t4_app album video pdf',
+        icon: 'cloud-upload',
+        color: 'accent',
+        soft: 'accentSoft',
+        badge: 'K8T4_app',
+        onSelect: () => go('/gallery'),
+      },
+      {
         id: 'act-resources',
         section: 'Lệnh nhanh & Trí tuệ',
         title: 'Kho Tài liệu & Đề cương',

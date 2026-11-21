@@ -9,6 +9,8 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { DatePickerField } from '@/components/ui/date-picker-field';
+import { DriveAttachmentList } from '@/components/ui/drive-attachment-list';
+import { DriveUploadButton, type UploadedDriveFile } from '@/components/ui/drive-upload-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -20,17 +22,22 @@ import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { TASK_PRIORITIES, TASK_PRIORITY_LIST } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { daysSince, formatDate, relativeDay, shiftIsoDate, todayIso } from '@/lib/date';
+import { DRIVE_CONFIG } from '@/lib/drive';
+import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
+import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
-import type { TaskPriority } from '@/types/models';
+import type { DriveAttachment, TaskPriority } from '@/types/models';
 
 type TaskFilter = 'all' | 'todo' | 'done';
 
 export default function TasksScreen() {
+  const auth = useAuth();
   const {
     classInfo,
     tasks,
     doneTaskIds,
+    memberRole,
     canEditClass,
     toggleTaskDone,
     addTask,
@@ -49,6 +56,7 @@ export default function TasksScreen() {
   const [dueDate, setDueDate] = useState(shiftIsoDate(todayIso(), 3));
   const [priority, setPriority] = useState<TaskPriority>('medium');
   const [note, setNote] = useState('');
+  const [attachments, setAttachments] = useState<DriveAttachment[]>([]);
 
   const doneCount = useMemo(
     () => tasks.filter((t) => Boolean(doneTaskIds[t.id])).length,
@@ -65,14 +73,36 @@ export default function TasksScreen() {
     });
   }, [tasks, doneTaskIds, filter]);
 
+  const handleTaskFilesUploaded = async (files: UploadedDriveFile[]) => {
+    const mapped: DriveAttachment[] = files.map((f) => ({
+      id: f.id,
+      name: f.name,
+      url: f.url,
+      thumbnailUrl: f.thumbnailUrl,
+      downloadUrl: f.downloadUrl,
+      mimeType: f.mimeType,
+      sizeBytes: f.sizeBytes,
+      kind: f.kind,
+    }));
+    setAttachments((prev) => [...prev, ...mapped]);
+    await saveUploadedFilesToGallery(files, {
+      uploaderName: auth.profile?.displayName?.trim() || classInfo.teacherName,
+      uploaderRole: memberRole,
+      caption: `${subject} · ${title.trim() || 'Đề bài / Nhiệm vụ lớp 10T4'}`,
+      category: 'homework',
+    }).catch(() => {});
+    showToast(`Đã đính kèm ${files.length} tệp lưu trên Drive ${DRIVE_CONFIG.folderName}! ☁️`);
+  };
+
   const handleAdd = () => {
     if (!title.trim()) {
       showToast('Hãy nhập nội dung bài tập / nhiệm vụ', 'warning');
       return;
     }
-    addTask({ title, subject, dueDate, priority, note });
+    addTask({ title, subject, dueDate, priority, note, attachments });
     setTitle('');
     setNote('');
+    setAttachments([]);
     setComposerOpen(false);
     showToast('Đã giao nhiệm vụ mới cho cả lớp!');
   };
@@ -147,6 +177,22 @@ export default function TasksScreen() {
               value={note}
               onChangeText={setNote}
               multiline
+            />
+            <DriveUploadButton
+              mode={'both'}
+              compact
+              multiple
+              mediaLabel={'Đính kèm ảnh đề'}
+              fileLabel={`Tải đề lên ${DRIVE_CONFIG.folderName}`}
+              uploaderName={auth.profile?.displayName?.trim() || classInfo.teacherName}
+              uploaderRole={memberRole}
+              category={'homework'}
+              onUploaded={handleTaskFilesUploaded}
+            />
+            <DriveAttachmentList
+              attachments={attachments}
+              editable
+              onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
             />
             <Button label={'Đăng lên bảng nhiệm vụ'} icon={'checkmark-circle'} onPress={handleAdd} />
           </Card>
@@ -241,6 +287,9 @@ export default function TasksScreen() {
 
                 {task.note ? (
                   <Text style={[styles.note, { color: theme.textSecondary }]}>{task.note}</Text>
+                ) : null}
+                {task.attachments && task.attachments.length > 0 ? (
+                  <DriveAttachmentList attachments={task.attachments} />
                 ) : null}
               </Card>
             </FadeIn>

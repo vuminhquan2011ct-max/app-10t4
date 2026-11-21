@@ -96,7 +96,8 @@ const QUICK_DOCK: {
   color: ThemeColor;
   soft: ThemeColor;
   
-}[] = [ { label: 'Album & TL', icon: 'images', route: '/gallery', color: 'accent', soft: 'accentSoft' },
+}[] = [
+  { label: 'Drive K8T4', icon: 'cloud-upload', route: '/gallery', color: 'accent', soft: 'accentSoft' },
   { label: 'Nhiệm vụ', icon: 'trophy', route: '/creative', params: { tab: 'missions' }, color: 'warning', soft: 'warningSoft' },
   { label: 'Kho Sticker', icon: 'sparkles', route: '/creative', params: { tab: 'vault' }, color: 'danger', soft: 'dangerSoft' },
   { label: 'Bảng tin', icon: 'megaphone', route: '/announcements', color: 'success', soft: 'successSoft' },

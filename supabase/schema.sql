@@ -972,3 +972,54 @@ grant execute on function public.app_add_student(jsonb) to authenticated;
 grant execute on function public.app_bulk_add_students(text[], text, boolean) to authenticated;
 
 
+-- ---------------------------------------------------------------------
+-- 17) Kho Ảnh & File Google Drive `K8T4_app` (chỉ lưu metadata nhẹ trên Supabase,
+--     toàn bộ tệp ảnh / video / tài liệu GB lưu trực tiếp trên Google Drive)
+-- ---------------------------------------------------------------------
+create table if not exists public.class_photos (
+  id uuid primary key default gen_random_uuid(),
+  uploader_name text not null default 'Thành viên 10T4',
+  uploader_role text not null default 'student',
+  uploader_subject text,
+  caption text not null default '',
+  drive_file_id text not null,
+  image_url text not null,
+  file_name text,
+  item_type text not null default 'photo',
+  drive_url text,
+  file_size bigint default 0,
+  mime_type text,
+  category text default 'class_photo',
+  drive_folder_id text default '1mjTLnW1ztWKD2PvKJ0aW8uowiLD5eR_D',
+  drive_folder_name text default 'K8T4_app',
+  created_at timestamptz not null default now()
+);
+
+alter table public.class_photos add column if not exists uploader_role text not null default 'student';
+alter table public.class_photos add column if not exists uploader_subject text;
+alter table public.class_photos add column if not exists file_name text;
+alter table public.class_photos add column if not exists item_type text not null default 'photo';
+alter table public.class_photos add column if not exists drive_url text;
+alter table public.class_photos add column if not exists file_size bigint default 0;
+alter table public.class_photos add column if not exists mime_type text;
+alter table public.class_photos add column if not exists category text default 'class_photo';
+alter table public.class_photos add column if not exists drive_folder_id text default '1mjTLnW1ztWKD2PvKJ0aW8uowiLD5eR_D';
+alter table public.class_photos add column if not exists drive_folder_name text default 'K8T4_app';
+
+alter table public.class_photos enable row level security;
+
+drop policy if exists "class_photos public read" on public.class_photos;
+drop policy if exists "class_photos public insert" on public.class_photos;
+drop policy if exists "class_photos public delete" on public.class_photos;
+
+create policy "class_photos public read" on public.class_photos
+  for select to anon, authenticated using (true);
+create policy "class_photos public insert" on public.class_photos
+  for insert to anon, authenticated with check (true);
+create policy "class_photos public delete" on public.class_photos
+  for delete to anon, authenticated using (true);
+
+grant select, insert, delete on public.class_photos to anon, authenticated;
+
+
+

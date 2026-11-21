@@ -9,6 +9,7 @@ import type {
   ClassInfo,
   ClassResource,
   ClassTask,
+  DriveAttachment,
   DutyRoster,
   Entry,
   FeedbackCategory,
@@ -106,6 +107,7 @@ export type AnnouncementInput = {
   author?: string;
   subject?: string | null;
   authorRole?: AnnouncementAuthorRole;
+  attachments?: DriveAttachment[];
 };
 
 export type FundTransactionInput = {
@@ -141,6 +143,7 @@ export type TaskInput = {
   priority: TaskPriority;
   note?: string | null;
   author?: string;
+  attachments?: DriveAttachment[];
 };
 
 export type FeedbackInput = {

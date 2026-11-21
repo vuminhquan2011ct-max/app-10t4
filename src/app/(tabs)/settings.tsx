@@ -3,7 +3,7 @@ import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { MascotAvatar } from '@/components/assistant/mascot-avatar';
 import { Avatar } from '@/components/ui/avatar';
@@ -26,6 +26,13 @@ import {
 } from '@/constants/theme';
 import { MEMBER_ROLES, SUBJECT_TEACHER_PRESETS } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme, useThemePreference } from '@/hooks/use-theme';
+import {
+  DRIVE_CONFIG,
+  DRIVE_FOLDER_URL,
+  formatBytes,
+  isDriveUploadConfigured,
+  uploadTextToDrive,
+} from '@/lib/drive';
 import { buildClassSummaryReport, exportJsonBackup, shareOrCopyText } from '@/lib/export';
 import { MIN_STUDENT_PASSWORD_LENGTH } from '@/lib/student-accounts';
 import { useAuth, type AccountRole } from '@/store/auth-store';
@@ -112,6 +119,7 @@ export default function SettingsScreen() {
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
   const [confirmReset, setConfirmReset] = useState(false);
+  const [backingUpDrive, setBackingUpDrive] = useState(false);
 
   const displayName =
     auth.profile?.displayName?.trim() ||
@@ -223,6 +231,35 @@ export default function SettingsScreen() {
     });
     const res = await shareOrCopyText(report, `Báo cáo lớp ${classInfo.name}`);
     showToast(res === 'copied' ? 'Đã sao chép báo cáo lớp!' : 'Đã mở chia sẻ báo cáo!');
+  };
+
+  const handleBackupToDrive = async () => {
+    if (backingUpDrive) return;
+    setBackingUpDrive(true);
+    try {
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const fileName = `SaoLuu_Lop_${classInfo.name}_${stamp}.json`;
+      const uploaded = await uploadTextToDrive({
+        fileName,
+        content: exportStateJson(),
+        mimeType: 'application/json',
+        uploaderName: displayName,
+        uploaderRole: memberRole,
+        category: 'backup',
+      });
+      showToast(
+        `Đã sao lưu lên Google Drive ${DRIVE_CONFIG.folderName} (${formatBytes(uploaded.sizeBytes)})! ☁️`,
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : `Không thể sao lưu lên Google Drive ${DRIVE_CONFIG.folderName}`,
+        'danger',
+      );
+    } finally {
+      setBackingUpDrive(false);
+    }
   };
 
   const handleBackupJson = async () => {
@@ -1005,6 +1042,80 @@ export default function SettingsScreen() {
           </Card>
         </FadeIn>
       ) : null}
+
+      {/* Google Drive K8T4_app Storage Hub (Visible to both Students & Teachers) */}
+      <FadeIn index={5}>
+        <Card style={styles.card}>
+          <View style={styles.cardHead}>
+            <View style={[styles.cardIcon, { backgroundColor: theme.accentSoft }]}>
+              <Ionicons name="cloud-done" size={18} color={theme.accent} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={[styles.label, { color: theme.text }]}>
+                {`Kho Google Drive (${DRIVE_CONFIG.folderName})`}
+              </Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
+                Học sinh & Thầy Cô cùng tải ảnh/file — toàn bộ dữ liệu MB/GB chuyển thẳng sang Google Drive
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.badgeWrap}>
+            <Badge
+              label={
+                isDriveUploadConfigured()
+                  ? `Đã kết nối · ${DRIVE_CONFIG.folderName}`
+                  : `Thư mục: ${DRIVE_CONFIG.folderName}`
+              }
+              color={isDriveUploadConfigured() ? 'success' : 'warning'}
+              soft={isDriveUploadConfigured() ? 'successSoft' : 'warningSoft'}
+              icon={isDriveUploadConfigured() ? 'checkmark-circle' : 'alert-circle-outline'}
+            />
+            <Badge
+              label={'Học sinh & Thầy Cô đều tải được'}
+              color={'accentText'}
+              soft={'accentSoft'}
+              icon={'people-outline'}
+            />
+          </View>
+
+          <View style={styles.backupActions}>
+            <Button
+              label={'Mở Kho Ảnh & File'}
+              icon={'cloud-upload'}
+              size={'sm'}
+              style={styles.flex}
+              onPress={() => router.push('/gallery' as never)}
+            />
+            <Button
+              label={`Drive ${DRIVE_CONFIG.folderName}`}
+              variant={'soft'}
+              icon={'folder-open-outline'}
+              size={'sm'}
+              onPress={() =>
+                Linking.openURL(DRIVE_FOLDER_URL).catch(() =>
+                  showToast('Không thể mở thư mục Google Drive', 'warning'),
+                )
+              }
+            />
+          </View>
+
+          {canViewAll ? (
+            <Button
+              label={
+                backingUpDrive
+                  ? `Đang sao lưu lên ${DRIVE_CONFIG.folderName}...`
+                  : `Sao lưu toàn bộ dữ liệu lớp lên Drive ${DRIVE_CONFIG.folderName}`
+              }
+              variant={'soft'}
+              size={'sm'}
+              icon={'cloud-upload-outline'}
+              disabled={backingUpDrive}
+              onPress={() => void handleBackupToDrive()}
+            />
+          ) : null}
+        </Card>
+      </FadeIn>
 
       {/* Export, Backup & Restore — Strictly Homeroom Teacher (GVCN) Only */}
       {canViewAll ? (

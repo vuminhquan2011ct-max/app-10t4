@@ -33,7 +33,14 @@
           "imageWidth": 76
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Cho phép Lớp 10T4 truy cập thư viện ảnh để tải ảnh và video lên Google Drive K8T4_app.",
+          "cameraPermission": "Cho phép Lớp 10T4 sử dụng máy ảnh để chụp ảnh lớp và bài tập tải lên Google Drive K8T4_app."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

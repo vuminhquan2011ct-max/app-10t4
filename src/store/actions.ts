@@ -367,6 +367,7 @@ export function createActions(
           author: input.author?.trim() || actorName() || prev.classInfo.teacherName,
           subject: cleanSubject,
           authorRole: input.authorRole ?? (cleanSubject ? 'subject_teacher' : 'teacher'),
+          attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
           createdAt: new Date().toISOString(),
         };
         const logPrefix = cleanSubject ? `GV ${cleanSubject} đăng thông báo` : 'Đăng thông báo';
@@ -535,6 +536,7 @@ export function createActions(
           priority: input.priority,
           note: input.note?.trim() || null,
           author: input.author?.trim() || actorName() || prev.classInfo.teacherName,
+          attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
           createdAt: new Date().toISOString(),
         };
         return {

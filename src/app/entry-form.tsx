@@ -13,6 +13,8 @@ import {
 import { ModalHeader } from '@/components/modal-header';
 import { Button } from '@/components/ui/button';
 import { DatePickerField } from '@/components/ui/date-picker-field';
+import { DriveAttachmentList } from '@/components/ui/drive-attachment-list';
+import { DriveUploadButton, type UploadedDriveFile } from '@/components/ui/drive-upload-button';
 import { OptionPicker } from '@/components/ui/option-picker';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
@@ -28,13 +30,22 @@ import { Radius, Spacing } from '@/constants/theme';
 import { ENTRY_TEMPLATES, type EntryTemplate } from '@/data/seed-extras';
 import { useTheme } from '@/hooks/use-theme';
 import { todayIso } from '@/lib/date';
+import {
+  DRIVE_CONFIG,
+  buildDriveDownloadUrl,
+  buildDriveThumbnailUrl,
+  extractDriveFileId,
+} from '@/lib/drive';
+import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { suggestedPoints } from '@/lib/stats';
+import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
-import type { EntryCategory, EntryKind, EntryLevel } from '@/types/models';
+import type { DriveAttachment, EntryCategory, EntryKind, EntryLevel } from '@/types/models';
 
 export default function EntryFormScreen() {
   const { id, studentId } = useLocalSearchParams<{ id?: string; studentId?: string }>();
+  const auth = useAuth();
   const {
     getEntry,
     addEntry,
@@ -42,7 +53,12 @@ export default function EntryFormScreen() {
     removeEntry,
     setEntryStatus,
     students,
+    classInfo,
     role,
+    memberRole,
+    isTeacher,
+    isSubjectTeacher,
+    subjectName,
     canEditClass,
     currentStudent,
   } = useClassStore();
@@ -66,7 +82,54 @@ export default function EntryFormScreen() {
   const [points, setPoints] = useState(String(existing?.points ?? suggestedPoints('school')));
   const [description, setDescription] = useState(existing?.description ?? '');
   const [proofUrl, setProofUrl] = useState(existing?.proofUrl ?? '');
+  const [uploadedProof, setUploadedProof] = useState<DriveAttachment | null>(null);
   const [reviewNote, setReviewNote] = useState(existing?.reviewNote ?? '');
+
+  const uploaderDisplayName =
+    auth.profile?.displayName?.trim() ||
+    (isTeacher
+      ? classInfo.teacherName
+      : isSubjectTeacher
+        ? `GV ${subjectName ?? 'Bộ môn'}`
+        : currentStudent?.name || 'Thành viên 10T4');
+
+  const handleProofUploaded = async (files: UploadedDriveFile[]) => {
+    const first = files[0];
+    if (!first) return;
+    setProofUrl(first.url);
+    setUploadedProof({
+      id: first.id,
+      name: first.name,
+      url: first.url,
+      thumbnailUrl: first.thumbnailUrl,
+      downloadUrl: first.downloadUrl,
+      mimeType: first.mimeType,
+      sizeBytes: first.sizeBytes,
+      kind: first.kind,
+    });
+    await saveUploadedFilesToGallery(files, {
+      uploaderName: uploaderDisplayName,
+      uploaderRole: memberRole,
+      uploaderSubject: isSubjectTeacher ? subjectName : null,
+      caption: title.trim() ? `Minh chứng: ${title.trim()}` : `Minh chứng thành tích (${first.name})`,
+      category: first.kind === 'photo' ? 'class_photo' : 'homework',
+    }).catch(() => {});
+    showToast(`Đã tải minh chứng lên Google Drive ${DRIVE_CONFIG.folderName}! ☁️`);
+  };
+
+  const proofDriveId = extractDriveFileId(proofUrl);
+  const effectiveProofAttachment: DriveAttachment | null =
+    uploadedProof ??
+    (proofDriveId
+      ? {
+          id: proofDriveId,
+          name: `Minh chứng Drive (${DRIVE_CONFIG.folderName})`,
+          url: proofUrl.trim(),
+          thumbnailUrl: buildDriveThumbnailUrl(proofDriveId, 800),
+          downloadUrl: buildDriveDownloadUrl(proofDriveId),
+          kind: 'document',
+        }
+      : null);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -255,13 +318,39 @@ export default function EntryFormScreen() {
             multiline
           />
           <TextField
-            label={'Link minh chứng'}
+            label={'Link minh chứng (Ảnh giấy khen / File Google Drive)'}
             icon={'link-outline'}
             value={proofUrl}
-            onChangeText={setProofUrl}
+            onChangeText={(val) => {
+              setProofUrl(val);
+              if (!val.trim()) setUploadedProof(null);
+            }}
             autoCapitalize={'none'}
-            placeholder={'https://...'}
+            placeholder={'https://drive.google.com/... hoặc tải ảnh/file bên dưới'}
           />
+          {!readOnly ? (
+            <DriveUploadButton
+              mode={'both'}
+              compact
+              multiple={false}
+              mediaLabel={'Tải ảnh minh chứng'}
+              fileLabel={`Tải file (${DRIVE_CONFIG.folderName})`}
+              uploaderName={uploaderDisplayName}
+              uploaderRole={memberRole}
+              category={'homework'}
+              onUploaded={handleProofUploaded}
+            />
+          ) : null}
+          {effectiveProofAttachment ? (
+            <DriveAttachmentList
+              attachments={[effectiveProofAttachment]}
+              editable={!readOnly}
+              onRemove={() => {
+                setUploadedProof(null);
+                setProofUrl('');
+              }}
+            />
+          ) : null}
           {existing && role === 'teacher' ? (
             <TextField
               label={'Ghi chú duyệt của giáo viên'}

@@ -129,6 +129,19 @@ export type AttendanceStats = {
   rate: number | null;
 };
 
+/* ---------- Tệp đính kèm Google Drive (K8T4_app) ---------- */
+
+export type DriveAttachment = {
+  id: string;
+  name: string;
+  url: string;
+  thumbnailUrl?: string | null;
+  downloadUrl?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number;
+  kind: 'photo' | 'video' | 'document';
+};
+
 /* ---------- Bảng tin & Sự kiện ---------- */
 
 export type AnnouncementTag = 'important' | 'subject' | 'exam' | 'event' | 'reminder';
@@ -149,6 +162,8 @@ export type Announcement = {
   subject?: string | null;
   /** Vai trò người đăng: GVCN hoặc GV Bộ môn. */
   authorRole?: AnnouncementAuthorRole;
+  /** Ảnh / tài liệu đính kèm lưu trên Google Drive `K8T4_app`. */
+  attachments?: DriveAttachment[];
   createdAt: string;
 };
 
@@ -223,6 +238,8 @@ export type ClassTask = {
   priority: TaskPriority;
   note: string | null;
   author: string;
+  /** Đề bài / ảnh / tài liệu đính kèm lưu trên Google Drive `K8T4_app`. */
+  attachments?: DriveAttachment[];
   createdAt: string;
 };
 

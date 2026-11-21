@@ -46,7 +46,7 @@ function WorkspaceStack() {
         <Stack.Screen name={'tasks'} />
         <Stack.Screen name={'feedback'} />
         <Stack.Screen name={'members'} />
-        <Stack.Screen name="{'gallery'}"/>
+        <Stack.Screen name={'gallery'} />
         <Stack.Screen name={'student-form'} options={{ presentation: 'modal' }} />
         <Stack.Screen name={'teacher-form'} options={{ presentation: 'modal' }} />
         <Stack.Screen name={'entry-form'} options={{ presentation: 'modal' }} />
