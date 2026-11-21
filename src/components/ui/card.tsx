@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Platform, Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+import Svg, { Circle, Path } from 'react-native-svg';
 
 import { Shadow, Spacing } from '@/constants/theme';
 import { useIsDark, useTheme } from '@/hooks/use-theme';
@@ -11,7 +12,7 @@ type CardProps = {
   style?: StyleProp<ViewStyle>;
 };
 
-/** Rounded surface respecting the user's chosen visual card theme across the app. */
+/** Rounded surface respecting the user's chosen visual card theme with Đông Sơn bronze-gold heritage accents. */
 export function Card({ children, onPress, style }: CardProps) {
   const theme = useTheme();
   const isDark = useIsDark();
@@ -20,11 +21,15 @@ export function Card({ children, onPress, style }: CardProps) {
   let surfaceStyle: ViewStyle;
   let innerGlowColor: string | null = null;
 
+  const bronzeBorderColor = isDark
+    ? 'rgba(245, 158, 11, 0.34)'
+    : 'rgba(180, 83, 9, 0.26)';
+
   switch (cardStyle) {
     case 'glass':
       surfaceStyle = {
-        backgroundColor: isDark ? 'rgba(15, 23, 42, 0.72)' : 'rgba(255, 255, 255, 0.82)',
-        borderColor: isDark ? 'rgba(255, 255, 255, 0.16)' : 'rgba(255, 255, 255, 0.95)',
+        backgroundColor: isDark ? 'rgba(26, 15, 9, 0.78)' : 'rgba(255, 250, 240, 0.86)',
+        borderColor: isDark ? 'rgba(251, 191, 36, 0.36)' : 'rgba(217, 119, 6, 0.32)',
         borderWidth: 1,
         ...(Platform.OS === 'web'
           ? ({
@@ -58,9 +63,9 @@ export function Card({ children, onPress, style }: CardProps) {
     case 'sketch':
       surfaceStyle = {
         backgroundColor: theme.card,
-        borderColor: isDark ? theme.text : '#0B1220',
+        borderColor: isDark ? theme.text : '#2A140B',
         borderWidth: 2,
-        shadowColor: isDark ? theme.accent : '#0B1220',
+        shadowColor: isDark ? theme.accent : '#2A140B',
         shadowOpacity: isDark ? 0.42 : 0.22,
         shadowRadius: 0,
         shadowOffset: { width: 3, height: 4 },
@@ -70,13 +75,16 @@ export function Card({ children, onPress, style }: CardProps) {
     default:
       surfaceStyle = {
         backgroundColor: theme.card,
-        borderColor: theme.border,
+        borderColor: bronzeBorderColor,
         borderWidth: 1,
       };
       break;
   }
 
   const base = [styles.card, Shadow.card, surfaceStyle, style];
+  const motifColor = isDark ? '#FBBF24' : '#B45309';
+  const motifOpacity = isDark ? 0.34 : 0.24;
+  const trimColor = isDark ? 'rgba(251, 191, 36, 0.32)' : 'rgba(217, 119, 6, 0.24)';
 
   const content = (
     <>
@@ -86,6 +94,69 @@ export function Card({ children, onPress, style }: CardProps) {
           style={[StyleSheet.absoluteFill, styles.innerTint, { backgroundColor: innerGlowColor }]}
         />
       ) : null}
+      {/* Delicate golden-bronze Đông Sơn inner top highlight */}
+      <View
+        pointerEvents="none"
+        style={[styles.topBronzeTrim, { backgroundColor: trimColor }]}
+      />
+      {/* Top-right tiny Đông Sơn corner bracket & tangential circle motif */}
+      <View pointerEvents="none" style={styles.cornerTopRight}>
+        <Svg width={24} height={24} viewBox="0 0 24 24">
+          <Path
+            d="M2,3 L16,3 C19.5,3 21,4.5 21,8 L21,22"
+            stroke={motifColor}
+            strokeWidth={1.15}
+            strokeLinecap="round"
+            fill="none"
+            opacity={motifOpacity}
+          />
+          <Path
+            d="M7,3 L9.5,6 L12,3 L14.5,6 L17,3"
+            stroke={motifColor}
+            strokeWidth={0.9}
+            fill="none"
+            opacity={motifOpacity * 0.9}
+          />
+          <Circle
+            cx={16.5}
+            cy={7.5}
+            r={2}
+            stroke={motifColor}
+            strokeWidth={0.9}
+            fill="none"
+            opacity={motifOpacity}
+          />
+          <Circle
+            cx={16.5}
+            cy={7.5}
+            r={0.7}
+            fill={motifColor}
+            opacity={motifOpacity}
+          />
+        </Svg>
+      </View>
+      {/* Bottom-left tiny Đông Sơn corner bracket & tangential circle motif */}
+      <View pointerEvents="none" style={styles.cornerBottomLeft}>
+        <Svg width={20} height={20} viewBox="0 0 20 20">
+          <Path
+            d="M3,2 L3,13 C3,15.8 4.2,17 7,17 L18,17"
+            stroke={motifColor}
+            strokeWidth={1.1}
+            strokeLinecap="round"
+            fill="none"
+            opacity={motifOpacity * 0.85}
+          />
+          <Circle
+            cx={6.5}
+            cy={13.5}
+            r={1.7}
+            stroke={motifColor}
+            strokeWidth={0.85}
+            fill="none"
+            opacity={motifOpacity * 0.85}
+          />
+        </Svg>
+      </View>
       {children}
     </>
   );
@@ -111,6 +182,24 @@ const styles = StyleSheet.create({
   },
   innerTint: {
     borderRadius: 23,
+  },
+  topBronzeTrim: {
+    position: 'absolute',
+    top: 0,
+    left: 22,
+    right: 22,
+    height: 1.5,
+    borderRadius: 1,
+  },
+  cornerTopRight: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+  },
+  cornerBottomLeft: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
   },
   pressed: {
     opacity: 0.88,

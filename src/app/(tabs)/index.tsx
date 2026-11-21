@@ -3,12 +3,15 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import Svg, { Circle, G, Line, Path, Polygon } from 'react-native-svg';
 
 import { MascotAvatar } from '@/components/assistant/mascot-avatar';
 import { CategoryBars } from '@/components/charts/category-bars';
 import { GroupBattle } from '@/components/charts/group-battle';
 import { WeeklyChart } from '@/components/charts/weekly-chart';
 import { useCommandPalette } from '@/components/command-palette';
+import { IndependenceCinematicModal } from '@/components/heritage/independence-cinematic-modal';
+import { IndependenceHeroCard } from '@/components/heritage/independence-hero-card';
 import { Podium } from '@/components/podium';
 import { StickerBadge } from '@/components/stickers/sticker-art';
 import { StickerCanvas } from '@/components/stickers/sticker-canvas';
@@ -26,6 +29,7 @@ import { MASCOTS, STICKER_MAP } from '@/constants/decor-meta';
 import { STUDENT_MISSIONS } from '@/constants/rewards-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { ANNOUNCEMENT_TAGS, KUDOS_STICKERS, MEMBER_ROLES } from '@/constants/utilities-meta';
+import type { IndependenceEpochId } from '@/constants/vietnam-independence-meta';
 import { useBrandGradient, useIsDark, useTheme, useThemePreference } from '@/hooks/use-theme';
 import { formatDayMonth, relativeDay } from '@/lib/date';
 import { computeClassHealth, getLivePeriodStatus } from '@/lib/intelligence';
@@ -45,6 +49,44 @@ function greetingByHour(): string {
 }
 
 const SPOTLIGHT_HINTS = ['Học sinh', 'Sơ đồ', 'AI'] as const;
+
+/** Build a 14-pointed Trống Đồng Đông Sơn sun-star polygon points string. */
+function buildSunStarPoints(cx: number, cy: number, outerR: number, innerR: number, rays = 14): string {
+  const pts: string[] = [];
+  const total = rays * 2;
+  for (let i = 0; i < total; i += 1) {
+    const angle = (i * Math.PI) / rays - Math.PI / 2;
+    const r = i % 2 === 0 ? outerR : innerR;
+    pts.push(`${(cx + r * Math.cos(angle)).toFixed(1)},${(cy + r * Math.sin(angle)).toFixed(1)}`);
+  }
+  return pts.join(' ');
+}
+
+/** Build a circular Đông Sơn sawtooth triangle ring path (`hoa văn răng cưa`). */
+function buildCircularSawtoothPath(cx: number, cy: number, innerR: number, outerR: number, teeth = 28): string {
+  const parts: string[] = [];
+  const step = (Math.PI * 2) / teeth;
+  for (let i = 0; i < teeth; i += 1) {
+    const a1 = i * step;
+    const aMid = a1 + step * 0.5;
+    const a2 = a1 + step;
+    const x1 = (cx + innerR * Math.cos(a1)).toFixed(1);
+    const y1 = (cy + innerR * Math.sin(a1)).toFixed(1);
+    const xm = (cx + outerR * Math.cos(aMid)).toFixed(1);
+    const ym = (cy + outerR * Math.sin(aMid)).toFixed(1);
+    const x2 = (cx + innerR * Math.cos(a2)).toFixed(1);
+    const y2 = (cy + innerR * Math.sin(a2)).toFixed(1);
+    parts.push(`M${x1},${y1} L${xm},${ym} L${x2},${y2}`);
+  }
+  return parts.join(' ');
+}
+
+const HEADER_SUN_POINTS = buildSunStarPoints(88, 44, 15, 6.2, 12);
+const HEADER_SAWTOOTH_D = buildCircularSawtoothPath(88, 44, 24, 30, 20);
+const HERO_SUN_POINTS = buildSunStarPoints(130, 130, 26, 10.5, 14);
+const HERO_SAWTOOTH_INNER_D = buildCircularSawtoothPath(130, 130, 44, 53, 28);
+const HERO_SAWTOOTH_OUTER_D = buildCircularSawtoothPath(130, 130, 88, 99, 36);
+const HERO_TANGENTIAL_ANGLES = Array.from({ length: 16 }, (_, i) => (i * Math.PI * 2) / 16);
 
 const QUICK_DOCK: {
   label: string;
@@ -68,6 +110,8 @@ const QUICK_DOCK: {
   { label: 'Gọi tên', icon: 'shuffle', route: '/randomizer', color: 'purple', soft: 'purpleSoft' },
   { label: 'Quỹ lớp', icon: 'wallet', route: '/fund', color: 'warning', soft: 'warningSoft' },
 ];
+
+let lastDismissedLoginEventId: number | null = null;
 
 export default function DashboardScreen() {
   const auth = useAuth();
@@ -115,6 +159,19 @@ export default function DashboardScreen() {
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>(canViewAll ? 'groups' : 'weekly');
   const activeAnalyticsTab: AnalyticsTab =
     !canViewAll && analyticsTab === 'groups' ? 'weekly' : analyticsTab;
+  const [cinemaOpen, setCinemaOpen] = useState(false);
+  const [cinemaEpoch, setCinemaEpoch] = useState<IndependenceEpochId | undefined>(undefined);
+  const [dismissedLoginEventId, setDismissedLoginEventId] = useState<number | null>(
+    () => lastDismissedLoginEventId,
+  );
+  const isCinemaVisible =
+    cinemaOpen || (auth.canEnterApp && dismissedLoginEventId !== auth.loginEventId);
+
+  const handleCloseCinema = () => {
+    lastDismissedLoginEventId = auth.loginEventId;
+    setDismissedLoginEventId(auth.loginEventId);
+    setCinemaOpen(false);
+  };
 
   const health = useMemo(() => computeClassHealth(store), [store]);
   const livePeriod = useMemo(() => getLivePeriodStatus(schedule), [schedule]);
@@ -172,17 +229,84 @@ export default function DashboardScreen() {
 
   return (
     <Screen onRefresh={handleRefresh}>
-      {/* Top Greeting & Glassmorphic Utility Bar */}
+      {/* Top Greeting & Đông Sơn Heritage Utility Bar */}
       <FadeIn index={0}>
         <View
           style={[
             styles.topHeaderCard,
             Shadow.card,
             {
-              backgroundColor: isDark ? 'rgba(18, 24, 38, 0.88)' : 'rgba(255, 255, 255, 0.9)',
-              borderColor: theme.border,
+              backgroundColor: isDark ? 'rgba(26, 15, 9, 0.9)' : 'rgba(255, 250, 240, 0.94)',
+              borderColor: isDark ? 'rgba(245, 158, 11, 0.42)' : 'rgba(180, 83, 9, 0.32)',
             },
           ]}>
+          {/* Subtle SVG Trống Đồng sun-star & soaring Chim Lạc watermark ornament in right background */}
+          <View pointerEvents="none" style={styles.headerDongSonWatermark}>
+            <Svg width={150} height={88} viewBox="0 0 150 88">
+              <Circle
+                cx={88}
+                cy={44}
+                r={39}
+                stroke={isDark ? '#FBBF24' : '#B45309'}
+                strokeWidth={1}
+                strokeDasharray="3 3"
+                fill="none"
+                opacity={isDark ? 0.22 : 0.16}
+              />
+              <Circle
+                cx={88}
+                cy={44}
+                r={31}
+                stroke={isDark ? '#F59E0B' : '#B45309'}
+                strokeWidth={0.9}
+                fill="none"
+                opacity={isDark ? 0.24 : 0.18}
+              />
+              <Path
+                d={HEADER_SAWTOOTH_D}
+                stroke={isDark ? '#FBBF24' : '#B45309'}
+                strokeWidth={0.85}
+                fill="none"
+                opacity={isDark ? 0.22 : 0.16}
+              />
+              <Circle
+                cx={88}
+                cy={44}
+                r={18}
+                stroke={isDark ? '#FDE047' : '#D97706'}
+                strokeWidth={0.9}
+                fill="none"
+                opacity={isDark ? 0.26 : 0.2}
+              />
+              <Polygon
+                points={HEADER_SUN_POINTS}
+                fill={isDark ? '#FBBF24' : '#D97706'}
+                opacity={isDark ? 0.22 : 0.16}
+              />
+              {/* Soaring Chim Lạc silhouette gliding toward the sun-star */}
+              <Path
+                d="M12,32 C22,22 33,22 44,29 C36,29 29,32 23,37 L10,41 L19,33 Z M27,27 L20,17 L32,24"
+                fill={isDark ? '#FDE047' : '#B45309'}
+                opacity={isDark ? 0.26 : 0.2}
+              />
+              <Path
+                d="M36,56 C44,48 53,48 61,54 C55,54 49,56 44,60 L34,63 L41,57 Z"
+                fill={isDark ? '#FBBF24' : '#D97706'}
+                opacity={isDark ? 0.22 : 0.16}
+              />
+            </Svg>
+          </View>
+          <View
+            pointerEvents="none"
+            style={[
+              styles.headerTopGoldLine,
+              {
+                backgroundColor: isDark
+                  ? 'rgba(253, 224, 71, 0.35)'
+                  : 'rgba(217, 119, 6, 0.28)',
+              },
+            ]}
+          />
           <View style={styles.topRow}>
             <Pressable
               onPress={() => router.push('/studio' as never)}
@@ -280,6 +404,16 @@ export default function DashboardScreen() {
         </View>
       </FadeIn>
 
+      {/* Vietnam Independence Struggle Live Animated Hero Showcase */}
+      <FadeIn index={1}>
+        <IndependenceHeroCard
+          onOpenCinema={(epochId) => {
+            setCinemaEpoch(epochId);
+            setCinemaOpen(true);
+          }}
+        />
+      </FadeIn>
+
       {/* First-Time Mascot Welcome & Interactive Guided Tour Invite */}
       {decor.loaded && !decor.tourCompleted && !decor.tourDismissed ? (
         <FadeIn index={1}>
@@ -364,7 +498,7 @@ export default function DashboardScreen() {
         </Pressable>
       </FadeIn>
 
-      {/* Flagship Bento Hero Banner 3.0 */}
+      {/* Flagship Bento Hero Banner 3.0 — Chim Lạc & Trống Đồng Đông Sơn */}
       <FadeIn index={2}>
         <LinearGradient
           colors={gradient}
@@ -373,13 +507,118 @@ export default function DashboardScreen() {
           style={[
             styles.hero,
             Shadow.floating,
-            { shadowColor: gradient[0], shadowOpacity: 0.34 },
+            { shadowColor: gradient[0], shadowOpacity: 0.36 },
           ]}>
           {/* Multi-layered decorative glass orbs & mesh overlay */}
           <View style={[styles.bubble, styles.bubbleA]} />
           <View style={[styles.bubble, styles.bubbleB]} />
           <View style={[styles.bubble, styles.bubbleC]} />
           <View style={styles.heroMeshHighlight} />
+
+          {/* SVG Trống Đồng Đông Sơn concentric sun-ring & soaring Chim Lạc flock */}
+          <View pointerEvents="none" style={styles.heroDongSonOverlay}>
+            <Svg width={260} height={260} viewBox="0 0 260 260">
+              {/* Outer concentric drum rings */}
+              <Circle
+                cx={130}
+                cy={130}
+                r={120}
+                stroke="#FDE047"
+                strokeWidth={1.2}
+                strokeDasharray="5 4"
+                fill="none"
+                opacity={0.22}
+              />
+              <Circle
+                cx={130}
+                cy={130}
+                r={104}
+                stroke="#FDE047"
+                strokeWidth={1.1}
+                fill="none"
+                opacity={0.25}
+              />
+              <Path
+                d={HERO_SAWTOOTH_OUTER_D}
+                stroke="#FEF08A"
+                strokeWidth={0.95}
+                fill="none"
+                opacity={0.22}
+              />
+              <Circle
+                cx={130}
+                cy={130}
+                r={86}
+                stroke="#FDE047"
+                strokeWidth={1}
+                fill="none"
+                opacity={0.25}
+              />
+              {/* Tangential dotted circles ring (hoa văn vòng tròn tiếp tuyến) */}
+              {HERO_TANGENTIAL_ANGLES.map((angle, idx) => {
+                const tx = 130 + 70 * Math.cos(angle);
+                const ty = 130 + 70 * Math.sin(angle);
+                return (
+                  <G key={`tan-${idx}`}>
+                    <Circle
+                      cx={tx}
+                      cy={ty}
+                      r={4.2}
+                      stroke="#FEF08A"
+                      strokeWidth={0.9}
+                      fill="none"
+                      opacity={0.24}
+                    />
+                    <Circle cx={tx} cy={ty} r={1.4} fill="#FDE047" opacity={0.26} />
+                  </G>
+                );
+              })}
+              <Circle
+                cx={130}
+                cy={130}
+                r={56}
+                stroke="#FDE047"
+                strokeWidth={1.15}
+                fill="none"
+                opacity={0.28}
+              />
+              <Path
+                d={HERO_SAWTOOTH_INNER_D}
+                stroke="#FEF08A"
+                strokeWidth={0.95}
+                fill="none"
+                opacity={0.25}
+              />
+              <Circle
+                cx={130}
+                cy={130}
+                r={32}
+                stroke="#FEF08A"
+                strokeWidth={1.2}
+                fill="none"
+                opacity={0.32}
+              />
+              {/* Central 14-ray Trống Đồng Đông Sơn Sun Star */}
+              <Polygon points={HERO_SUN_POINTS} fill="#FDE047" opacity={0.26} />
+              <Circle cx={130} cy={130} r={6} fill="#FEF08A" opacity={0.34} />
+              {/* Orbiting Chim Lạc silhouettes around the drum */}
+              <Path
+                d="M36,56 C52,40 70,40 88,52 C74,52 62,56 52,65 L30,72 L46,59 Z M58,47 L46,31 L67,43"
+                fill="#FEF08A"
+                opacity={0.28}
+              />
+              <Path
+                d="M168,36 C182,23 198,24 212,35 C200,35 190,39 181,46 L163,51 L176,40 Z M187,30 L177,17 L195,27"
+                fill="#FDE047"
+                opacity={0.26}
+              />
+              <Path
+                d="M42,188 C56,175 72,175 87,185 C75,185 64,189 55,197 L38,203 L50,192 Z"
+                fill="#FEF08A"
+                opacity={0.24}
+              />
+            </Svg>
+          </View>
 
           {/* Top Metadata Badges Row */}
           <View style={styles.heroPills}>
@@ -532,14 +771,60 @@ export default function DashboardScreen() {
         </LinearGradient>
       </FadeIn>
 
-      {/* Holographic Treasure, 7-Day Login Reward & Rare Sticker Missions Strip */}
+      {/* Royal Đông Sơn Bronze & Crimson-Gold Treasure, 7-Day Login Reward & Missions Strip */}
       <FadeIn index={2}>
         <LinearGradient
-          colors={['#090D1F', '#2E1065', '#831843', '#9D174D']}
+          colors={['#1F0906', '#4A120B', '#7C2D12', '#B45309']}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 0.9 }}
           style={[styles.rewardStrip, Shadow.card]}>
           <View style={styles.rewardOrbGlow} />
+          <View pointerEvents="none" style={styles.rewardDongSonWatermark}>
+            <Svg width={96} height={64} viewBox="0 0 96 64">
+              <Circle
+                cx={66}
+                cy={32}
+                r={26}
+                stroke="#FDE047"
+                strokeWidth={0.9}
+                strokeDasharray="3 2"
+                fill="none"
+                opacity={0.24}
+              />
+              <Circle
+                cx={66}
+                cy={32}
+                r={17}
+                stroke="#FBBF24"
+                strokeWidth={0.9}
+                fill="none"
+                opacity={0.26}
+              />
+              <Line
+                x1={52}
+                y1={32}
+                x2={80}
+                y2={32}
+                stroke="#FDE047"
+                strokeWidth={0.8}
+                opacity={0.22}
+              />
+              <Line
+                x1={66}
+                y1={18}
+                x2={66}
+                y2={46}
+                stroke="#FDE047"
+                strokeWidth={0.8}
+                opacity={0.22}
+              />
+              <Path
+                d="M8,22 C16,14 25,14 33,20 C27,20 21,22 17,26 L6,29 L13,23 Z"
+                fill="#FDE047"
+                opacity={0.26}
+              />
+            </Svg>
+          </View>
           <Pressable
             onPress={decor.openLoginRewardModal}
             style={({ pressed }) => [styles.rewardWallet, pressed && styles.pressed]}>
@@ -1171,6 +1456,13 @@ export default function DashboardScreen() {
           </Card>
         </FadeIn>
       ) : null}
+
+      {/* Post-Login & On-Demand Fullscreen Vietnam Independence Struggle Cinematic Modal */}
+      <IndependenceCinematicModal
+        visible={isCinemaVisible}
+        initialEpochId={cinemaEpoch}
+        onClose={handleCloseCinema}
+      />
     </Screen>
   );
 }
@@ -1181,7 +1473,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two + 4,
     borderRadius: Radius.xl,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  headerDongSonWatermark: {
+    position: 'absolute',
+    right: -8,
+    top: -6,
+    bottom: 0,
+    justifyContent: 'center',
+  },
+  headerTopGoldLine: {
+    position: 'absolute',
+    top: 0,
+    left: 24,
+    right: 24,
+    height: 1.5,
   },
   topRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 4 },
   avatarWrap: { position: 'relative' },
@@ -1264,8 +1571,15 @@ const styles = StyleSheet.create({
     padding: Spacing.four,
     borderRadius: Radius.xl,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.22)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(253, 224, 71, 0.45)',
+  },
+  heroDongSonOverlay: {
+    position: 'absolute',
+    top: -28,
+    right: -32,
+    width: 260,
+    height: 260,
   },
   heroTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
   bubble: { position: 'absolute', borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.12)' },
@@ -1589,8 +1903,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: 12,
     borderRadius: Radius.xl,
-    borderWidth: 1,
-    borderColor: 'rgba(253, 224, 71, 0.25)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(253, 224, 71, 0.45)',
     overflow: 'hidden',
   },
   rewardOrbGlow: {
@@ -1600,7 +1914,14 @@ const styles = StyleSheet.create({
     borderRadius: 65,
     top: -45,
     right: -30,
-    backgroundColor: 'rgba(236, 72, 153, 0.22)',
+    backgroundColor: 'rgba(251, 191, 36, 0.22)',
+  },
+  rewardDongSonWatermark: {
+    position: 'absolute',
+    right: 6,
+    top: -2,
+    bottom: 0,
+    justifyContent: 'center',
   },
   rewardWallet: {
     flexDirection: 'row',
@@ -1614,7 +1935,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     backgroundColor: 'rgba(250, 204, 21, 0.22)',
     borderWidth: 1.5,
-    borderColor: 'rgba(250, 204, 21, 0.6)',
+    borderColor: 'rgba(250, 204, 21, 0.65)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1622,21 +1943,23 @@ const styles = StyleSheet.create({
   rewardWalletTopRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   rewardCoinVal: { color: '#FDE047', fontSize: 15, fontWeight: '900', letterSpacing: -0.2 },
   streakTag: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    backgroundColor: 'rgba(253, 224, 71, 0.18)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(253, 224, 71, 0.45)',
     paddingHorizontal: 6,
     paddingVertical: 1,
     borderRadius: Radius.pill,
   },
-  streakTagText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
-  rewardCoinSub: { color: 'rgba(255,255,255,0.88)', fontSize: 11, fontWeight: '700' },
+  streakTagText: { color: '#FEF08A', fontSize: 10, fontWeight: '900' },
+  rewardCoinSub: { color: 'rgba(255, 248, 220, 0.9)', fontSize: 11, fontWeight: '700' },
   rewardBtns: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   rewardAction: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    backgroundColor: 'rgba(255, 250, 240, 0.16)',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.28)',
+    borderColor: 'rgba(253, 224, 71, 0.4)',
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: Radius.pill,
@@ -1650,7 +1973,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#EC4899',
+    backgroundColor: '#D97706',
+    borderWidth: 1,
+    borderColor: 'rgba(253, 224, 71, 0.55)',
     paddingHorizontal: 11,
     paddingVertical: 7,
     borderRadius: Radius.pill,

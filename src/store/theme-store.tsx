@@ -16,7 +16,7 @@ import {
 } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
-const THEME_STORAGE_KEY = 'class10t4:theme:v1';
+const THEME_STORAGE_KEY = 'class10t4:theme:v2-dongson';
 
 type StoredPrefs = {
   mode: ThemeMode;
@@ -48,7 +48,7 @@ function isAccent(v: unknown): v is AccentKey {
 export function ThemePreferenceProvider({ children }: { children: ReactNode }) {
   const systemScheme = useColorScheme();
   const [mode, setModeState] = useState<ThemeMode>('system');
-  const [accentKey, setAccentState] = useState<AccentKey>('ocean');
+  const [accentKey, setAccentState] = useState<AccentKey>('amber');
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -91,7 +91,7 @@ export function ThemePreferenceProvider({ children }: { children: ReactNode }) {
   }, [systemScheme]);
 
   const value = useMemo<ThemePreference>(() => {
-    const preset = ACCENT_PRESETS[accentKey] ?? ACCENT_PRESETS.ocean;
+    const preset = ACCENT_PRESETS[accentKey] ?? ACCENT_PRESETS.amber;
     const override = preset[scheme];
     const theme: ThemePalette = {
       ...Colors[scheme],
@@ -119,10 +119,10 @@ export function useThemePreference(): ThemePreference {
   const ctx = useContext(ThemePreferenceContext);
   if (ctx) return ctx;
   const fallbackScheme = 'light';
-  const preset = ACCENT_PRESETS.ocean.light;
+  const preset = ACCENT_PRESETS.amber.light;
   return {
     mode: 'system',
-    accentKey: 'ocean',
+    accentKey: 'amber',
     scheme: fallbackScheme,
     isDark: false,
     theme: { ...Colors.light, ...preset },
