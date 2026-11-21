@@ -37,9 +37,9 @@ import Svg, {
   Circle,
   Defs,
   G,
-  LinearGradient as SvgLinearGradient,
   Path,
   Stop,
+  LinearGradient as SvgLinearGradient,
 } from 'react-native-svg';
 
 import { useAuth } from '@/store/auth-store';
@@ -149,9 +149,9 @@ function buildTrailPath(
 
 const FIRST_BOOT_GREETINGS = [
   { primary: 'Xin chào', sub: 'Chào mừng thành viên mới gia nhập 10T4' },
-  { primary: 'Hello · 10T4', sub: 'Hologram Identity Activated · First Boot' },
+  { primary: 'Hello · 10T4', sub: 'Chúng ta cùng nhau phát triển nhé' },
   { primary: 'Xin chào!', sub: 'Không gian lớp 10T4 đã sẵn sàng cho bạn' },
-  { primary: 'Chào mừng', sub: 'Kỷ nguyên số tập thể lớp 10T4' },
+  { primary: 'Chào mừng', sub: 'GVCN: Ngô Vũ Hảo' },
 ];
 
 type FloatingMiniHeartConfig = {
