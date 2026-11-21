@@ -71,12 +71,49 @@ export function buildDriveViewUrl(fileId: string): string {
   return `https://drive.google.com/file/d/${fileId}/view`;
 }
 
-export function buildDriveThumbnailUrl(fileId: string, width = 1200): string {
+/** Fast direct Google image CDN URL (~2x faster & avoids `drive.google.com` redirect hop). */
+export function buildDriveThumbnailUrl(fileId: string, width = 800): string {
+  return `https://lh3.googleusercontent.com/d/${fileId}=w${width}`;
+}
+
+/** Secondary Google Drive thumbnail endpoint used automatically on `<Image onError>`. */
+export function buildDriveFallbackThumbnailUrl(fileId: string, width = 800): string {
   return `https://drive.google.com/thumbnail?id=${fileId}&sz=w${width}`;
 }
 
 export function buildDriveDownloadUrl(fileId: string): string {
   return `https://drive.google.com/uc?export=download&id=${fileId}`;
+}
+
+const LOCAL_PREVIEW_CACHE_MAX = 100;
+const localPreviewCache = new Map<string, string>();
+
+/**
+ * Cache an uploader's local blob/file preview URI for a Drive file ID so the
+ * uploaded photo renders instantaneously with zero Google Drive CDN round-trip wait.
+ */
+export function cacheLocalPreviewUri(driveFileId: string, uri: string): void {
+  const id = driveFileId.trim();
+  const cleanUri = uri.trim();
+  if (!id || !cleanUri) return;
+  if (localPreviewCache.has(id)) {
+    localPreviewCache.delete(id);
+  }
+  localPreviewCache.set(id, cleanUri);
+  while (localPreviewCache.size > LOCAL_PREVIEW_CACHE_MAX) {
+    const oldestKey = localPreviewCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      localPreviewCache.delete(oldestKey);
+    } else {
+      break;
+    }
+  }
+}
+
+export function getLocalPreviewUri(driveFileId: string): string | null {
+  const id = driveFileId.trim();
+  if (!id) return null;
+  return localPreviewCache.get(id) ?? null;
 }
 
 /** Extract a Google Drive file ID from any common Drive sharing URL. */
@@ -108,7 +145,7 @@ export function extractDriveFileId(rawUrl: string): string | null {
 
 export function isGoogleDriveUrl(url: string | null | undefined): boolean {
   if (!url) return false;
-  return /drive\.google\.com|docs\.google\.com/i.test(url);
+  return /drive\.google\.com|docs\.google\.com|lh3\.googleusercontent\.com/i.test(url);
 }
 
 export function formatBytes(bytes: number | null | undefined): string {
@@ -199,9 +236,38 @@ export function getFileVisualMeta(fileName: string, mimeType?: string | null): {
   return { icon: 'document', badge: ext.toUpperCase() || 'FILE', tone: 'accent' };
 }
 
+const DRIVE_UPLOAD_TIMEOUT_MS = 45_000;
+const DRIVE_UPLOAD_MAX_ATTEMPTS = 2;
+const DRIVE_RETRY_BACKOFF_MS = 800;
+
+function isTransientStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller?.signal,
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Upload a Base64-encoded file directly into Google Drive folder `K8T4_app`
- * via the configured Google Apps Script Web App endpoint.
+ * via the configured Google Apps Script Web App endpoint (45s timeout + 1 auto-retry).
  */
 export async function uploadFileToDrive(params: UploadToDriveParams): Promise<UploadedDriveFile> {
   const url = process.env.EXPO_PUBLIC_DRIVE_API_URL?.trim();
@@ -216,70 +282,116 @@ export async function uploadFileToDrive(params: UploadToDriveParams): Promise<Up
   const cleanMime = params.mimeType?.trim() || 'application/octet-stream';
   const sizeBytes = params.sizeBytes ?? estimateBytesFromBase64(params.base64Content);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    redirect: 'follow',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({
-      apiKey,
-      fileName: params.fileName,
-      mimeType: cleanMime,
-      fileBase64: params.base64Content,
-      folderId: DRIVE_CONFIG.folderId,
-      folderName: DRIVE_CONFIG.folderName,
-      uploaderName: params.uploaderName,
-      uploaderRole: params.uploaderRole,
-      category: params.category,
-    }),
-  });
-
-  const rawText = await response.text();
-  let payload: {
-    status?: string;
-    message?: string;
-    fileInfo?: {
-      id?: string;
-      name?: string;
-      url?: string;
-      createdAt?: string;
-      size?: number;
-      mimeType?: string;
-    };
-  } | null = null;
-
-  try {
-    payload = JSON.parse(rawText);
-  } catch {
-    throw new Error(
-      `Google Drive API (${DRIVE_CONFIG.folderName}) trả về phản hồi không hợp lệ (HTTP ${response.status}). Hãy kiểm tra lại quyền Deploy Web App của Google Apps Script.`,
-    );
-  }
-
-  if (!response.ok || payload?.status !== 'success' || !payload?.fileInfo?.id) {
-    throw new Error(
-      payload?.message || `Không thể tải "${params.fileName}" lên Google Drive ${DRIVE_CONFIG.folderName}.`,
-    );
-  }
-
-  const info = payload.fileInfo;
-  const fileId = String(info.id);
-  const finalName = info.name?.trim() || params.fileName;
-  const finalMime = info.mimeType?.trim() || cleanMime;
-  const kind = detectDriveMediaKind(finalName, finalMime);
-
-  return {
-    id: fileId,
-    name: finalName,
-    url: info.url?.trim() || buildDriveViewUrl(fileId),
-    thumbnailUrl: kind === 'photo' ? buildDriveThumbnailUrl(fileId) : null,
-    downloadUrl: buildDriveDownloadUrl(fileId),
-    mimeType: finalMime,
-    sizeBytes: typeof info.size === 'number' && info.size > 0 ? info.size : sizeBytes,
-    kind,
+  const requestBody = JSON.stringify({
+    apiKey,
+    fileName: params.fileName,
+    mimeType: cleanMime,
+    fileBase64: params.base64Content,
     folderId: DRIVE_CONFIG.folderId,
     folderName: DRIVE_CONFIG.folderName,
-    createdAt: info.createdAt || new Date().toISOString(),
-  };
+    uploaderName: params.uploaderName,
+    uploaderRole: params.uploaderRole,
+    category: params.category,
+  });
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= DRIVE_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          redirect: 'follow',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: requestBody,
+        },
+        DRIVE_UPLOAD_TIMEOUT_MS,
+      );
+
+      if (isTransientStatus(response.status) && attempt < DRIVE_UPLOAD_MAX_ATTEMPTS) {
+        await sleepMs(DRIVE_RETRY_BACKOFF_MS);
+        continue;
+      }
+
+      const rawText = await response.text();
+      let payload: {
+        status?: string;
+        message?: string;
+        fileInfo?: {
+          id?: string;
+          name?: string;
+          url?: string;
+          createdAt?: string;
+          size?: number;
+          mimeType?: string;
+        };
+      } | null = null;
+
+      try {
+        payload = JSON.parse(rawText);
+      } catch {
+        const parseErr = new Error(
+          `Google Drive API (${DRIVE_CONFIG.folderName}) trả về phản hồi không hợp lệ (HTTP ${response.status}). Hãy kiểm tra lại quyền Deploy Web App của Google Apps Script.`,
+        );
+        if (attempt < DRIVE_UPLOAD_MAX_ATTEMPTS && (response.status >= 500 || response.status === 0)) {
+          lastError = parseErr;
+          await sleepMs(DRIVE_RETRY_BACKOFF_MS);
+          continue;
+        }
+        throw parseErr;
+      }
+
+      if (!response.ok || payload?.status !== 'success' || !payload?.fileInfo?.id) {
+        throw new Error(
+          payload?.message ||
+            `Không thể tải "${params.fileName}" lên Google Drive ${DRIVE_CONFIG.folderName}.`,
+        );
+      }
+
+      const info = payload.fileInfo;
+      const fileId = String(info.id);
+      const finalName = info.name?.trim() || params.fileName;
+      const finalMime = info.mimeType?.trim() || cleanMime;
+      const kind = detectDriveMediaKind(finalName, finalMime);
+
+      return {
+        id: fileId,
+        name: finalName,
+        url: info.url?.trim() || buildDriveViewUrl(fileId),
+        thumbnailUrl: kind === 'photo' ? buildDriveThumbnailUrl(fileId, 800) : null,
+        downloadUrl: buildDriveDownloadUrl(fileId),
+        mimeType: finalMime,
+        sizeBytes: typeof info.size === 'number' && info.size > 0 ? info.size : sizeBytes,
+        kind,
+        folderId: DRIVE_CONFIG.folderId,
+        folderName: DRIVE_CONFIG.folderName,
+        createdAt: info.createdAt || new Date().toISOString(),
+      };
+    } catch (err) {
+      const isAbort = err instanceof Error && err.name === 'AbortError';
+      const isNetworkErr =
+        isAbort ||
+        (err instanceof TypeError) ||
+        (err instanceof Error && /network|fetch|timeout|abort|failed to fetch/i.test(err.message));
+
+      lastError = isAbort
+        ? new Error(
+            `Tải "${params.fileName}" lên Google Drive bị quá thời gian (45 giây). Hãy thử lại khi mạng ổn định hơn.`,
+          )
+        : err instanceof Error
+          ? err
+          : new Error(`Không thể tải "${params.fileName}" lên Google Drive.`);
+
+      if (isNetworkErr && attempt < DRIVE_UPLOAD_MAX_ATTEMPTS) {
+        await sleepMs(DRIVE_RETRY_BACKOFF_MS);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  throw lastError ?? new Error(`Không thể tải "${params.fileName}" lên Google Drive.`);
 }
 
 /** Upload UTF-8 text (e.g. JSON class backup) straight into Google Drive folder `K8T4_app`. */

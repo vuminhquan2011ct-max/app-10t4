@@ -541,7 +541,7 @@ grant execute on function public.app_like_announcement(text) to authenticated;
 
 
 -- ---------------------------------------------------------------------
--- 11) Đồng bộ tức thì (Realtime) — vẫn tuân theo RLS ở trên
+-- 11) Đồng bộ tức thì (Realtime) — áp dụng cho cả class_state & class_photos
 -- ---------------------------------------------------------------------
 do $$
 begin
@@ -1020,6 +1020,35 @@ create policy "class_photos public delete" on public.class_photos
   for delete to anon, authenticated using (true);
 
 grant select, insert, delete on public.class_photos to anon, authenticated;
+
+create index if not exists class_photos_created_at_idx
+  on public.class_photos (created_at desc);
+create index if not exists class_photos_drive_file_id_idx
+  on public.class_photos (drive_file_id);
+
+-- Bật Supabase Realtime cho bảng class_photos (idempotent)
+do $$
+begin
+  alter publication supabase_realtime add table public.class_photos;
+exception
+  when duplicate_object then null;
+  when undefined_object then null;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 18) Ghi chú chế độ đăng nhập bằng Số ID + Mật khẩu lớp (Password Mode)
+--     Ứng dụng đồng bộ trực tiếp qua `public.class_state` (dòng `class10t4`
+--     và `class10t4_accounts_v1`) + Supabase Realtime Broadcast (`class10t4-live-v1`)
+--     nên hoạt động ngay cả khi chưa bật Google OAuth. Nếu dùng Password Mode
+--     trên project mới, mở comment 4 dòng dưới đây sau khi chạy file:
+--
+--     drop policy if exists "app state select" on public.class_state;
+--     drop policy if exists "app state insert" on public.class_state;
+--     drop policy if exists "app state update" on public.class_state;
+--     create policy "class_state public sync" on public.class_state
+--       for all to anon, authenticated using (true) with check (true);
+--     grant select, insert, update on public.class_state to anon, authenticated;
+-- ---------------------------------------------------------------------
 
 
 

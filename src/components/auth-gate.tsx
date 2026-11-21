@@ -238,12 +238,17 @@ export function AuthGate({ children }: { children: ReactNode }) {
     });
 
     if (res.ok) {
+      const display = studentName.trim();
       setStudentPassword('');
       setStudentConfirmPass('');
       if (Platform.OS !== 'web') {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       }
-      showToast(`Đã tạo tài khoản ID ${cleanIdPreview} & mở không gian riêng! 🎉`);
+      showToast(
+        auth.isCloudSyncEnabled
+          ? `Đã đăng ký ${display} (ID: ${cleanIdPreview}) & đồng bộ tên lên lớp! 🎉`
+          : `Đã tạo tài khoản ${display} (ID: ${cleanIdPreview}) & mở không gian riêng! 🎉`,
+      );
     } else {
       if (res.duplicateId && res.passwordMatched) {
         setShowDuplicateLoginHint(true);
@@ -335,16 +340,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
     });
 
     if (res.ok) {
+      const display = teacherDisplayName.trim();
       setTeacherPassword('');
       setTeacherConfirmPass('');
       setTeacherAccessCode('');
       if (Platform.OS !== 'web') {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       }
+      const syncSuffix = auth.isCloudSyncEnabled ? ' & đồng bộ lên lớp' : '';
       showToast(
         activeTeacherRole === 'subject_teacher'
-          ? `Đã tạo tài khoản GV Bộ môn ${effectiveSubject} (ID: ${cleanTeacherIdPreview})! 📚`
-          : `Đã tạo tài khoản GV Chủ nhiệm (ID: ${cleanTeacherIdPreview}) thành công! 🛡️`,
+          ? `Đã đăng ký GV ${effectiveSubject} · ${display} (ID: ${cleanTeacherIdPreview})${syncSuffix}! 📚`
+          : `Đã đăng ký GVCN · ${display} (ID: ${cleanTeacherIdPreview})${syncSuffix}! 🛡️`,
       );
     } else {
       if (res.duplicateId && res.passwordMatched) {
@@ -849,7 +856,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                       <Button
                         label={
                           auth.busy
-                            ? 'Đang tạo tài khoản...'
+                            ? 'Đang tạo & đồng bộ tên lên lớp...'
                             : 'Tạo tài khoản & Mở trang riêng ✨'
                         }
                         icon={'person-add'}
@@ -1344,7 +1351,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                       <Button
                         label={
                           auth.busy
-                            ? 'Đang tạo tài khoản...'
+                            ? 'Đang tạo & đồng bộ lên lớp...'
                             : mode === 'subject_teacher'
                               ? `Tạo tài khoản GV ${effectiveSubject} & Vào lớp ✨`
                               : 'Tạo tài khoản GV Chủ nhiệm & Vào lớp ✨'

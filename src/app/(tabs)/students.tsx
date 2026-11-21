@@ -52,12 +52,23 @@ const SMART_FILTERS: {
   { key: 'zero', label: 'Cần động viên', icon: 'heart-outline' },
 ];
 
+const RECENT_JOIN_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function isRecentlyJoined(iso: string | null | undefined): boolean {
+  if (!iso) return false;
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return false;
+  return Date.now() - ts <= RECENT_JOIN_WINDOW_MS;
+}
+
 export default function StudentsScreen() {
   const auth = useAuth();
   const decor = useDecor();
   const {
     classInfo,
     ranking,
+    registeredMembers,
+    registeredTeachers,
     currentStudent,
     statsOfStudent,
     attendanceStatsOfStudent,
@@ -66,6 +77,7 @@ export default function StudentsScreen() {
     fundPaid,
     isTeacher,
     isSubjectTeacher,
+    subjectName,
     canViewAll,
     canEditClass,
     canAddStudents,
@@ -80,13 +92,37 @@ export default function StudentsScreen() {
   const [smartFilter, setSmartFilter] = useState<SmartFilter>('all');
   const [sortBy, setSortBy] = useState<SortKey>('points');
 
+  const publicStudentRoster = useMemo(() => {
+    const q = stripVietnamese(query);
+    return registeredMembers.filter((m) => {
+      if (m.role !== 'student') return false;
+      const matchGroup = groupFilter === 'all' || (m.group?.trim() ?? '') === groupFilter;
+      if (!matchGroup) return false;
+      if (!q) return true;
+      return stripVietnamese(`${m.name} ${m.loginId} ${m.group ?? ''} ${m.position ?? ''}`).includes(q);
+    });
+  }, [registeredMembers, query, groupFilter]);
+
+  const publicDirectoryMembers = useMemo(() => {
+    const q = stripVietnamese(query);
+    return registeredMembers.filter((m) => {
+      if (!q) return true;
+      return stripVietnamese(
+        `${m.name} ${m.loginId} ${m.group ?? ''} ${m.subject ?? ''} ${m.position ?? ''}`,
+      ).includes(q);
+    });
+  }, [registeredMembers, query]);
+
   const groups = useMemo(() => {
     const set = new Set<string>(GROUP_PRESETS);
     for (const r of ranking) {
       if (r.student.group?.trim()) set.add(r.student.group.trim());
     }
+    for (const m of registeredMembers) {
+      if (m.role === 'student' && m.group?.trim()) set.add(m.group.trim());
+    }
     return ['all', ...Array.from(set)];
-  }, [ranking]);
+  }, [ranking, registeredMembers]);
 
   const paidCount = useMemo(
     () => Object.values(fundPaid).filter(Boolean).length,
@@ -126,6 +162,182 @@ export default function StudentsScreen() {
     }
     return filtered;
   }, [ranking, query, groupFilter, smartFilter, sortBy, statsOfStudent, fundPaid]);
+
+  /* ==================== SUBJECT TEACHER READ-ONLY ROSTER VIEW ==================== */
+  if (!canViewAll && isSubjectTeacher) {
+    const teacherName = auth.profile?.displayName?.trim() || `GV ${subjectName ?? 'Bộ môn'}`;
+    const totalPublicStudents = registeredMembers.filter((m) => m.role === 'student').length;
+
+    return (
+      <Screen onRefresh={pullNow}>
+        <FadeIn index={0}>
+          <SectionHeader
+            large
+            title={`Danh sách Lớp ${classInfo.name}`}
+            subtitle={`${totalPublicStudents} học sinh đã đăng ký · Chế độ xem tên cho GV Bộ môn`}
+          />
+        </FadeIn>
+
+        {/* Subject Teacher Profile Hero */}
+        <FadeIn index={1}>
+          <LinearGradient
+            colors={gradient}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[
+              styles.myHero,
+              Shadow.floating,
+              { shadowColor: gradient[0], shadowOpacity: 0.28 },
+            ]}>
+            <View style={styles.myBubbleA} />
+            <View style={styles.myBubbleB} />
+            <View style={styles.myHeroStatusRow}>
+              <View style={styles.frostedTag}>
+                <Ionicons name="book" size={11} color="#FDE68A" />
+                <Text style={styles.frostedTagText}>CỔNG GIÁO VIÊN BỘ MÔN</Text>
+              </View>
+              <View style={styles.idPill}>
+                <Ionicons name="id-card" size={12} color="#FDE68A" />
+                <Text style={styles.idPillText}>{`ID: ${auth.loginId || 'GVBM'}`}</Text>
+              </View>
+            </View>
+
+            <View style={styles.myHeroTop}>
+              <Avatar name={teacherName} size={64} ring frame={decor.avatarFrame} />
+              <View style={styles.flex}>
+                <Text style={styles.myHeroName} numberOfLines={2}>
+                  {teacherName}
+                </Text>
+                <View style={styles.myMetaPillWrap}>
+                  <View style={styles.myMetaChip}>
+                    <Ionicons name="book-outline" size={11} color="#FFFFFF" />
+                    <Text style={styles.myMetaChipText}>
+                      {subjectName ? `Môn ${subjectName}` : 'Giáo viên bộ môn'}
+                    </Text>
+                  </View>
+                  <View style={styles.myMetaChip}>
+                    <Ionicons name="people-outline" size={11} color="#FFFFFF" />
+                    <Text style={styles.myMetaChipText}>{`${totalPublicStudents} học sinh`}</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.myHeroBtns}>
+              <Pressable
+                onPress={() => router.push('/announcements' as never)}
+                style={({ pressed }) => [styles.heroWhiteBtn, pressed && { opacity: 0.85 }]}>
+                <Ionicons name="megaphone" size={17} color={gradient[0]} />
+                <Text style={[styles.heroWhiteBtnText, { color: gradient[0] }]}>
+                  Đăng thông báo
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => router.push('/teacher-form' as never)}
+                style={({ pressed }) => [styles.heroGlassBtn, pressed && { opacity: 0.85 }]}>
+                <Ionicons name="shield-checkmark" size={17} color="#FFFFFF" />
+                <Text style={styles.heroGlassBtnText}>Tạo TK giáo viên</Text>
+              </Pressable>
+            </View>
+          </LinearGradient>
+        </FadeIn>
+
+        <FadeIn index={2} style={styles.ctaRow}>
+          <Button
+            label={'Thêm học sinh mới'}
+            icon={'person-add'}
+            style={styles.flex}
+            onPress={() => router.push('/student-form' as never)}
+          />
+          <Button
+            label={'Đổi tài khoản'}
+            variant={'soft'}
+            icon={'log-out-outline'}
+            onPress={() => {
+              auth.signOut();
+              showToast('Đã đăng xuất — hãy nhập Mã ID & mật khẩu để vào tài khoản khác', 'info');
+            }}
+          />
+        </FadeIn>
+
+        {/* Search & Group Filter for Read-Only Roster */}
+        <FadeIn index={3}>
+          <Card style={styles.controlDeck}>
+            <TextField
+              icon={'search'}
+              placeholder={'Tìm học sinh theo tên, Số ID, tổ...'}
+              value={query}
+              onChangeText={setQuery}
+            />
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chips}>
+              {groups.map((g) => (
+                <Chip
+                  key={g}
+                  label={g === 'all' ? 'Tất cả tổ' : g}
+                  selected={groupFilter === g}
+                  onPress={() => setGroupFilter(g)}
+                />
+              ))}
+            </ScrollView>
+          </Card>
+        </FadeIn>
+
+        {publicStudentRoster.length === 0 ? (
+          <EmptyState
+            icon={'people-outline'}
+            title={
+              totalPublicStudents === 0
+                ? 'Chưa có học sinh nào đăng ký'
+                : 'Không tìm thấy học sinh phù hợp'
+            }
+            message={
+              totalPublicStudents === 0
+                ? 'Ngay khi học sinh tạo tài khoản, tên sẽ tự động cập nhật trực tiếp tại đây!'
+                : 'Thử đổi từ khóa hoặc chọn lại bộ lọc tổ.'
+            }
+          />
+        ) : (
+          publicStudentRoster.map((member, i) => {
+            const recent = isRecentlyJoined(member.joinedAt);
+            return (
+              <FadeIn key={member.id} index={Math.min(i + 4, 10)}>
+                <Card style={styles.memberRowCard}>
+                  <Avatar name={member.name} size={46} />
+                  <View style={styles.body}>
+                    <View style={styles.nameLine}>
+                      <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
+                        {member.name}
+                      </Text>
+                      {recent ? (
+                        <Badge label={'Mới'} color={'success'} soft={'successSoft'} />
+                      ) : null}
+                    </View>
+                    <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
+                      {[
+                        `ID: ${member.loginId}`,
+                        member.group || 'Chưa phân tổ',
+                        member.position || null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Text>
+                  </View>
+                  <Badge
+                    label={member.group || `Lớp ${classInfo.name}`}
+                    color={'accentText'}
+                    soft={'accentSoft'}
+                  />
+                </Card>
+              </FadeIn>
+            );
+          })
+        )}
+      </Screen>
+    );
+  }
 
   /* ==================== PRIVATE STUDENT VIEW (Non-GVCN) ==================== */
   if (!canViewAll) {
@@ -274,7 +486,7 @@ export default function StudentsScreen() {
               icon={'lock-closed-outline'}
               title={'Chế độ riêng tư lớp ' + classInfo.name}
               message={
-                'Chỉ Giáo viên chủ nhiệm mới xem được toàn bộ danh sách học sinh trong lớp.'
+                'Chỉ Giáo viên chủ nhiệm mới xem được toàn bộ hồ sơ chi tiết của học sinh trong lớp.'
               }
             />
           </FadeIn>
@@ -282,14 +494,7 @@ export default function StudentsScreen() {
 
         {/* Actions: Add new account or Switch account */}
         <FadeIn index={2} style={styles.ctaRow}>
-          {isSubjectTeacher ? (
-            <Button
-              label={'Tạo TK giáo viên'}
-              icon={'shield-checkmark'}
-              style={styles.flex}
-              onPress={() => router.push('/teacher-form' as never)}
-            />
-          ) : canAddStudents ? (
+          {canAddStudents ? (
             <Button
               label={'Thêm học sinh mới'}
               icon={'person-add'}
@@ -308,8 +513,90 @@ export default function StudentsScreen() {
           />
         </FadeIn>
 
-        {/* Privacy Shield Explanation Card */}
+        {/* Live Public-Safe Registered Members Directory (Names + ID + Group/Role only, zero private data) */}
         <FadeIn index={3}>
+          <SectionHeader
+            title={`Thành viên đã đăng ký (${registeredMembers.length})`}
+            subtitle={'Tự động cập nhật tên ngay khi có tài khoản mới · Dữ liệu riêng vẫn bảo mật'}
+          />
+        </FadeIn>
+
+        {registeredMembers.length > 5 ? (
+          <FadeIn index={3}>
+            <TextField
+              icon={'search'}
+              placeholder={'Tìm thành viên theo tên, Số ID, tổ...'}
+              value={query}
+              onChangeText={setQuery}
+            />
+          </FadeIn>
+        ) : null}
+
+        {publicDirectoryMembers.length === 0 ? (
+          <FadeIn index={4}>
+            <Card>
+              <Text style={{ color: theme.textSecondary, fontSize: 13 }}>
+                Chưa có thành viên nào khớp từ khóa tìm kiếm.
+              </Text>
+            </Card>
+          </FadeIn>
+        ) : (
+          publicDirectoryMembers.map((member, idx) => {
+            const isSelf = member.role === 'student' && member.id === currentStudent?.id;
+            const recent = isRecentlyJoined(member.joinedAt);
+            const roleBadgeLabel =
+              member.role === 'teacher'
+                ? 'GV Chủ nhiệm'
+                : member.role === 'subject_teacher'
+                  ? member.subject
+                    ? `GV ${member.subject}`
+                    : 'GV Bộ môn'
+                  : member.group || `Lớp ${classInfo.name}`;
+            const roleColor =
+              member.role === 'teacher'
+                ? 'warning'
+                : member.role === 'subject_teacher'
+                  ? 'success'
+                  : 'accentText';
+            const roleSoft =
+              member.role === 'teacher'
+                ? 'warningSoft'
+                : member.role === 'subject_teacher'
+                  ? 'successSoft'
+                  : 'accentSoft';
+
+            return (
+              <FadeIn key={`${member.role}:${member.id}`} index={Math.min(idx + 4, 10)}>
+                <Card
+                  style={[
+                    styles.memberRowCard,
+                    isSelf && { borderColor: theme.accent, borderWidth: 1.2 },
+                  ]}>
+                  <Avatar name={member.name} size={42} ring={isSelf} />
+                  <View style={styles.body}>
+                    <View style={styles.nameLine}>
+                      <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
+                        {member.name + (isSelf ? ' (Bạn)' : '')}
+                      </Text>
+                      {recent ? (
+                        <Badge label={'Mới'} color={'success'} soft={'successSoft'} />
+                      ) : null}
+                    </View>
+                    <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
+                      {[`ID: ${member.loginId}`, member.position || null]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Text>
+                  </View>
+                  <Badge label={roleBadgeLabel} color={roleColor} soft={roleSoft} />
+                </Card>
+              </FadeIn>
+            );
+          })
+        )}
+
+        {/* Privacy Shield Explanation Card */}
+        <FadeIn index={5}>
           <Card style={[styles.privacyCard, { borderColor: theme.accent }]}>
             <View style={styles.privacyHead}>
               <View style={[styles.privacyIcon, { backgroundColor: theme.accentSoft }]}>
@@ -317,12 +604,12 @@ export default function StudentsScreen() {
               </View>
               <View style={styles.flex}>
                 <Text style={[styles.privacyTitle, { color: theme.text }]}>
-                  Không gian riêng tư đang được bảo vệ 🔒
+                  Dữ liệu cá nhân luôn được bảo vệ 🔒
                 </Text>
                 <Text style={{ color: theme.textSecondary, fontSize: 12.5, lineHeight: 19 }}>
-                  Mỗi học sinh có Số ID và mật khẩu tự đặt riêng. Bạn chỉ thấy trang tên, bài đăng,
-                  Kudos, Xu & Sticker của chính mình. Khi bạn thêm học sinh mới, tài khoản đó cũng
-                  được bảo vệ riêng biệt — chỉ Giáo viên chủ nhiệm mới xem được tất cả!
+                  Danh sách trên chỉ hiển thị tên, Số ID và tổ/vai trò để cả lớp biết ai đã tham gia.
+                  Bài đăng, điểm số, SĐT/Email, Xu & Sticker của từng bạn vẫn hoàn toàn riêng tư —
+                  chỉ chính bạn và GVCN xem được!
                 </Text>
               </View>
             </View>
@@ -416,6 +703,47 @@ export default function StudentsScreen() {
               onPress={() => router.push('/bulk-students' as never)}
             />
           ) : null}
+        </FadeIn>
+      ) : null}
+
+      {registeredTeachers.length > 0 ? (
+        <FadeIn index={2}>
+          <Card style={styles.teacherStripCard} onPress={() => router.push('/members' as never)}>
+            <View style={styles.teacherStripHead}>
+              <View style={styles.nameLine}>
+                <Ionicons name="shield-checkmark" size={15} color={theme.warning} />
+                <Text style={[styles.teacherStripTitle, { color: theme.text }]}>
+                  {`Giáo viên đã đăng ký (${registeredTeachers.length})`}
+                </Text>
+              </View>
+              <Text style={{ color: theme.accentText, fontSize: 12, fontWeight: '800' }}>
+                Quản lý →
+              </Text>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chips}>
+              {registeredTeachers.map((t) => (
+                <View
+                  key={t.id}
+                  style={[
+                    styles.teacherMiniPill,
+                    { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                  ]}>
+                  <Avatar name={t.name} size={24} />
+                  <Text style={[styles.teacherMiniName, { color: theme.text }]} numberOfLines={1}>
+                    {t.name}
+                  </Text>
+                  <Badge
+                    label={t.role === 'teacher' ? 'GVCN' : (t.subject ?? 'GVBM')}
+                    color={t.role === 'teacher' ? 'warning' : 'success'}
+                    soft={t.role === 'teacher' ? 'warningSoft' : 'successSoft'}
+                  />
+                </View>
+              ))}
+            </ScrollView>
+          </Card>
         </FadeIn>
       ) : null}
 
@@ -1036,4 +1364,22 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   quickPlusText: { fontSize: 10.5, fontWeight: '900' },
+  memberRowCard: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
+  teacherStripCard: { gap: Spacing.two },
+  teacherStripHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  teacherStripTitle: { fontSize: 13.5, fontWeight: '800' },
+  teacherMiniPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  teacherMiniName: { fontSize: 12, fontWeight: '800', maxWidth: 130 },
 });

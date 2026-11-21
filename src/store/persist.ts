@@ -27,6 +27,7 @@ import type {
   FundTransaction,
   KudosItem,
   Poll,
+  RegisteredTeacherPublic,
   Role,
   ScheduleSlot,
   SeatingPlan,
@@ -40,6 +41,9 @@ export const CLEAR_STUDENTS_MIGRATION_KEY = 'class10t4:students-cleared:v1';
 
 export function freshState(): PersistedState {
   const students = buildInitialStudents();
+  const initialSeating = buildInitialSeating(students);
+  const seating: SeatingPlan =
+    students.length === 0 ? { ...initialSeating, updatedAt: '' } : initialSeating;
   return {
     version: 1,
     classInfo: { ...DEFAULT_CLASS, goalPoints: DEFAULT_CLASS.goalPoints ?? 200 },
@@ -61,12 +65,49 @@ export function freshState(): PersistedState {
     activityLog: [],
     kudos: buildInitialKudos(students, DEFAULT_CLASS.teacherName),
     resources: buildInitialResources(DEFAULT_CLASS.teacherName),
-    seating: buildInitialSeating(students),
+    seating,
+    registeredTeachers: [],
+    deletedStudentIds: {},
+    deletedTeacherIds: {},
   };
 }
 
 function isRole(value: unknown): value is Role {
   return value === 'teacher' || value === 'student';
+}
+
+function sanitizeRegisteredTeachers(raw: unknown): RegisteredTeacherPublic[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(
+      (item): item is RegisteredTeacherPublic =>
+        Boolean(item) &&
+        typeof item === 'object' &&
+        typeof (item as RegisteredTeacherPublic).id === 'string' &&
+        typeof (item as RegisteredTeacherPublic).name === 'string' &&
+        ((item as RegisteredTeacherPublic).role === 'teacher' ||
+          (item as RegisteredTeacherPublic).role === 'subject_teacher'),
+    )
+    .map((item) => ({
+      id: item.id,
+      loginId: typeof item.loginId === 'string' ? item.loginId : '',
+      name: item.name,
+      role: item.role,
+      subject: typeof item.subject === 'string' ? item.subject : null,
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : new Date().toISOString(),
+    }));
+}
+
+function sanitizeTombstones(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key === 'string' && key && typeof value === 'string' && value) {
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 /** Backfill any missing fields so older saved / synced states upgrade cleanly. */
@@ -149,7 +190,12 @@ export function hydrateState(parsed: Partial<PersistedState> | null | undefined)
       parsed.seating.seats &&
       typeof parsed.seating.seats === 'object'
         ? (parsed.seating as SeatingPlan)
-        : buildInitialSeating(parsed.students as Student[]),
+        : (parsed.students as Student[]).length === 0
+          ? { ...buildInitialSeating([]), updatedAt: '' }
+          : buildInitialSeating(parsed.students as Student[]),
+    registeredTeachers: sanitizeRegisteredTeachers(parsed.registeredTeachers),
+    deletedStudentIds: sanitizeTombstones(parsed.deletedStudentIds),
+    deletedTeacherIds: sanitizeTombstones(parsed.deletedTeacherIds),
   };
 }
 

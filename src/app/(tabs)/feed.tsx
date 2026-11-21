@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
@@ -25,10 +26,75 @@ import {
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { formatDate } from '@/lib/date';
-import { isGoogleDriveUrl } from '@/lib/drive';
+import {
+  buildDriveFallbackThumbnailUrl,
+  buildDriveThumbnailUrl,
+  extractDriveFileId,
+  getLocalPreviewUri,
+  isGoogleDriveUrl,
+} from '@/lib/drive';
 import { stripVietnamese } from '@/lib/intelligence';
 import { useClassStore } from '@/store/class-store';
 import type { EntryCategory, EntryStatus } from '@/types/models';
+
+function FeedProofPreview({
+  proofUrl,
+  onPress,
+}: {
+  proofUrl: string;
+  onPress: () => void;
+}) {
+  const theme = useTheme();
+  const [attempt, setAttempt] = useState({ url: proofUrl, index: 0 });
+
+  const isDocLink = /\/(document|spreadsheets|presentation)\/d\//i.test(proofUrl);
+  const driveId = isDocLink ? null : extractDriveFileId(proofUrl);
+  if (!driveId) return null;
+
+  const localUri = getLocalPreviewUri(driveId);
+  const primary = buildDriveThumbnailUrl(driveId, 600);
+  const fallback = buildDriveFallbackThumbnailUrl(driveId, 600);
+
+  const candidates: string[] = [];
+  for (const candidate of [localUri, primary, fallback]) {
+    if (candidate && !candidates.includes(candidate)) {
+      candidates.push(candidate);
+    }
+  }
+
+  const activeIdx = attempt.url === proofUrl ? attempt.index : 0;
+  if (activeIdx >= candidates.length) return null;
+
+  const uri = candidates[activeIdx];
+
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.proofThumbWrap,
+        { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+        pressed && { opacity: 0.9 },
+      ]}>
+      <Image
+        source={{ uri }}
+        contentFit="cover"
+        cachePolicy="memory-disk"
+        transition={120}
+        onError={() =>
+          setAttempt((prev) => {
+            const current = prev.url === proofUrl ? prev.index : 0;
+            return { url: proofUrl, index: current + 1 };
+          })
+        }
+        style={styles.proofThumbImg}
+      />
+      <View style={styles.proofThumbBadge}>
+        <Ionicons name="image-outline" size={11} color="#FFFFFF" />
+        <Text style={styles.proofThumbBadgeText}>Ảnh minh chứng · Chạm để mở</Text>
+      </View>
+    </Pressable>
+  );
+}
 
 type Filter = 'all' | EntryStatus;
 type CatFilter = 'all' | EntryCategory;
@@ -366,6 +432,13 @@ export default function FeedScreen() {
                   </Text>
                 ) : null}
 
+                {entry.proofUrl && isGoogleDriveUrl(entry.proofUrl) ? (
+                  <FeedProofPreview
+                    proofUrl={entry.proofUrl}
+                    onPress={() => openProof(entry.proofUrl!)}
+                  />
+                ) : null}
+
                 {/* Badges Row */}
                 <View style={styles.badges}>
                   <Badge
@@ -688,6 +761,34 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   proofText: { fontSize: 11, fontWeight: '800' },
+  proofThumbWrap: {
+    width: '100%',
+    height: 176,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  proofThumbImg: {
+    width: '100%',
+    height: '100%',
+  },
+  proofThumbBadge: {
+    position: 'absolute',
+    left: 8,
+    bottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+  },
+  proofThumbBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
   noteBox: {
     flexDirection: 'row',
     alignItems: 'center',

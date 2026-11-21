@@ -131,19 +131,21 @@ export default function SettingsScreen() {
 
   const syncMeta = {
     synced: {
-      label: 'Đã đồng bộ Cloud · RLS 🔒',
+      label: auth.isCloudSyncEnabled
+        ? 'Đang đồng bộ trực tuyến · Realtime ⚡'
+        : 'Đã đồng bộ Cloud · RLS 🔒',
       color: 'success' as const,
       soft: 'successSoft' as const,
       icon: 'cloud-done' as Ionicon,
     },
     syncing: {
-      label: 'Đang đồng bộ...',
+      label: 'Đang đồng bộ trực tuyến...',
       color: 'warning' as const,
       soft: 'warningSoft' as const,
       icon: 'sync' as Ionicon,
     },
     offline: {
-      label: 'Mất kết nối Cloud',
+      label: 'Mất kết nối mạng · Đang lưu tạm',
       color: 'danger' as const,
       soft: 'dangerSoft' as const,
       icon: 'cloud-offline' as Ionicon,
@@ -181,11 +183,27 @@ export default function SettingsScreen() {
   };
 
   const handleRenameCloud = async () => {
-    const ok = await auth.renameMe(nameDraft);
+    const clean = nameDraft.trim();
+    if (clean.length < 2) {
+      showToast('Họ và tên phải có ít nhất 2 ký tự.', 'warning');
+      return;
+    }
+    const ok = await auth.renameMe(clean);
     if (ok) {
       setEditingName(false);
-      showToast('Đã đổi tên hiển thị!');
+      showToast(
+        auth.isCloudSyncEnabled
+          ? 'Đã đổi tên hiển thị & đồng bộ lên lớp! ✨'
+          : 'Đã đổi tên hiển thị!',
+      );
+    } else {
+      showToast('Không thể cập nhật tên hiển thị lúc này.', 'danger');
     }
+  };
+
+  const handleManualSync = async () => {
+    await pullNow();
+    showToast('Đã đồng bộ dữ liệu & danh sách thành viên mới nhất! ⚡', 'info');
   };
 
   const canChangeOwnPass =
@@ -399,14 +417,16 @@ export default function SettingsScreen() {
                 ? `${auth.email ?? ''} · ${roleMeta.label}`
                 : `${roleMeta.label} · Lớp ${classInfo.name}`}
             </Text>
-            <View style={styles.syncGlass}>
+            <Pressable
+              onPress={auth.isCloudSyncEnabled ? () => void handleManualSync() : undefined}
+              style={({ pressed }) => [styles.syncGlass, pressed && auth.isCloudSyncEnabled && styles.pressed]}>
               <Ionicons name={syncMeta.icon} size={12} color="#FFFFFF" />
               <Text style={styles.syncGlassText}>
                 {lastSyncedAt && syncStatus === 'synced'
                   ? `${syncMeta.label} · ${new Date(lastSyncedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}`
                   : syncMeta.label}
               </Text>
-            </View>
+            </Pressable>
           </View>
         </LinearGradient>
       </FadeIn>
@@ -572,6 +592,16 @@ export default function SettingsScreen() {
                 }}
               />
             )
+          ) : null}
+
+          {auth.isCloudSyncEnabled ? (
+            <Button
+              label={'Đồng bộ ngay'}
+              variant={'soft'}
+              size={'sm'}
+              icon={'sync'}
+              onPress={() => void handleManualSync()}
+            />
           ) : null}
 
           {isTeacher || isSubjectTeacher ? (

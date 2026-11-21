@@ -1,15 +1,17 @@
 /**
  * Single source of truth for the class workspace, wired to `AuthProvider` for
  * strict per-student privacy isolation, unique Login ID + password accounts,
- * private contact separation and optional cloud RPCs.
+ * live cross-device Supabase + Realtime Broadcast sync, and a public-safe
+ * `registeredMembers` directory so newly registered names appear instantaneously.
  *
  * Visibility rules:
- * - ONLY the Homeroom Teacher (`isTeacher` / `canViewAll`) sees ALL students,
- *   all posts, entries, kudos, private resources, feedback, attendance, fund
- *   dues, seating names, and activity logs.
- * - Students ONLY see their own profile page, their own posts/entries/kudos/
- *   feedback/resources/attendance/fund status/seat, and teacher-published class
- *   info (announcements, schedule, tasks, polls).
+ * - ONLY the Homeroom Teacher (`isTeacher` / `canViewAll`) sees ALL students'
+ *   private details, entries, kudos, private resources, feedback, attendance,
+ *   fund dues, seating names, and full activity logs.
+ * - Students ONLY see their own profile page, entries, kudos, feedback,
+ *   private resources, attendance, fund status, and seat — plus teacher-published
+ *   class info (announcements, schedule, tasks, polls) and the public-safe
+ *   `registeredMembers` list (name + ID + group/role only, ZERO private data).
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -23,6 +25,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { Platform } from 'react-native';
 
 import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { currentSchoolWeekday } from '@/lib/date';
@@ -45,12 +48,19 @@ import {
   clearAllStudentAccounts,
   ensureAccountsForBulkStudents,
   isLoginIdTaken,
+  loadStudentAccounts,
   normalizeLoginIdDisplay,
   registerStudentAccount,
   removeStudentAccount,
+  subscribeStudentAccountsChanged,
   suggestNextLoginId,
   updateStudentAccountCredentials,
 } from '@/lib/student-accounts';
+import {
+  loadTeacherAccounts,
+  subscribeTeacherAccountsChanged,
+  toPublicTeacher,
+} from '@/lib/teacher-accounts';
 import { normalizeName } from '@/lib/utils';
 import type { MemberRole, StudentPrivateData } from '@/types/auth';
 import type {
@@ -69,6 +79,7 @@ import type {
   KudosItem,
   Poll,
   RankingRow,
+  RegisteredTeacherPublic,
   Role,
   ScheduleSlot,
   SeatingPlan,
@@ -79,7 +90,7 @@ import type {
 import { createActions } from './actions';
 import { useAuth } from './auth-store';
 import { CLEAR_STUDENTS_MIGRATION_KEY, STORAGE_KEY, freshState, parseState } from './persist';
-import { buildStudent } from './reducers';
+import { buildStudent, mergeStudent } from './reducers';
 import {
   addResourceRemote,
   addStudentRemote,
@@ -88,15 +99,26 @@ import {
   deleteFeedbackRemote,
   deleteStudentPrivateRemote,
   likeAnnouncementRemote,
+  mergeClassStates,
+  removeRegisteredMemberFromCloud,
   replyFeedbackRemote,
   sendFeedbackRemote,
   sendKudosRemote,
   submitEntryRemote,
+  upsertRegisteredMemberToCloud,
   upsertStudentNoteRemote,
   upsertStudentPrivateRemote,
   votePollRemote,
 } from './remote';
-import type { EntryInput, KudosInput, PersistedState, ResourceInput, StudentInput } from './types';
+import type {
+  AnnouncementInput,
+  EntryInput,
+  KudosInput,
+  PersistedState,
+  ResourceInput,
+  StudentInput,
+  TaskInput,
+} from './types';
 import { useRemoteSync, type SyncStatus } from './use-remote-sync';
 
 const DONE_TASKS_PREFIX = 'class10t4:done-tasks:v2:';
@@ -111,6 +133,18 @@ export type FundSummary = {
   collectedTotal: number;
 };
 
+/** Public-safe registered member projection (no phone, email, address, notes, entries, or passwords). */
+export type RegisteredMemberPublic = {
+  id: string;
+  name: string;
+  loginId: string;
+  role: 'student' | 'teacher' | 'subject_teacher';
+  group?: string | null;
+  subject?: string | null;
+  position?: string | null;
+  joinedAt: string;
+};
+
 type BaseActions = Omit<
   ReturnType<typeof createActions>,
   | 'addStudentLocal'
@@ -118,6 +152,8 @@ type BaseActions = Omit<
   | 'bulkAddStudentsLocal'
   | 'updateStudent'
   | 'addEntry'
+  | 'addAnnouncement'
+  | 'addTask'
   | 'removeStudent'
   | 'clearAll'
   | 'likeAnnouncementLocal'
@@ -140,6 +176,10 @@ export type ClassStore = BaseActions & {
   pullNow: () => Promise<void>;
   classInfo: ClassInfo;
   students: Student[];
+  /** Public-safe list of ALL registered students & teachers, newest first (no private data). */
+  registeredMembers: RegisteredMemberPublic[];
+  /** Public-safe list of registered teacher accounts (no password hashes). */
+  registeredTeachers: RegisteredTeacherPublic[];
   entries: Entry[];
   /** Effective legacy 2-value role (`'teacher'` covers teacher & editor for editability). */
   role: Role;
@@ -147,7 +187,7 @@ export type ClassStore = BaseActions & {
   memberRole: MemberRole;
   /** True only for the homeroom teacher (admin, member approval, destructive ops). */
   isTeacher: boolean;
-  /** True ONLY for Homeroom Teacher — only GVCN can view all students and everyone's posts. */
+  /** True ONLY for Homeroom Teacher — only GVCN can view all students' private data and posts. */
   canViewAll: boolean;
   /** True when signed in as a Subject Teacher (Giáo viên bộ môn). */
   isSubjectTeacher: boolean;
@@ -209,6 +249,8 @@ export type ClassStore = BaseActions & {
     options?: { group?: string | null; autoDistributeGroups?: boolean; initialPassword?: string },
   ) => Promise<void>;
   addEntry: (input: EntryInput) => Promise<void>;
+  addAnnouncement: (input: AnnouncementInput) => void;
+  addTask: (input: TaskInput) => void;
   removeStudent: (id: string) => void;
   clearAll: () => void;
   saveStudentPrivate: (studentId: string, data: StudentPrivateData) => Promise<void>;
@@ -244,11 +286,10 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [doneTaskIds, setDoneTaskIds] = useState<Record<string, boolean>>({});
   const [savedResourceIds, setSavedResourceIds] = useState<Record<string, boolean>>({});
+  const [flushSignal, setFlushSignal] = useState<{ seq: number; reason: string } | null>(null);
   const stateRef = useRef(state);
-
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
+  const hydratedOkRef = useRef(false);
+  const lastFlushedSeqRef = useRef(0);
 
   const commit = useCallback((next: PersistedState) => {
     setState(next);
@@ -259,8 +300,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Derive authoritative role & strict visibility permissions.
-  const isCloud = auth.isCloudActive;
-  const memberRole: MemberRole = isCloud
+  const isCloudOAuth = auth.isCloudActive;
+  const isCloudSync = auth.isCloudSyncEnabled;
+  const memberRole: MemberRole = isCloudOAuth
     ? (auth.profile?.role ?? 'student')
     : auth.accountRole;
 
@@ -273,15 +315,15 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     canEditClass || memberRole === 'student' || memberRole === 'subject_teacher';
   const canPostAnnouncements =
     memberRole === 'teacher' || memberRole === 'subject_teacher' || memberRole === 'editor';
-  const canViewNotes = isCloud
+  const canViewNotes = isCloudOAuth
     ? isTeacher || Boolean(auth.profile?.canViewPrivate)
     : isTeacher;
-  const canManagePrivate = isCloud
+  const canManagePrivate = isCloudOAuth
     ? isTeacher || (memberRole === 'editor' && Boolean(auth.profile?.canViewPrivate))
     : isTeacher;
 
   // Bind student identity strictly to the authenticated student's verified session.
-  const effectiveStudentId = isCloud
+  const effectiveStudentId = isCloudOAuth
     ? (auth.profile?.studentId ?? null)
     : memberRole === 'student'
       ? (auth.studentId ?? null)
@@ -289,7 +331,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const canViewPrivateOf = useCallback(
     (studentId: string) => {
-      if (!isCloud) {
+      if (!isCloudOAuth) {
         return isTeacher || (effectiveStudentId !== null && effectiveStudentId === studentId);
       }
       return (
@@ -298,11 +340,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         (effectiveStudentId !== null && effectiveStudentId === studentId)
       );
     },
-    [isCloud, isTeacher, auth.profile?.canViewPrivate, effectiveStudentId],
+    [isCloudOAuth, isTeacher, auth.profile?.canViewPrivate, effectiveStudentId],
   );
 
   const actorLabel = useMemo(() => {
-    if (isCloud) {
+    if (isCloudOAuth) {
       return auth.profile?.displayName?.trim() || auth.email || 'Thành viên';
     }
     if (memberRole === 'subject_teacher') {
@@ -318,7 +360,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       'Học sinh'
     );
   }, [
-    isCloud,
+    isCloudOAuth,
     auth.profile?.displayName,
     auth.email,
     memberRole,
@@ -333,63 +375,283 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [mutate, actorLabel, effectiveStudentId],
   );
 
-  // Hydrate persisted shared class database once.
+  // Hydrate persisted shared class database once (safe against storage read errors).
   useEffect(() => {
     let cancelled = false;
     Promise.all([
       AsyncStorage.getItem(STORAGE_KEY),
       AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
+      loadStudentAccounts({ localOnly: true }).catch(() => []),
+      loadTeacherAccounts({ localOnly: true }).catch(() => []),
     ])
-      .then(([rawState, clearedFlag]) => {
+      .then(([rawState, clearedFlag, localStudentAccs, localTeacherAccs]) => {
         if (cancelled) return;
+        let base: PersistedState;
         if (rawState) {
           const parsed = parseState(rawState);
           if (!clearedFlag) {
-            const wiped: PersistedState = {
+            base = {
               ...parsed,
               students: [],
               entries: [],
               attendance: {},
               fundPaid: {},
               kudos: [],
-              seating: { ...parsed.seating, seats: {}, updatedAt: new Date().toISOString() },
+              seating: { ...parsed.seating, seats: {}, updatedAt: '' },
               currentStudentId: null,
             };
-            setState(wiped);
             AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1').catch(() => {});
           } else {
-            setState(parsed);
+            base = parsed;
           }
-        } else if (!clearedFlag) {
+        } else {
           const initial = freshState();
-          const wiped: PersistedState = {
-            ...initial,
-            students: [],
-            entries: [],
-            attendance: {},
-            fundPaid: {},
-            kudos: [],
-            seating: { ...initial.seating, seats: {}, updatedAt: new Date().toISOString() },
-            currentStudentId: null,
-          };
-          setState(wiped);
-          AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1').catch(() => {});
+          base = !clearedFlag
+            ? {
+                ...initial,
+                students: [],
+                entries: [],
+                attendance: {},
+                fundPaid: {},
+                kudos: [],
+                seating: { ...initial.seating, seats: {}, updatedAt: '' },
+                currentStudentId: null,
+              }
+            : initial;
+          if (!clearedFlag) {
+            AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1').catch(() => {});
+          }
         }
+
+        // Self-heal any locally registered students/teachers missing from persisted state.
+        const deletedStudents = base.deletedStudentIds ?? {};
+        const mergedStudents = [...base.students];
+        const studentIds = new Set(mergedStudents.map((s) => s.id));
+        for (const acc of localStudentAccs) {
+          const deletedAt = deletedStudents[acc.studentId];
+          if (deletedAt && deletedAt.localeCompare(acc.updatedAt) > 0) continue;
+          if (!studentIds.has(acc.studentId)) {
+            const restored = buildStudent(mergedStudents, base.classInfo.name, {
+              id: acc.studentId,
+              name: acc.name,
+              code: acc.loginId,
+              gender: 'male',
+            });
+            mergedStudents.push({
+              ...restored,
+              createdAt: acc.createdAt,
+              updatedAt: acc.updatedAt,
+            });
+            studentIds.add(acc.studentId);
+          }
+        }
+
+        const deletedTeachers = base.deletedTeacherIds ?? {};
+        const teacherMap = new Map<string, RegisteredTeacherPublic>();
+        for (const t of base.registeredTeachers ?? []) {
+          const deletedAt = deletedTeachers[t.id];
+          if (deletedAt && deletedAt.localeCompare(t.updatedAt) > 0) continue;
+          teacherMap.set(t.id, t);
+        }
+        for (const acc of localTeacherAccs) {
+          const deletedAt = deletedTeachers[acc.teacherId];
+          if (deletedAt && deletedAt.localeCompare(acc.updatedAt) > 0) continue;
+          const pub = toPublicTeacher(acc);
+          const prev = teacherMap.get(pub.id);
+          if (!prev || pub.updatedAt.localeCompare(prev.updatedAt) >= 0) {
+            teacherMap.set(pub.id, pub);
+          }
+        }
+
+        const hydrated: PersistedState = {
+          ...base,
+          students: mergedStudents,
+          registeredTeachers: Array.from(teacherMap.values()),
+        };
+
+        hydratedOkRef.current = true;
+        commit(hydrated);
       })
-      .catch(() => {})
+      .catch(() => {
+        // Keep hydratedOkRef.current === false so we NEVER overwrite STORAGE_KEY with empty state.
+      })
       .finally(() => {
         if (!cancelled) setReady(true);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [commit]);
 
-  // Persist shared class database on state updates.
+  // Persist shared class database on state updates (only after successful hydration).
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !hydratedOkRef.current) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state)).catch(() => {});
   }, [state, ready]);
+
+  // Self-heal live student record if currently signed-in student is missing or renamed in auth session.
+  useEffect(() => {
+    if (!ready || memberRole !== 'student' || !effectiveStudentId) return;
+    const desiredName = auth.profile?.displayName?.trim();
+    const current = stateRef.current;
+    if (current.deletedStudentIds?.[effectiveStudentId]) return;
+    const found = current.students.find((s) => s.id === effectiveStudentId);
+
+    if (!found && desiredName) {
+      const restored = buildStudent(current.students, current.classInfo.name, {
+        id: effectiveStudentId,
+        name: desiredName,
+        code: auth.loginId ?? undefined,
+        gender: 'male',
+      });
+      mutate((prev) => {
+        if (prev.deletedStudentIds?.[effectiveStudentId]) return prev;
+        if (prev.students.some((s) => s.id === effectiveStudentId)) return prev;
+        return {
+          ...prev,
+          students: [...prev.students, restored],
+        };
+      });
+    }
+  }, [ready, memberRole, effectiveStudentId, auth.profile?.displayName, auth.loginId, mutate]);
+
+  // Subscribe to local account changes & cross-tab Web storage events to prevent stale state overwrites.
+  useEffect(() => {
+    const unsubStudents = subscribeStudentAccountsChanged((event) => {
+      if (event.type === 'registered') {
+        mutate((prev) => {
+          const nextDeleted = { ...(prev.deletedStudentIds ?? {}) };
+          delete nextDeleted[event.student.id];
+          const exists = prev.students.some((s) => s.id === event.student.id);
+          const nextStudents = exists
+            ? prev.students.map((s) =>
+                s.id === event.student.id
+                  ? { ...s, name: event.student.name, code: event.student.code, updatedAt: event.student.updatedAt }
+                  : s,
+              )
+            : [...prev.students, event.student];
+          return {
+            ...prev,
+            students: nextStudents,
+            deletedStudentIds: nextDeleted,
+          };
+        });
+      } else if (event.type === 'updated') {
+        if (event.name !== undefined || event.loginId !== undefined) {
+          const now = new Date().toISOString();
+          mutate((prev) => ({
+            ...prev,
+            students: prev.students.map((s) =>
+              s.id === event.studentId
+                ? {
+                    ...s,
+                    name: event.name ? normalizeName(event.name) : s.name,
+                    code: event.loginId ?? s.code,
+                    updatedAt: event.account?.updatedAt ?? now,
+                  }
+                : s,
+            ),
+          }));
+        }
+      } else if (event.type === 'removed') {
+        const now = new Date().toISOString();
+        mutate((prev) => ({
+          ...prev,
+          students: prev.students.filter((s) => s.id !== event.studentId),
+          deletedStudentIds: {
+            ...(prev.deletedStudentIds ?? {}),
+            [event.studentId]: now,
+          },
+        }));
+      } else if (event.type === 'synced') {
+        AsyncStorage.getItem(STORAGE_KEY)
+          .then((raw) => {
+            if (!raw) return;
+            const fromStorage = parseState(raw);
+            mutate((prev) => mergeClassStates(fromStorage, prev));
+          })
+          .catch(() => {});
+      }
+    });
+
+    const unsubTeachers = subscribeTeacherAccountsChanged((event) => {
+      if (event.type === 'registered' || event.type === 'updated') {
+        mutate((prev) => {
+          const existing = prev.registeredTeachers ?? [];
+          const nextDeleted = { ...(prev.deletedTeacherIds ?? {}) };
+          delete nextDeleted[event.publicTeacher.id];
+          const nextTeachers = [
+            ...existing.filter((t) => t.id !== event.publicTeacher.id),
+            event.publicTeacher,
+          ];
+          return {
+            ...prev,
+            registeredTeachers: nextTeachers,
+            deletedTeacherIds: nextDeleted,
+          };
+        });
+      } else if (event.type === 'removed') {
+        const now = new Date().toISOString();
+        mutate((prev) => ({
+          ...prev,
+          registeredTeachers: (prev.registeredTeachers ?? []).filter(
+            (t) => t.id !== event.teacherId,
+          ),
+          deletedTeacherIds: {
+            ...(prev.deletedTeacherIds ?? {}),
+            [event.teacherId]: now,
+          },
+        }));
+      } else if (event.type === 'synced') {
+        loadTeacherAccounts({ localOnly: true })
+          .then((accounts) => {
+            if (accounts.length === 0) return;
+            mutate((prev) => {
+              const deleted = prev.deletedTeacherIds ?? {};
+              const map = new Map<string, RegisteredTeacherPublic>();
+              for (const t of prev.registeredTeachers ?? []) map.set(t.id, t);
+              for (const acc of accounts) {
+                const delAt = deleted[acc.teacherId];
+                if (delAt && delAt.localeCompare(acc.updatedAt) > 0) continue;
+                const pub = toPublicTeacher(acc);
+                const cur = map.get(pub.id);
+                if (!cur || pub.updatedAt.localeCompare(cur.updatedAt) >= 0) {
+                  map.set(pub.id, pub);
+                }
+              }
+              return { ...prev, registeredTeachers: Array.from(map.values()) };
+            });
+          })
+          .catch(() => {});
+      }
+    });
+
+    let removeStorageListener: (() => void) | null = null;
+    if (
+      Platform.OS === 'web' &&
+      typeof window !== 'undefined' &&
+      typeof window.addEventListener === 'function'
+    ) {
+      const onStorage = (ev: StorageEvent) => {
+        if (ev.key === STORAGE_KEY && ev.newValue) {
+          try {
+            const incoming = parseState(ev.newValue);
+            mutate((prev) => mergeClassStates(incoming, prev));
+          } catch {
+            // Ignore malformed storage payload
+          }
+        }
+      };
+      window.addEventListener('storage', onStorage);
+      removeStorageListener = () => window.removeEventListener('storage', onStorage);
+    }
+
+    return () => {
+      unsubStudents();
+      unsubTeachers();
+      removeStorageListener?.();
+    };
+  }, [mutate]);
 
   // Hydrate personal checklists strictly scoped per authenticated account.
   const doneKey = `${DONE_TASKS_PREFIX}${auth.accountScopeKey}`;
@@ -450,13 +712,31 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [savedKey],
   );
 
-  const { syncStatus, lastSyncedAt, pullNow } = useRemoteSync({
+  const { syncStatus, lastSyncedAt, pullNow, flushNow } = useRemoteSync({
     state,
     commit,
     ready,
-    cloudActive: isCloud,
+    cloudActive: isCloudSync,
     canEdit: canEditClass,
+    allowAllRolesPush: true,
   });
+
+  const flushCloud = useCallback(
+    (reason: string) => {
+      if (!isCloudSync) return;
+      setFlushSignal((prev) => ({ seq: (prev?.seq ?? 0) + 1, reason }));
+    },
+    [isCloudSync],
+  );
+
+  // Keep stateRef current and flush immediately after committed critical mutations.
+  useEffect(() => {
+    stateRef.current = state;
+    if (!flushSignal || !ready || !isCloudSync) return;
+    if (flushSignal.seq <= lastFlushedSeqRef.current) return;
+    lastFlushedSeqRef.current = flushSignal.seq;
+    void flushNow(flushSignal.reason, state);
+  }, [state, flushSignal, ready, isCloudSync, flushNow]);
 
   /* ---------- Privacy-safe Login ID helpers ---------- */
 
@@ -507,16 +787,32 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         position: input.position ?? null,
       };
 
-      actions.addStudentLocal(safePublicInput);
-      await auth.refreshStudentAccountCount();
+      // Idempotent upsert so `subscribeStudentAccountsChanged` and `addStudent` never duplicate.
+      mutate((prev) => {
+        const nextDeleted = { ...(prev.deletedStudentIds ?? {}) };
+        delete nextDeleted[reg.student.id];
+        const exists = prev.students.some((s) => s.id === reg.student.id);
+        const nextStudents = exists
+          ? prev.students.map((s) => (s.id === reg.student.id ? reg.student : s))
+          : [...prev.students, reg.student];
+        return {
+          ...prev,
+          students: nextStudents,
+          deletedStudentIds: nextDeleted,
+        };
+      });
+      actions.logActivity(`Thêm học sinh ${reg.student.name} (ID: ${reg.account.loginId})`);
 
-      if (isCloud && !canEditClass) {
+      await auth.refreshStudentAccountCount();
+      flushCloud('add-student');
+
+      if (isCloudOAuth && !canEditClass) {
         await addStudentRemote(safePublicInput);
         await pullNow();
       }
       return reg.student.id;
     },
-    [actions, auth, canEditClass, isCloud, pullNow],
+    [actions, auth, canEditClass, flushCloud, isCloudOAuth, mutate, pullNow],
   );
 
   const updateStudent = useCallback(
@@ -532,12 +828,24 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         throw new Error(cred.error || 'Không thể cập nhật thông tin tài khoản học sinh');
       }
       const { password: _discarded, ...restPatch } = patch;
-      actions.updateStudent(id, {
+      const cleanPatch: Partial<StudentInput> = {
         ...restPatch,
         code: cred.account?.loginId ?? restPatch.code,
-      });
+      };
+      const existingStu = stateRef.current.students.find((s) => s.id === id);
+      const mergedStu = existingStu ? mergeStudent(existingStu, cleanPatch) : null;
+
+      actions.updateStudent(id, cleanPatch);
+      await auth.refreshStudentAccountCount();
+
+      if (isCloudSync && mergedStu) {
+        void upsertRegisteredMemberToCloud({ kind: 'student', student: mergedStu }).catch(
+          () => {},
+        );
+      }
+      flushCloud('update-student');
     },
-    [actions],
+    [actions, auth, flushCloud, isCloudSync],
   );
 
   const bulkAddStudents = useCallback(
@@ -571,83 +879,126 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       await ensureAccountsForBulkStudents(created, initPass);
       actions.appendStudentsLocal(created, `Nhập nhanh ${created.length} học sinh`);
       await auth.refreshStudentAccountCount();
+      flushCloud('bulk-add-students');
 
-      if (isCloud && !canEditClass) {
+      if (isCloudOAuth && !canEditClass) {
         await bulkAddStudentsRemote(cleanNames, options);
         await pullNow();
       }
     },
-    [actions, auth, canEditClass, isCloud, pullNow],
+    [actions, auth, canEditClass, flushCloud, isCloudOAuth, pullNow],
   );
 
   const addEntry = useCallback(
     async (input: EntryInput) => {
       // Strictly bind student submissions to the authenticated student's own ID.
-      const enforcedStudentId = canViewAll ? input.studentId : (effectiveStudentId ?? input.studentId);
+      const enforcedStudentId = canViewAll
+        ? input.studentId
+        : (effectiveStudentId ?? input.studentId);
       const created = actions.addEntry({
         ...input,
         studentId: enforcedStudentId,
         submittedBy: canEditClass ? 'teacher' : 'student',
       });
-      if (isCloud && !canEditClass) {
+      flushCloud('add-entry');
+      if (isCloudOAuth && !canEditClass) {
         await submitEntryRemote(created);
         await pullNow();
       }
     },
-    [actions, canViewAll, effectiveStudentId, canEditClass, isCloud, pullNow],
+    [actions, canViewAll, effectiveStudentId, canEditClass, flushCloud, isCloudOAuth, pullNow],
+  );
+
+  const addAnnouncement = useCallback(
+    (input: AnnouncementInput) => {
+      actions.addAnnouncement(input);
+      flushCloud('add-announcement');
+    },
+    [actions, flushCloud],
+  );
+
+  const addTask = useCallback(
+    (input: TaskInput) => {
+      actions.addTask(input);
+      flushCloud('add-task');
+    },
+    [actions, flushCloud],
   );
 
   const removeStudent = useCallback(
     (id: string) => {
+      const now = new Date().toISOString();
       actions.removeStudent(id);
+      mutate((prev) => ({
+        ...prev,
+        deletedStudentIds: {
+          ...(prev.deletedStudentIds ?? {}),
+          [id]: now,
+        },
+      }));
       removeStudentAccount(id)
         .then(() => auth.refreshStudentAccountCount())
         .catch(() => {});
-      if (isCloud && isTeacher) {
+      if (isCloudSync) {
+        void removeRegisteredMemberFromCloud('student', id).catch(() => {});
+      }
+      flushCloud('remove-student');
+      if (isCloudOAuth && isTeacher) {
         deleteStudentPrivateRemote(id).catch(() => {});
       }
     },
-    [actions, auth, isCloud, isTeacher],
+    [actions, auth, flushCloud, isCloudOAuth, isCloudSync, isTeacher, mutate],
   );
 
   const clearAll = useCallback(() => {
+    const now = new Date().toISOString();
+    const existingIds = stateRef.current.students.map((s) => s.id);
     actions.clearAll();
-    clearAllStudentAccounts()
+    if (existingIds.length > 0) {
+      mutate((prev) => {
+        const nextDeleted = { ...(prev.deletedStudentIds ?? {}) };
+        for (const sid of existingIds) nextDeleted[sid] = now;
+        return { ...prev, deletedStudentIds: nextDeleted };
+      });
+    }
+    clearAllStudentAccounts(existingIds)
       .then(() => auth.refreshStudentAccountCount())
       .catch(() => {});
-  }, [actions, auth]);
+    flushCloud('clear-all');
+  }, [actions, auth, flushCloud, mutate]);
 
   const saveStudentPrivate = useCallback(
     async (studentId: string, data: StudentPrivateData) => {
       actions.patchStudentPrivateLocal(studentId, data);
-      if (isCloud) {
+      if (isCloudOAuth) {
         await upsertStudentPrivateRemote(studentId, data);
       }
     },
-    [actions, isCloud],
+    [actions, isCloudOAuth],
   );
 
   const saveStudentNote = useCallback(
     async (studentId: string, note: string | null) => {
       actions.patchStudentNoteLocal(studentId, note);
-      if (isCloud) {
+      if (isCloudOAuth) {
         await upsertStudentNoteRemote(studentId, note);
       }
     },
-    [actions, isCloud],
+    [actions, isCloudOAuth],
   );
 
   const likeAnnouncement = useCallback(
     async (id: string) => {
       actions.likeAnnouncementLocal(id);
-      if (isCloud) {
+      flushCloud('like-announcement');
+      if (isCloudOAuth) {
         await likeAnnouncementRemote(id).catch(() => {});
       }
     },
-    [actions, isCloud],
+    [actions, flushCloud, isCloudOAuth],
   );
 
-  const voterKey = isCloud
+  const voterKey = isCloudOAuth
     ? (auth.userId ?? 'anon')
     : effectiveStudentId
       ? `stu_${effectiveStudentId}`
@@ -660,11 +1011,12 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const votePoll = useCallback(
     async (pollId: string, optionId: string) => {
       actions.votePollLocal(pollId, optionId, voterKey);
-      if (isCloud) {
+      flushCloud('vote-poll');
+      if (isCloudOAuth) {
         await votePollRemote(pollId, optionId);
       }
     },
-    [actions, voterKey, isCloud],
+    [actions, voterKey, flushCloud, isCloudOAuth],
   );
 
   const feedbackAuthorKey = auth.userId ?? voterKey;
@@ -676,7 +1028,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         authorId: feedbackAuthorKey,
         authorName: actorLabel,
       });
-      if (isCloud) {
+      flushCloud('send-feedback');
+      if (isCloudOAuth) {
         await sendFeedbackRemote({
           id: item.id,
           authorName: actorLabel,
@@ -686,27 +1039,29 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         });
       }
     },
-    [actions, feedbackAuthorKey, actorLabel, isCloud],
+    [actions, feedbackAuthorKey, actorLabel, flushCloud, isCloudOAuth],
   );
 
   const replyFeedback = useCallback(
     async (id: string, reply: string | null, resolved: boolean) => {
       actions.replyFeedbackLocal(id, reply, resolved);
-      if (isCloud && isTeacher) {
+      flushCloud('reply-feedback');
+      if (isCloudOAuth && isTeacher) {
         await replyFeedbackRemote(id, reply, resolved);
       }
     },
-    [actions, isCloud, isTeacher],
+    [actions, flushCloud, isCloudOAuth, isTeacher],
   );
 
   const removeFeedback = useCallback(
     async (id: string) => {
       actions.removeFeedbackLocal(id);
-      if (isCloud && isTeacher) {
+      flushCloud('remove-feedback');
+      if (isCloudOAuth && isTeacher) {
         await deleteFeedbackRemote(id);
       }
     },
-    [actions, isCloud, isTeacher],
+    [actions, flushCloud, isCloudOAuth, isTeacher],
   );
 
   const sendKudos = useCallback(
@@ -718,21 +1073,23 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         authorStudentId: effectiveStudentId,
         fromName: input.fromName?.trim() || actorLabel,
       });
-      if (isCloud && !canEditClass) {
+      flushCloud('send-kudos');
+      if (isCloudOAuth && !canEditClass) {
         await sendKudosRemote(created).catch(() => {});
       }
     },
-    [actions, canViewAll, effectiveStudentId, actorLabel, isCloud, canEditClass],
+    [actions, canViewAll, effectiveStudentId, actorLabel, flushCloud, isCloudOAuth, canEditClass],
   );
 
   const clapKudos = useCallback(
     async (id: string) => {
       actions.clapKudosLocal(id);
-      if (isCloud && !canEditClass) {
+      flushCloud('clap-kudos');
+      if (isCloudOAuth && !canEditClass) {
         await clapKudosRemote(id).catch(() => {});
       }
     },
-    [actions, isCloud, canEditClass],
+    [actions, flushCloud, isCloudOAuth, canEditClass],
   );
 
   const addResource = useCallback(
@@ -742,12 +1099,69 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         author: input.author?.trim() || actorLabel,
         ownerStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
       });
-      if (isCloud && !canEditClass) {
+      flushCloud('add-resource');
+      if (isCloudOAuth && !canEditClass) {
         await addResourceRemote(created).catch(() => {});
       }
     },
-    [actions, actorLabel, isTeacher, isSubjectTeacher, effectiveStudentId, isCloud, canEditClass],
+    [
+      actions,
+      actorLabel,
+      isTeacher,
+      isSubjectTeacher,
+      effectiveStudentId,
+      flushCloud,
+      isCloudOAuth,
+      canEditClass,
+    ],
   );
+
+  /* ---------- Public-Safe Registered Members Directory ---------- */
+
+  const registeredTeachers = useMemo<RegisteredTeacherPublic[]>(() => {
+    const deleted = state.deletedTeacherIds ?? {};
+    return [...(state.registeredTeachers ?? [])]
+      .filter((t) => {
+        const delAt = deleted[t.id];
+        return !delAt || delAt.localeCompare(t.updatedAt) <= 0;
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [state.registeredTeachers, state.deletedTeacherIds]);
+
+  const registeredMembers = useMemo<RegisteredMemberPublic[]>(() => {
+    const deletedStu = state.deletedStudentIds ?? {};
+    const list: RegisteredMemberPublic[] = [];
+
+    for (const s of state.students) {
+      const delAt = deletedStu[s.id];
+      if (delAt && delAt.localeCompare(s.updatedAt) > 0) continue;
+      list.push({
+        id: s.id,
+        name: s.name,
+        loginId: s.code,
+        role: 'student',
+        group: s.group ?? null,
+        subject: null,
+        position: s.position ?? null,
+        joinedAt: s.createdAt,
+      });
+    }
+
+    for (const t of registeredTeachers) {
+      list.push({
+        id: t.id,
+        name: t.name,
+        loginId: t.loginId,
+        role: t.role,
+        group: null,
+        subject: t.subject ?? null,
+        position: null,
+        joinedAt: t.createdAt,
+      });
+    }
+
+    return list.sort((a, b) => b.joinedAt.localeCompare(a.joinedAt));
+  }, [state.students, state.deletedStudentIds, registeredTeachers]);
 
   /* ---------- Strict Privacy-Scoped Views (Only GVCN sees everything!) ---------- */
 
@@ -820,7 +1234,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const visibleResources = useMemo(() => {
     if (canViewAll) return state.resources;
     return state.resources.filter(
-      (r) => !r.ownerStudentId || (effectiveStudentId !== null && r.ownerStudentId === effectiveStudentId),
+      (r) =>
+        !r.ownerStudentId || (effectiveStudentId !== null && r.ownerStudentId === effectiveStudentId),
     );
   }, [canViewAll, state.resources, effectiveStudentId]);
 
@@ -995,7 +1410,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       approveAllPending: actions.approveAllPending,
       setAttendance: actions.setAttendance,
       markAllPresent: actions.markAllPresent,
-      addAnnouncement: actions.addAnnouncement,
+      addAnnouncement,
       togglePinAnnouncement: actions.togglePinAnnouncement,
       removeAnnouncement: actions.removeAnnouncement,
       addFundTransaction: actions.addFundTransaction,
@@ -1008,7 +1423,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       addPoll: actions.addPoll,
       togglePollClosed: actions.togglePollClosed,
       removePoll: actions.removePoll,
-      addTask: actions.addTask,
+      addTask,
       removeTask: actions.removeTask,
       removeKudos: actions.removeKudos,
       togglePinResource: actions.togglePinResource,
@@ -1041,6 +1456,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       pullNow,
       classInfo,
       students: visibleStudents,
+      registeredMembers,
+      registeredTeachers,
       entries: visibleEntries,
       role: effectiveLegacyRole,
       memberRole,
@@ -1101,6 +1518,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       addStudent,
       bulkAddStudents,
       updateStudent,
+      addAnnouncement,
+      addTask,
       clearAll,
       checkLoginIdTaken,
       suggestNextStudentCode,
@@ -1122,6 +1541,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       pullNow,
       classInfo,
       visibleStudents,
+      registeredMembers,
+      registeredTeachers,
       visibleEntries,
       effectiveLegacyRole,
       memberRole,

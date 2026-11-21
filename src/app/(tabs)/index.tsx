@@ -12,6 +12,7 @@ import { WeeklyChart } from '@/components/charts/weekly-chart';
 import { useCommandPalette } from '@/components/command-palette';
 import { IndependenceCinematicModal } from '@/components/heritage/independence-cinematic-modal';
 import { IndependenceHeroCard } from '@/components/heritage/independence-hero-card';
+import { LiveRecentPhotosStrip } from '@/components/live-recent-photos-strip';
 import { Podium } from '@/components/podium';
 import { StickerBadge } from '@/components/stickers/sticker-art';
 import { StickerCanvas } from '@/components/stickers/sticker-canvas';
@@ -122,6 +123,7 @@ export default function DashboardScreen() {
     classInfo,
     totals,
     ranking,
+    registeredMembers,
     memberRole,
     isTeacher,
     canViewAll,
@@ -226,7 +228,15 @@ export default function DashboardScreen() {
 
   const handleRefresh = async () => {
     await pullNow();
-    if (auth.isCloudActive) showToast('Đã đồng bộ dữ liệu mới nhất!', 'info');
+    if (auth.isCloudSyncEnabled || auth.isCloudActive) {
+      showToast('Đã đồng bộ dữ liệu mới nhất! ⚡', 'info');
+    }
+  };
+
+  const [mountTimeMs] = useState(() => Date.now());
+  const isRecentlyJoined = (iso: string) => {
+    const ts = Date.parse(iso);
+    return Number.isFinite(ts) && ts >= mountTimeMs - 24 * 60 * 60 * 1000;
   };
 
   return (
@@ -404,6 +414,114 @@ export default function DashboardScreen() {
             </View>
           </View>
         </View>
+      </FadeIn>
+
+      {/* Live Registered Class Members Card — updates instantaneously on any registration */}
+      <FadeIn index={1}>
+        <Card style={styles.liveMembersCard}>
+          <View style={styles.liveMembersHead}>
+            <View style={styles.liveMembersTitleRow}>
+              <View
+                style={[
+                  styles.liveMembersDot,
+                  { backgroundColor: syncStatus === 'synced' ? theme.success : theme.accent },
+                ]}
+              />
+              <Text style={[styles.liveMembersTitle, { color: theme.text }]}>
+                Thành viên lớp đã đăng ký
+              </Text>
+              <Badge
+                label={`${registeredMembers.length}`}
+                color={'accentText'}
+                soft={'accentSoft'}
+              />
+            </View>
+            <Pressable
+              onPress={() => router.push((canViewAll ? '/members' : '/students') as never)}
+              hitSlop={8}>
+              <Text style={[styles.seeAllMini, { color: theme.accentText }]}>
+                {canViewAll ? 'Quản lý →' : 'Danh bạ →'}
+              </Text>
+            </Pressable>
+          </View>
+
+          {registeredMembers.length === 0 ? (
+            <Text style={{ color: theme.textSecondary, fontSize: 12.5, lineHeight: 18 }}>
+              Tài khoản mới đăng ký sẽ tự động cập nhật tên trực tiếp tại đây!
+            </Text>
+          ) : (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.liveMembersScroll}>
+              {registeredMembers.slice(0, 20).map((m) => {
+                const isNew = isRecentlyJoined(m.joinedAt);
+                const isSelf =
+                  (m.role === 'student' && m.id === currentStudent?.id) ||
+                  (m.role !== 'student' && m.id === auth.teacherId);
+                const subTag =
+                  m.role === 'teacher'
+                    ? 'GVCN'
+                    : m.role === 'subject_teacher'
+                      ? m.subject
+                        ? `GV ${m.subject}`
+                        : 'GVBM'
+                      : m.group || `ID ${m.loginId}`;
+                return (
+                  <Pressable
+                    key={`${m.role}:${m.id}`}
+                    onPress={() => {
+                      if (canViewAll && m.role === 'student') {
+                        router.push({ pathname: '/student/[id]', params: { id: m.id } } as never);
+                      } else if (canViewAll && m.role !== 'student') {
+                        router.push('/members' as never);
+                      } else {
+                        router.push('/students' as never);
+                      }
+                    }}
+                    style={({ pressed }) => [
+                      styles.liveMemberChip,
+                      {
+                        backgroundColor: isSelf ? theme.accentSoft : theme.backgroundElement,
+                        borderColor: isSelf
+                          ? theme.accent
+                          : isNew
+                            ? theme.success
+                            : theme.border,
+                      },
+                      pressed && styles.pressed,
+                    ]}>
+                    <Avatar name={m.name} size={30} ring={isSelf || isNew} />
+                    <View style={styles.liveMemberMeta}>
+                      <View style={styles.liveMemberNameRow}>
+                        <Text
+                          style={[styles.liveMemberName, { color: theme.text }]}
+                          numberOfLines={1}>
+                          {m.name}
+                        </Text>
+                        {isNew ? (
+                          <View style={[styles.newBadgeDot, { backgroundColor: theme.successSoft }]}>
+                            <Text style={[styles.newBadgeText, { color: theme.success }]}>Mới</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                      <Text
+                        style={[styles.liveMemberSub, { color: theme.textSecondary }]}
+                        numberOfLines={1}>
+                        {subTag}
+                      </Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          )}
+        </Card>
+      </FadeIn>
+
+      {/* Live Recent Class Photos Strip — instant upload & Realtime broadcast */}
+      <FadeIn index={1}>
+        <LiveRecentPhotosStrip />
       </FadeIn>
 
       {/* Vietnam Independence Struggle Live Animated Hero Showcase */}
@@ -1197,8 +1315,14 @@ export default function DashboardScreen() {
       {/* Interactive Stats Grid */}
       <FadeIn index={6} style={styles.grid}>
         <StatCard
-          label={canViewAll ? 'Sĩ số lớp' : 'Mã ID của bạn'}
-          value={canViewAll ? totals.students : (currentStudent?.code ?? '--')}
+          label={canViewAll ? 'Sĩ số lớp' : isSubjectTeacher ? 'Mã ID Giáo viên' : 'Mã ID của bạn'}
+          value={
+            canViewAll
+              ? totals.students
+              : isSubjectTeacher
+                ? auth.loginId || 'GVBM'
+                : currentStudent?.code || auth.loginId || '--'
+          }
           icon={canViewAll ? 'people' : 'id-card'}
           tone={'accent'}
           onPress={() => router.push('/students' as never)}
@@ -1983,4 +2107,65 @@ const styles = StyleSheet.create({
     borderRadius: Radius.pill,
   },
   rewardMissionText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
+  liveMembersCard: { gap: Spacing.two + 2 },
+  liveMembersHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
+  liveMembersTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    flexShrink: 1,
+  },
+  liveMembersDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  liveMembersTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: -0.2,
+  },
+  liveMembersScroll: {
+    gap: Spacing.two,
+    paddingRight: Spacing.two,
+  },
+  liveMemberChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    maxWidth: 210,
+  },
+  liveMemberMeta: { flexShrink: 1, gap: 1 },
+  liveMemberNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  liveMemberName: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    flexShrink: 1,
+  },
+  liveMemberSub: {
+    fontSize: 10.5,
+    fontWeight: '600',
+  },
+  newBadgeDot: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: Radius.pill,
+  },
+  newBadgeText: {
+    fontSize: 9.5,
+    fontWeight: '900',
+  },
 });

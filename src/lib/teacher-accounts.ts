@@ -1,16 +1,19 @@
 /**
  * Per-teacher account registry with unique Login ID (Mã ID giáo viên) & personal password.
  *
- * Security design:
+ * Security & Sync design:
  * - Every Homeroom Teacher (`teacher`) and Subject Teacher (`subject_teacher`) can
  *   create their own personal account with a unique Login ID and self-chosen password,
  *   hashed with a per-account random salt using SHA-256 (cross-platform Web/iOS/Android).
  * - Duplicate Login ID protection: attempting to create an account with an already-taken
  *   Login ID using a non-matching password is strictly rejected.
- * - Passwords are NEVER written into `class_state` JSON or exported reports.
+ * - Passwords are NEVER written into `class_state` (`class10t4`) JSON or exported reports.
+ * - Cross-device sync: accounts hydrate & merge from Supabase (`class10t4_accounts_v1`)
+ *   and public teacher directory profiles are pushed immediately to `class10t4` + Realtime Broadcast.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
 
 import {
   hashStudentPassword,
@@ -18,6 +21,7 @@ import {
   normalizeLoginIdKey,
   verifyStudentPassword,
 } from '@/lib/student-accounts';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
 import {
   CLEAR_STUDENTS_MIGRATION_KEY,
@@ -25,7 +29,15 @@ import {
   freshState,
   parseState,
 } from '@/store/persist';
+import {
+  fetchAuthRegistryRemote,
+  mergeClassStates,
+  removeRegisteredMemberFromCloud,
+  upsertAuthRegistryRemote,
+  upsertRegisteredMemberToCloud,
+} from '@/store/remote';
 import type { PersistedState } from '@/store/types';
+import type { RegisteredTeacherPublic } from '@/types/models';
 
 export const TEACHER_ACCOUNTS_KEY = 'class10t4:teacher-accounts:v1';
 export const MIN_TEACHER_PASSWORD_LENGTH = 4;
@@ -48,6 +60,86 @@ export type TeacherAccountRecord = {
   updatedAt: string;
 };
 
+export type TeacherAccountChangeEvent =
+  | {
+      type: 'registered';
+      account: TeacherAccountRecord;
+      publicTeacher: RegisteredTeacherPublic;
+    }
+  | {
+      type: 'updated';
+      account: TeacherAccountRecord;
+      publicTeacher: RegisteredTeacherPublic;
+    }
+  | { type: 'removed'; teacherId: string }
+  | { type: 'synced' };
+
+type TeacherAccountListener = (event: TeacherAccountChangeEvent) => void;
+
+const teacherListeners = new Set<TeacherAccountListener>();
+let teacherStorageListenerAttached = false;
+let lastRemoteTeacherSyncAt = 0;
+let inFlightTeacherSync: Promise<TeacherAccountRecord[]> | null = null;
+const REMOTE_TEACHER_SYNC_TTL_MS = 4_000;
+
+export function toPublicTeacher(acc: TeacherAccountRecord): RegisteredTeacherPublic {
+  return {
+    id: acc.teacherId,
+    loginId: acc.loginId,
+    name: acc.name,
+    role: acc.role,
+    subject: acc.subject,
+    createdAt: acc.createdAt,
+    updatedAt: acc.updatedAt,
+  };
+}
+
+function emitTeacherAccountsChanged(event: TeacherAccountChangeEvent): void {
+  for (const listener of teacherListeners) {
+    try {
+      listener(event);
+    } catch {
+      // Ignore listener exceptions
+    }
+  }
+}
+
+export function subscribeTeacherAccountsChanged(listener: TeacherAccountListener): () => void {
+  teacherListeners.add(listener);
+
+  if (
+    !teacherStorageListenerAttached &&
+    Platform.OS === 'web' &&
+    typeof window !== 'undefined' &&
+    typeof window.addEventListener === 'function'
+  ) {
+    teacherStorageListenerAttached = true;
+    window.addEventListener('storage', (ev) => {
+      if (ev.key === TEACHER_ACCOUNTS_KEY || ev.key === STORAGE_KEY) {
+        emitTeacherAccountsChanged({ type: 'synced' });
+      }
+    });
+  }
+
+  return () => {
+    teacherListeners.delete(listener);
+  };
+}
+
+async function awaitBriefly<T>(promise: Promise<T>, timeoutMs = 2_500): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise.catch(() => null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /* ---------- Login ID Validation Helpers ---------- */
 
 export function validateTeacherLoginId(raw: string): string | null {
@@ -60,24 +152,71 @@ export function validateTeacherLoginId(raw: string): string | null {
   return null;
 }
 
-/* ---------- Storage Helpers ---------- */
+/* ---------- Storage & Remote Merge Helpers ---------- */
 
-export async function loadTeacherAccounts(): Promise<TeacherAccountRecord[]> {
+function parseTeacherRecord(item: unknown): TeacherAccountRecord | null {
+  if (!item || typeof item !== 'object') return null;
+  const r = item as Partial<TeacherAccountRecord>;
+  if (
+    typeof r.teacherId !== 'string' ||
+    !r.teacherId.trim() ||
+    typeof r.passwordHash !== 'string' ||
+    !r.passwordHash.includes(':') ||
+    (r.role !== 'teacher' && r.role !== 'subject_teacher')
+  ) {
+    return null;
+  }
+  const loginId = normalizeLoginIdDisplay(
+    typeof r.loginId === 'string' && r.loginId.trim()
+      ? r.loginId
+      : typeof r.loginIdKey === 'string'
+        ? r.loginIdKey
+        : '',
+  );
+  const loginIdKey = normalizeLoginIdKey(
+    typeof r.loginIdKey === 'string' && r.loginIdKey.trim() ? r.loginIdKey : loginId,
+  );
+  if (!loginIdKey) return null;
+  const now = new Date().toISOString();
+  return {
+    teacherId: r.teacherId.trim(),
+    loginId: loginId || loginIdKey,
+    loginIdKey,
+    name: typeof r.name === 'string' ? normalizeName(r.name) : '',
+    role: r.role,
+    subject: r.role === 'subject_teacher' ? (typeof r.subject === 'string' ? r.subject.trim() || null : null) : null,
+    passwordHash: r.passwordHash,
+    createdAt: typeof r.createdAt === 'string' && r.createdAt ? r.createdAt : now,
+    updatedAt: typeof r.updatedAt === 'string' && r.updatedAt ? r.updatedAt : now,
+  };
+}
+
+function mergeTeacherRecords(
+  local: TeacherAccountRecord[],
+  remote: TeacherAccountRecord[],
+): TeacherAccountRecord[] {
+  const byId = new Map<string, TeacherAccountRecord>();
+  for (const rec of local) {
+    byId.set(rec.teacherId, rec);
+  }
+  for (const rec of remote) {
+    const prev = byId.get(rec.teacherId);
+    if (!prev || rec.updatedAt.localeCompare(prev.updatedAt) >= 0) {
+      byId.set(rec.teacherId, rec);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+async function readLocalTeacherAccounts(): Promise<TeacherAccountRecord[]> {
   try {
     const raw = await AsyncStorage.getItem(TEACHER_ACCOUNTS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is TeacherAccountRecord =>
-        Boolean(item) &&
-        typeof item === 'object' &&
-        typeof (item as TeacherAccountRecord).teacherId === 'string' &&
-        typeof (item as TeacherAccountRecord).loginIdKey === 'string' &&
-        typeof (item as TeacherAccountRecord).passwordHash === 'string' &&
-        ((item as TeacherAccountRecord).role === 'teacher' ||
-          (item as TeacherAccountRecord).role === 'subject_teacher'),
-    );
+    return parsed
+      .map(parseTeacherRecord)
+      .filter((item): item is TeacherAccountRecord => item !== null);
   } catch {
     return [];
   }
@@ -87,42 +226,142 @@ export async function saveTeacherAccounts(records: TeacherAccountRecord[]): Prom
   await AsyncStorage.setItem(TEACHER_ACCOUNTS_KEY, JSON.stringify(records));
 }
 
-async function appendTeacherActivityLog(actor: string, action: string): Promise<void> {
-  try {
-    const [rawState, clearedFlag] = await Promise.all([
-      AsyncStorage.getItem(STORAGE_KEY),
-      AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
-    ]);
-    let state: PersistedState = rawState ? parseState(rawState) : freshState();
+function isTombstoned(
+  tombIso: string | undefined,
+  updatedAt: string,
+  createdAt: string,
+): boolean {
+  if (!tombIso) return false;
+  const tombMs = Date.parse(tombIso);
+  const updMs = Date.parse(updatedAt);
+  const crtMs = Date.parse(createdAt);
+  const latestMs = Math.max(
+    Number.isFinite(updMs) ? updMs : 0,
+    Number.isFinite(crtMs) ? crtMs : 0,
+  );
+  if (Number.isFinite(tombMs) && latestMs > 0) {
+    return tombMs >= latestMs;
+  }
+  const latestIso = updatedAt >= createdAt ? updatedAt : createdAt;
+  return tombIso.localeCompare(latestIso) >= 0;
+}
+
+export async function syncTeacherAccountsFromRemote(
+  force = false,
+): Promise<TeacherAccountRecord[]> {
+  const local = await readLocalTeacherAccounts();
+  if (!isSupabaseConfigured) return local;
+  if (!force && Date.now() - lastRemoteTeacherSyncAt < REMOTE_TEACHER_SYNC_TTL_MS) {
+    return local;
+  }
+  if (!force && inFlightTeacherSync) {
+    return inFlightTeacherSync;
+  }
+
+  const run = (async () => {
+    try {
+      const remote = await fetchAuthRegistryRemote();
+      lastRemoteTeacherSyncAt = Date.now();
+      if (!remote || !Array.isArray(remote.teachers)) return local;
+
+      const parsedRemote = remote.teachers
+        .map(parseTeacherRecord)
+        .filter((item): item is TeacherAccountRecord => item !== null);
+      const remoteDeleted = remote.deletedTeacherIds ?? {};
+      const hasTombstones = Object.keys(remoteDeleted).length > 0;
+      if (parsedRemote.length === 0 && !hasTombstones) return local;
+
+      const merged = mergeTeacherRecords(local, parsedRemote).filter(
+        (rec) => !isTombstoned(remoteDeleted[rec.teacherId], rec.updatedAt, rec.createdAt),
+      );
+      if (JSON.stringify(merged) !== JSON.stringify(local)) {
+        await saveTeacherAccounts(merged);
+      }
+      return merged;
+    } catch {
+      return local;
+    } finally {
+      inFlightTeacherSync = null;
+    }
+  })();
+
+  inFlightTeacherSync = run;
+  return run;
+}
+
+export async function loadTeacherAccounts(options?: {
+  forceRemote?: boolean;
+  localOnly?: boolean;
+}): Promise<TeacherAccountRecord[]> {
+  if (options?.localOnly) {
+    return readLocalTeacherAccounts();
+  }
+  return syncTeacherAccountsFromRemote(Boolean(options?.forceRemote));
+}
+
+async function readSafePersistedState(): Promise<PersistedState> {
+  const [rawState, clearedFlag] = await Promise.all([
+    AsyncStorage.getItem(STORAGE_KEY),
+    AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
+  ]);
+  if (rawState) {
+    const parsed = parseState(rawState);
     if (!clearedFlag) {
-      state = {
-        ...state,
+      return {
+        ...parsed,
         students: [],
         entries: [],
         attendance: {},
         fundPaid: {},
         kudos: [],
-        seating: { ...state.seating, seats: {}, updatedAt: new Date().toISOString() },
+        seating: { ...parsed.seating, seats: {}, updatedAt: '' },
         currentStudentId: null,
       };
     }
-    const logItem = {
-      id: createId('log'),
-      actor,
-      actorStudentId: null,
-      action,
-      createdAt: new Date().toISOString(),
-    };
+    return parsed;
+  }
+  return freshState();
+}
+
+async function persistTeacherToLocalClassState(
+  publicTeacher: RegisteredTeacherPublic,
+  auditAction?: string,
+): Promise<void> {
+  try {
+    const state = await readSafePersistedState();
+    const existingTeachers = state.registeredTeachers ?? [];
+    const nextTeachers = [
+      ...existingTeachers.filter((t) => t.id !== publicTeacher.id),
+      publicTeacher,
+    ];
+    const nextDeleted = { ...(state.deletedTeacherIds ?? {}) };
+    delete nextDeleted[publicTeacher.id];
+
+    const nextLogs = auditAction
+      ? [
+          {
+            id: createId('log'),
+            actor: publicTeacher.name,
+            actorStudentId: null,
+            action: auditAction,
+            createdAt: new Date().toISOString(),
+          },
+          ...state.activityLog,
+        ].slice(0, 40)
+      : state.activityLog;
+
     const nextState: PersistedState = {
       ...state,
-      activityLog: [logItem, ...state.activityLog].slice(0, 40),
+      registeredTeachers: nextTeachers,
+      deletedTeacherIds: nextDeleted,
+      activityLog: nextLogs,
     };
     await Promise.all([
       AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)),
       AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
     ]);
   } catch {
-    // Non-critical audit write failure should never block auth.
+    // Non-critical local write failure should never block auth.
   }
 }
 
@@ -193,7 +432,8 @@ export async function verifyTeacherLogin(
     return { ok: false, reason: 'invalid', error: 'Vui lòng nhập mật khẩu cá nhân.' };
   }
 
-  const accounts = await loadTeacherAccounts();
+  // Live remote merge so teachers can sign in immediately from any device.
+  const accounts = await loadTeacherAccounts({ forceRemote: true });
   const key = normalizeLoginIdKey(loginId);
   const found = accounts.find((a) => a.loginIdKey === key);
 
@@ -230,6 +470,10 @@ export async function verifyTeacherLogin(
       error: `Mã ID "${found.loginId}" là tài khoản GV Chủ nhiệm. Hãy chọn tab "GV Chủ nhiệm" để đăng nhập!`,
     };
   }
+
+  // Ensure teacher exists in public class directory as well.
+  const publicTeacher = toPublicTeacher(found);
+  await persistTeacherToLocalClassState(publicTeacher);
 
   return { ok: true, account: found };
 }
@@ -275,7 +519,8 @@ export async function registerTeacherAccount(
     };
   }
 
-  const accounts = await loadTeacherAccounts();
+  // Check remote accounts too so duplicate teacher IDs across devices are prevented.
+  const accounts = await loadTeacherAccounts({ forceRemote: true });
   const existing = accounts.find((a) => a.loginIdKey === loginIdKey);
   if (existing) {
     const matched = verifyStudentPassword(password, existing.passwordHash);
@@ -310,15 +555,38 @@ export async function registerTeacherAccount(
 
   await saveTeacherAccounts([...accounts, account]);
 
-  if (params.writeAuditLog) {
-    const roleLabel =
-      account.role === 'teacher'
-        ? 'GV Chủ nhiệm'
-        : `GV Bộ môn${account.subject ? ` (${account.subject})` : ''}`;
-    await appendTeacherActivityLog(
-      account.name,
-      `Đăng ký tài khoản ${roleLabel} ${account.name} (ID: ${account.loginId})`,
-    );
+  const publicTeacher = toPublicTeacher(account);
+  const roleLabel =
+    account.role === 'teacher'
+      ? 'GV Chủ nhiệm'
+      : `GV Bộ môn${account.subject ? ` (${account.subject})` : ''}`;
+  const auditAction = params.writeAuditLog
+    ? `Đăng ký tài khoản ${roleLabel} ${account.name} (ID: ${account.loginId})`
+    : undefined;
+
+  await persistTeacherToLocalClassState(publicTeacher, auditAction);
+  emitTeacherAccountsChanged({ type: 'registered', account, publicTeacher });
+
+  if (isSupabaseConfigured) {
+    const cloudPromise = Promise.all([
+      upsertAuthRegistryRemote({ teacher: account as unknown as Record<string, unknown> }).catch(
+        () => false,
+      ),
+      upsertRegisteredMemberToCloud({ kind: 'teacher', teacher: publicTeacher })
+        .then(async (mergedRemote) => {
+          if (mergedRemote && params.writeAuditLog) {
+            const latestLocal = await readSafePersistedState();
+            const combined = mergeClassStates(mergedRemote, latestLocal);
+            await Promise.all([
+              AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(combined)),
+              AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+            ]);
+          }
+          return mergedRemote;
+        })
+        .catch(() => null),
+    ]);
+    await awaitBriefly(cloudPromise, 2_500);
   }
 
   return { ok: true, account };
@@ -332,7 +600,7 @@ export async function updateTeacherAccount(params: {
   newLoginId?: string;
   newPassword?: string;
 }): Promise<{ ok: boolean; error?: string; account?: TeacherAccountRecord }> {
-  const accounts = await loadTeacherAccounts();
+  const accounts = await loadTeacherAccounts({ forceRemote: true });
   const idx = accounts.findIndex((a) => a.teacherId === params.teacherId);
   if (idx < 0) {
     return { ok: false, error: 'Không tìm thấy tài khoản giáo viên cần cập nhật.' };
@@ -348,7 +616,9 @@ export async function updateTeacherAccount(params: {
   const nextRole: TeacherRole = params.role ?? existing.role;
   const nextSubject =
     nextRole === 'subject_teacher'
-      ? (params.subject !== undefined ? params.subject?.trim() || null : existing.subject)
+      ? params.subject !== undefined
+        ? params.subject?.trim() || null
+        : existing.subject
       : null;
 
   if (nextRole === 'subject_teacher' && !nextSubject) {
@@ -396,6 +666,25 @@ export async function updateTeacherAccount(params: {
   };
 
   await saveTeacherAccounts(accounts.map((a, i) => (i === idx ? updated : a)));
+
+  const publicTeacher = toPublicTeacher(updated);
+  await persistTeacherToLocalClassState(publicTeacher);
+  emitTeacherAccountsChanged({ type: 'updated', account: updated, publicTeacher });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      Promise.all([
+        upsertAuthRegistryRemote({ teacher: updated as unknown as Record<string, unknown> }).catch(
+          () => false,
+        ),
+        upsertRegisteredMemberToCloud({ kind: 'teacher', teacher: publicTeacher }).catch(
+          () => null,
+        ),
+      ]),
+      2_000,
+    );
+  }
+
   return { ok: true, account: updated };
 }
 
@@ -404,7 +693,7 @@ export async function changeOwnTeacherPassword(params: {
   currentPassword: string;
   newPassword: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const accounts = await loadTeacherAccounts();
+  const accounts = await loadTeacherAccounts({ forceRemote: true });
   const idx = accounts.findIndex((a) => a.teacherId === params.teacherId);
   if (idx < 0) {
     return { ok: false, error: 'Không tìm thấy tài khoản giáo viên để đổi mật khẩu.' };
@@ -426,13 +715,37 @@ export async function changeOwnTeacherPassword(params: {
     updatedAt: new Date().toISOString(),
   };
   await saveTeacherAccounts(accounts.map((a, i) => (i === idx ? next : a)));
+  emitTeacherAccountsChanged({
+    type: 'updated',
+    account: next,
+    publicTeacher: toPublicTeacher(next),
+  });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      upsertAuthRegistryRemote({ teacher: next as unknown as Record<string, unknown> }),
+      2_000,
+    );
+  }
+
   return { ok: true };
 }
 
 export async function removeTeacherAccount(teacherId: string): Promise<void> {
-  const accounts = await loadTeacherAccounts();
+  const accounts = await readLocalTeacherAccounts();
   const next = accounts.filter((a) => a.teacherId !== teacherId);
   if (next.length !== accounts.length) {
     await saveTeacherAccounts(next);
+  }
+  emitTeacherAccountsChanged({ type: 'removed', teacherId });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      Promise.all([
+        upsertAuthRegistryRemote({ removeTeacherId: teacherId }).catch(() => false),
+        removeRegisteredMemberFromCloud('teacher', teacherId).catch(() => {}),
+      ]),
+      2_000,
+    );
   }
 }

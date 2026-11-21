@@ -6,6 +6,9 @@
  * - Homeroom Teachers (`teacher`) & Subject Teachers (`subject_teacher`) can
  *   create & sign in with their own personal Teacher Account (unique Mã ID +
  *   personal password) OR authenticate via the class teacher access code (`K8T4`).
+ * - Exposes `isCloudSyncEnabled` (`isSupabaseConfigured`) so live Realtime &
+ *   Supabase `class_state` sync runs in password-auth mode while `isCloudActive`
+ *   remains `false` for Google-OAuth UI distinction.
  * - Exposes `accountScopeKey` so personal usage (Decor, Coins, Stickers,
  *   Missions, Task checklists, Saved resources, Pomodoro stats) is 100%
  *   isolated per account.
@@ -22,17 +25,22 @@ import {
   type ReactNode,
 } from 'react';
 
+import { subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import {
   changeOwnStudentPassword,
   loadStudentAccounts,
   registerStudentAccount,
+  subscribeStudentAccountsChanged,
+  updateStudentAccountName,
   verifyStudentLogin,
 } from '@/lib/student-accounts';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import {
   changeOwnTeacherPassword,
   loadTeacherAccounts,
   registerTeacherAccount,
   removeTeacherAccount,
+  subscribeTeacherAccountsChanged,
   updateTeacherAccount,
   verifyTeacherLogin,
   type TeacherAccountRecord,
@@ -167,15 +175,19 @@ export type AuthStore = {
   loginId: string | null;
   /** Unique storage namespace key for per-account personal usage data. */
   accountScopeKey: string;
-  /** Number of registered student accounts on this device (count only, no names). */
+  /** Number of registered student accounts (local + synced). */
   studentAccountCount: number;
-  /** Number of registered personal teacher accounts on this device. */
+  /** Number of registered personal teacher accounts (local + synced). */
   teacherAccountCount: number;
+  /** Monotonic version counter that increments whenever student accounts change. */
+  studentAccountsVersion: number;
   /** Monotonic version counter that increments whenever teacher accounts change. */
   teacherAccountsVersion: number;
   /** Increments on each explicit sign-in to trigger fresh login rewards. */
   loginEventId: number;
-  /** Cloud OAuth is disabled in password-access mode. */
+  /** True when Supabase cloud sync + Realtime Broadcast is configured and enabled. */
+  isCloudSyncEnabled: boolean;
+  /** Cloud Google OAuth is disabled in password-access mode. */
   isCloudActive: boolean;
   /** True only after valid authentication. */
   canEnterApp: boolean;
@@ -248,6 +260,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loginId, setLoginId] = useState<string | null>(null);
   const [studentAccountCount, setStudentAccountCount] = useState(0);
   const [teacherAccountCount, setTeacherAccountCount] = useState(0);
+  const [studentAccountsVersion, setStudentAccountsVersion] = useState(0);
   const [teacherAccountsVersion, setTeacherAccountsVersion] = useState(0);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loginEventId, setLoginEventId] = useState(0);
@@ -255,6 +268,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshStudentAccountCount = useCallback(async () => {
     const list = await loadStudentAccounts();
     setStudentAccountCount(list.length);
+    setStudentAccountsVersion((v) => v + 1);
   }, []);
 
   const refreshTeacherAccountCount = useCallback(async () => {
@@ -263,20 +277,81 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTeacherAccountsVersion((v) => v + 1);
   }, []);
 
+  // Keep account counts & versions live on local changes, tab changes, and Supabase Realtime Broadcast.
+  useEffect(() => {
+    const unsubStudents = subscribeStudentAccountsChanged(() => {
+      loadStudentAccounts({ localOnly: true })
+        .then((list) => {
+          setStudentAccountCount(list.length);
+          setStudentAccountsVersion((v) => v + 1);
+        })
+        .catch(() => {});
+    });
+
+    const unsubTeachers = subscribeTeacherAccountsChanged(() => {
+      loadTeacherAccounts({ localOnly: true })
+        .then((list) => {
+          setTeacherAccountCount(list.length);
+          setTeacherAccountsVersion((v) => v + 1);
+        })
+        .catch(() => {});
+    });
+
+    const unsubLive = subscribeLiveBroadcast((event) => {
+      if (event.type === 'member-registered' || event.type === 'state-updated') {
+        void Promise.all([
+          loadStudentAccounts({ forceRemote: true }),
+          loadTeacherAccounts({ forceRemote: true }),
+        ])
+          .then(([sList, tList]) => {
+            setStudentAccountCount(sList.length);
+            setTeacherAccountCount(tList.length);
+            setStudentAccountsVersion((v) => v + 1);
+            setTeacherAccountsVersion((v) => v + 1);
+          })
+          .catch(() => {});
+      }
+    });
+
+    return () => {
+      unsubStudents();
+      unsubTeachers();
+      unsubLive();
+    };
+  }, []);
+
   // Restore saved session on startup.
   useEffect(() => {
     let active = true;
     const init = async () => {
       try {
         await AsyncStorage.removeItem(LEGACY_OFFLINE_KEY).catch(() => {});
-        const [raw, studentAccounts, teacherAccounts] = await Promise.all([
+        const [raw, localStudents, localTeachers] = await Promise.all([
           AsyncStorage.getItem(PASS_AUTH_KEY),
-          loadStudentAccounts(),
-          loadTeacherAccounts(),
+          loadStudentAccounts({ localOnly: true }),
+          loadTeacherAccounts({ localOnly: true }),
         ]);
         if (!active) return;
+
+        let studentAccounts = localStudents;
+        let teacherAccounts = localTeachers;
         setStudentAccountCount(studentAccounts.length);
         setTeacherAccountCount(teacherAccounts.length);
+
+        // Background remote refresh so AuthGate sees cloud accounts immediately on new devices.
+        void Promise.all([
+          loadStudentAccounts({ forceRemote: true }),
+          loadTeacherAccounts({ forceRemote: true }),
+        ])
+          .then(([sList, tList]) => {
+            if (!active) return;
+            setStudentAccountCount(sList.length);
+            setTeacherAccountCount(tList.length);
+            setStudentAccountsVersion((v) => v + 1);
+            setTeacherAccountsVersion((v) => v + 1);
+          })
+          .catch(() => {});
+
         if (!raw) return;
 
         const parsed = JSON.parse(raw) as Partial<StoredPassSession> | null;
@@ -292,9 +367,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
           // Enforce personal ID+password login for students: ignore legacy unlinked student sessions.
           if (savedRole === 'student') {
-            const linkedAccount = savedStudentId
+            let linkedAccount = savedStudentId
               ? studentAccounts.find((a) => a.studentId === savedStudentId)
               : null;
+            if (!linkedAccount && savedStudentId && isSupabaseConfigured) {
+              studentAccounts = await loadStudentAccounts({ forceRemote: true });
+              if (!active) return;
+              linkedAccount = studentAccounts.find((a) => a.studentId === savedStudentId) ?? null;
+            }
             if (!linkedAccount) {
               await AsyncStorage.removeItem(PASS_AUTH_KEY).catch(() => {});
               return;
@@ -315,7 +395,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
           // Restore personal teacher account if bound to `teacherId`.
           if (savedTeacherId) {
-            const linkedTeacher = teacherAccounts.find((t) => t.teacherId === savedTeacherId);
+            let linkedTeacher = teacherAccounts.find((t) => t.teacherId === savedTeacherId);
+            if (!linkedTeacher && isSupabaseConfigured) {
+              teacherAccounts = await loadTeacherAccounts({ forceRemote: true });
+              if (!active) return;
+              linkedTeacher = teacherAccounts.find((t) => t.teacherId === savedTeacherId);
+            }
             if (!linkedTeacher) {
               await AsyncStorage.removeItem(PASS_AUTH_KEY).catch(() => {});
               return;
@@ -346,7 +431,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setTeacherId(null);
           setLoginId(null);
           setProfile(
-            makeLocalProfile(parsed.displayName?.trim() ?? '', savedRole, savedSubject, null, null, ts),
+            makeLocalProfile(
+              parsed.displayName?.trim() ?? '',
+              savedRole,
+              savedSubject,
+              null,
+              null,
+              ts,
+            ),
           );
         }
       } catch {
@@ -803,7 +895,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const nextSubject =
         targetRole === 'subject_teacher'
-          ? (options?.subjectName?.trim() || subjectName || 'Toán học')
+          ? options?.subjectName?.trim() || subjectName || 'Toán học'
           : null;
       const nextName =
         options?.displayName !== undefined
@@ -897,11 +989,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const renameMe = useCallback(
     async (displayName: string): Promise<boolean> => {
       const clean = displayName.trim();
+      if (clean.length < 2) return false;
       try {
-        if (teacherId && clean.length >= 2) {
-          await updateTeacherAccount({ teacherId, name: clean }).catch(() => {});
-          await refreshTeacherAccountCount();
+        if (accountRole === 'student' && studentId) {
+          const res = await updateStudentAccountName(studentId, clean);
+          if (!res.ok) return false;
+          const finalName = res.account?.name || res.student?.name || clean;
+          await persistSession({
+            displayName: finalName,
+            accountRole,
+            subjectName,
+            studentId,
+            teacherId,
+            loginId,
+            signedInAt: profile?.createdAt,
+          });
+          await refreshStudentAccountCount();
+          return true;
         }
+
+        if (teacherId) {
+          const res = await updateTeacherAccount({ teacherId, name: clean }).catch(() => ({
+            ok: false,
+            account: undefined,
+          }));
+          if (!res.ok) return false;
+          const finalName = res.account?.name || clean;
+          await refreshTeacherAccountCount();
+          await persistSession({
+            displayName: finalName,
+            accountRole,
+            subjectName,
+            studentId,
+            teacherId,
+            loginId,
+            signedInAt: profile?.createdAt,
+          });
+          return true;
+        }
+
         await persistSession({
           displayName: clean,
           accountRole,
@@ -924,6 +1050,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loginId,
       profile,
       persistSession,
+      refreshStudentAccountCount,
       refreshTeacherAccountCount,
     ],
   );
@@ -964,8 +1091,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       accountScopeKey,
       studentAccountCount,
       teacherAccountCount,
+      studentAccountsVersion,
       teacherAccountsVersion,
       loginEventId,
+      isCloudSyncEnabled: isSupabaseConfigured,
       isCloudActive: false,
       canEnterApp: unlocked,
       pendingMembersCount: 0,
@@ -1005,6 +1134,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       accountScopeKey,
       studentAccountCount,
       teacherAccountCount,
+      studentAccountsVersion,
       teacherAccountsVersion,
       loginEventId,
       signInWithPassword,

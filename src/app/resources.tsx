@@ -13,7 +13,15 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
-import { DriveUploadButton, type UploadedDriveFile } from '@/components/ui/drive-upload-button';
+import {
+  DriveAttachmentList,
+  type DriveAttachmentItem,
+} from '@/components/ui/drive-attachment-list';
+import {
+  DriveUploadButton,
+  type PendingUploadPreview,
+  type UploadedDriveFile,
+} from '@/components/ui/drive-upload-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -27,7 +35,7 @@ import {
   RESOURCE_TYPE_LIST,
 } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
-import { DRIVE_CONFIG, formatBytes } from '@/lib/drive';
+import { DRIVE_CONFIG, formatBytes, getLocalPreviewUri } from '@/lib/drive';
 import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { shareOrCopyText } from '@/lib/export';
 import { stripVietnamese } from '@/lib/intelligence';
@@ -80,6 +88,7 @@ export default function ResourcesScreen() {
   const [url, setUrl] = useState('');
   const [description, setDescription] = useState('');
   const [pinned, setPinned] = useState(false);
+  const [uploadedPreview, setUploadedPreview] = useState<DriveAttachmentItem | null>(null);
 
   const savedCount = useMemo(
     () => resources.filter((r) => Boolean(savedResourceIds[r.id])).length,
@@ -127,9 +136,26 @@ export default function ResourcesScreen() {
         ? `GV ${subjectName ?? 'Bộ môn'}`
         : currentStudent?.name || 'Thành viên 10T4');
 
-  const handleDriveUploaded = async (files: UploadedDriveFile[]) => {
-    const first = files[0];
+  const handleDriveSelectionStart = (pending: PendingUploadPreview[]) => {
+    const first = pending[0];
     if (!first) return;
+    if (!title.trim()) {
+      setTitle(first.fileName.replace(/\.[^.]+$/, ''));
+    }
+    setUploadedPreview({
+      id: first.tempId,
+      name: first.fileName,
+      url: '',
+      thumbnailUrl: first.localUri ?? null,
+      localUri: first.localUri ?? null,
+      mimeType: first.mimeType,
+      sizeBytes: first.sizeBytes,
+      kind: first.kind === 'image' ? 'photo' : first.kind,
+      pending: true,
+    });
+  };
+
+  const handleDriveItemUploaded = (first: UploadedDriveFile) => {
     setUrl(first.url);
     if (!title.trim()) {
       setTitle(first.name.replace(/\.[^.]+$/, ''));
@@ -138,17 +164,38 @@ export default function ResourcesScreen() {
     if (!description.trim() && first.sizeBytes > 0) {
       setDescription(`Tệp lưu trên Google Drive ${DRIVE_CONFIG.folderName} (${formatBytes(first.sizeBytes)})`);
     }
-    await saveUploadedFilesToGallery(files, {
+    setUploadedPreview({
+      id: first.id,
+      name: first.name,
+      url: first.url,
+      thumbnailUrl: first.thumbnailUrl,
+      localUri: getLocalPreviewUri(first.id),
+      downloadUrl: first.downloadUrl,
+      mimeType: first.mimeType,
+      sizeBytes: first.sizeBytes,
+      kind: first.kind,
+      pending: false,
+    });
+    // Non-blocking mirror to shared Gallery + Realtime Broadcast
+    void saveUploadedFilesToGallery([first], {
       uploaderName: uploaderDisplayName,
       uploaderRole: memberRole,
       uploaderSubject: isSubjectTeacher ? subjectName : null,
       caption: `${subject} · ${title.trim() || first.name}`,
-      category: 'lecture',
+      category: first.kind === 'photo' ? 'class_photo' : 'lecture',
     }).catch(() => {});
-    showToast(`Đã tải "${first.name}" lên Google Drive ${DRIVE_CONFIG.folderName}! ☁️`);
+    showToast(`Đã tải "${first.name}" lên Google Drive ${DRIVE_CONFIG.folderName}! ⚡`);
+  };
+
+  const handleDriveItemFailed = (tempId: string) => {
+    setUploadedPreview((prev) => (prev && prev.id === tempId && prev.pending ? null : prev));
   };
 
   const handlePublish = async () => {
+    if (uploadedPreview?.pending) {
+      showToast('Đợi vài giây để tệp hoàn tất tải lên Drive nhé!', 'info');
+      return;
+    }
     if (!title.trim() || !url.trim()) {
       showToast('Hãy nhập tiêu đề và đường link tài liệu', 'warning');
       return;
@@ -167,6 +214,7 @@ export default function ResourcesScreen() {
       setUrl('');
       setDescription('');
       setPinned(false);
+      setUploadedPreview(null);
       setComposerOpen(false);
       showToast('Đã chia sẻ tài liệu vào Kho học tập 10T4! 📚');
     } catch (err) {
@@ -247,7 +295,12 @@ export default function ResourcesScreen() {
               icon={'link-outline'}
               placeholder={'https://drive.google.com/... hoặc tải file trực tiếp bên dưới'}
               value={url}
-              onChangeText={setUrl}
+              onChangeText={(val) => {
+                setUrl(val);
+                if (uploadedPreview && val.trim() !== uploadedPreview.url) {
+                  setUploadedPreview(null);
+                }
+              }}
               autoCapitalize={'none'}
             />
             <DriveUploadButton
@@ -259,8 +312,20 @@ export default function ResourcesScreen() {
               uploaderName={uploaderDisplayName}
               uploaderRole={memberRole}
               category={'lecture'}
-              onUploaded={handleDriveUploaded}
+              onSelectionStart={handleDriveSelectionStart}
+              onItemUploaded={handleDriveItemUploaded}
+              onItemFailed={handleDriveItemFailed}
             />
+            {uploadedPreview ? (
+              <DriveAttachmentList
+                attachments={[uploadedPreview]}
+                editable
+                onRemove={() => {
+                  setUploadedPreview(null);
+                  setUrl('');
+                }}
+              />
+            ) : null}
             <TextField
               label={'Mô tả ngắn (tuỳ chọn)'}
               placeholder={'Nội dung chính, chương nào, lưu ý khi ôn tập...'}

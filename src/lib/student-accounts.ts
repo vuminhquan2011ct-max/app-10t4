@@ -1,18 +1,22 @@
 /**
  * Per-student account registry with unique Login ID (Số ID) & personal password.
  *
- * Security design:
+ * Security & Sync design:
  * - Every student has a unique Login ID (`code`, case-insensitive) and a personal
  *   password hashed with a per-account random salt using SHA-256 (pure TS so it
  *   works identically across Web HTTP/HTTPS, iOS, and Android).
  * - Duplicate Login ID protection: attempting to create or authenticate with an
  *   already-taken Login ID using a non-matching password is always rejected with
  *   a clear "duplicate ID / wrong password" error.
- * - Passwords are NEVER written into `class_state` JSON or exported reports.
+ * - Passwords are NEVER written into `class_state` (`class10t4`) JSON or exported reports.
+ * - Cross-device sync: accounts hydrate & merge from Supabase (`class10t4_accounts_v1`)
+ *   and public student roster updates are pushed immediately to `class10t4` + Realtime Broadcast.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
 
+import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
 import {
   CLEAR_STUDENTS_MIGRATION_KEY,
@@ -21,6 +25,13 @@ import {
   parseState,
 } from '@/store/persist';
 import { buildStudent } from '@/store/reducers';
+import {
+  fetchAuthRegistryRemote,
+  mergeClassStates,
+  removeRegisteredMemberFromCloud,
+  upsertAuthRegistryRemote,
+  upsertRegisteredMemberToCloud,
+} from '@/store/remote';
 import type { PersistedState } from '@/store/types';
 import type { Gender, Student } from '@/types/models';
 
@@ -39,6 +50,74 @@ export type StudentAccountRecord = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type StudentAccountChangeEvent =
+  | { type: 'registered'; account: StudentAccountRecord; student: Student }
+  | {
+      type: 'updated';
+      studentId: string;
+      name?: string;
+      loginId?: string;
+      account?: StudentAccountRecord;
+    }
+  | { type: 'removed'; studentId: string }
+  | { type: 'bulk'; students: Student[] }
+  | { type: 'synced' }
+  | { type: 'cleared' };
+
+type StudentAccountListener = (event: StudentAccountChangeEvent) => void;
+
+const studentListeners = new Set<StudentAccountListener>();
+let storageListenerAttached = false;
+let lastRemoteSyncAt = 0;
+let inFlightRemoteSync: Promise<StudentAccountRecord[]> | null = null;
+const REMOTE_SYNC_TTL_MS = 4_000;
+
+function emitStudentAccountsChanged(event: StudentAccountChangeEvent): void {
+  for (const listener of studentListeners) {
+    try {
+      listener(event);
+    } catch {
+      // Ignore listener exceptions
+    }
+  }
+}
+
+export function subscribeStudentAccountsChanged(listener: StudentAccountListener): () => void {
+  studentListeners.add(listener);
+
+  if (
+    !storageListenerAttached &&
+    Platform.OS === 'web' &&
+    typeof window !== 'undefined' &&
+    typeof window.addEventListener === 'function'
+  ) {
+    storageListenerAttached = true;
+    window.addEventListener('storage', (ev) => {
+      if (ev.key === STUDENT_ACCOUNTS_KEY || ev.key === STORAGE_KEY) {
+        emitStudentAccountsChanged({ type: 'synced' });
+      }
+    });
+  }
+
+  return () => {
+    studentListeners.delete(listener);
+  };
+}
+
+async function awaitBriefly<T>(promise: Promise<T>, timeoutMs = 2_500): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise.catch(() => null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /* ---------- Pure-TS SHA-256 (UTF-8 safe, works on HTTP, HTTPS, iOS, Android) ---------- */
 
@@ -230,22 +309,68 @@ export function evaluatePasswordStrength(password: string): PasswordStrength {
   return { score: 3, label: 'Rất mạnh', color: 'success' };
 }
 
-/* ---------- Storage Helpers ---------- */
+/* ---------- Storage & Remote Merge Helpers ---------- */
 
-export async function loadStudentAccounts(): Promise<StudentAccountRecord[]> {
+function parseStudentRecord(item: unknown): StudentAccountRecord | null {
+  if (!item || typeof item !== 'object') return null;
+  const r = item as Partial<StudentAccountRecord>;
+  if (
+    typeof r.studentId !== 'string' ||
+    !r.studentId.trim() ||
+    typeof r.passwordHash !== 'string' ||
+    !r.passwordHash.includes(':')
+  ) {
+    return null;
+  }
+  const loginId = normalizeLoginIdDisplay(
+    typeof r.loginId === 'string' && r.loginId.trim()
+      ? r.loginId
+      : typeof r.loginIdKey === 'string'
+        ? r.loginIdKey
+        : '',
+  );
+  const loginIdKey = normalizeLoginIdKey(
+    typeof r.loginIdKey === 'string' && r.loginIdKey.trim() ? r.loginIdKey : loginId,
+  );
+  if (!loginIdKey) return null;
+  const now = new Date().toISOString();
+  return {
+    studentId: r.studentId.trim(),
+    loginId: loginId || loginIdKey,
+    loginIdKey,
+    name: typeof r.name === 'string' ? normalizeName(r.name) : '',
+    passwordHash: r.passwordHash,
+    createdAt: typeof r.createdAt === 'string' && r.createdAt ? r.createdAt : now,
+    updatedAt: typeof r.updatedAt === 'string' && r.updatedAt ? r.updatedAt : now,
+  };
+}
+
+function mergeStudentRecords(
+  local: StudentAccountRecord[],
+  remote: StudentAccountRecord[],
+): StudentAccountRecord[] {
+  const byId = new Map<string, StudentAccountRecord>();
+  for (const rec of local) {
+    byId.set(rec.studentId, rec);
+  }
+  for (const rec of remote) {
+    const prev = byId.get(rec.studentId);
+    if (!prev || rec.updatedAt.localeCompare(prev.updatedAt) >= 0) {
+      byId.set(rec.studentId, rec);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+async function readLocalStudentAccounts(): Promise<StudentAccountRecord[]> {
   try {
     const raw = await AsyncStorage.getItem(STUDENT_ACCOUNTS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is StudentAccountRecord =>
-        Boolean(item) &&
-        typeof item === 'object' &&
-        typeof (item as StudentAccountRecord).studentId === 'string' &&
-        typeof (item as StudentAccountRecord).loginIdKey === 'string' &&
-        typeof (item as StudentAccountRecord).passwordHash === 'string',
-    );
+    return parsed
+      .map(parseStudentRecord)
+      .filter((item): item is StudentAccountRecord => item !== null);
   } catch {
     return [];
   }
@@ -253,6 +378,79 @@ export async function loadStudentAccounts(): Promise<StudentAccountRecord[]> {
 
 export async function saveStudentAccounts(records: StudentAccountRecord[]): Promise<void> {
   await AsyncStorage.setItem(STUDENT_ACCOUNTS_KEY, JSON.stringify(records));
+}
+
+function isTombstoned(
+  tombIso: string | undefined,
+  updatedAt: string,
+  createdAt: string,
+): boolean {
+  if (!tombIso) return false;
+  const tombMs = Date.parse(tombIso);
+  const updMs = Date.parse(updatedAt);
+  const crtMs = Date.parse(createdAt);
+  const latestMs = Math.max(
+    Number.isFinite(updMs) ? updMs : 0,
+    Number.isFinite(crtMs) ? crtMs : 0,
+  );
+  if (Number.isFinite(tombMs) && latestMs > 0) {
+    return tombMs >= latestMs;
+  }
+  const latestIso = updatedAt >= createdAt ? updatedAt : createdAt;
+  return tombIso.localeCompare(latestIso) >= 0;
+}
+
+export async function syncStudentAccountsFromRemote(
+  force = false,
+): Promise<StudentAccountRecord[]> {
+  const local = await readLocalStudentAccounts();
+  if (!isSupabaseConfigured) return local;
+  if (!force && Date.now() - lastRemoteSyncAt < REMOTE_SYNC_TTL_MS) {
+    return local;
+  }
+  if (!force && inFlightRemoteSync) {
+    return inFlightRemoteSync;
+  }
+
+  const run = (async () => {
+    try {
+      const remote = await fetchAuthRegistryRemote();
+      lastRemoteSyncAt = Date.now();
+      if (!remote || !Array.isArray(remote.students)) return local;
+
+      const parsedRemote = remote.students
+        .map(parseStudentRecord)
+        .filter((item): item is StudentAccountRecord => item !== null);
+      const remoteDeleted = remote.deletedStudentIds ?? {};
+      const hasTombstones = Object.keys(remoteDeleted).length > 0;
+      if (parsedRemote.length === 0 && !hasTombstones) return local;
+
+      const merged = mergeStudentRecords(local, parsedRemote).filter(
+        (rec) => !isTombstoned(remoteDeleted[rec.studentId], rec.updatedAt, rec.createdAt),
+      );
+      if (JSON.stringify(merged) !== JSON.stringify(local)) {
+        await saveStudentAccounts(merged);
+      }
+      return merged;
+    } catch {
+      return local;
+    } finally {
+      inFlightRemoteSync = null;
+    }
+  })();
+
+  inFlightRemoteSync = run;
+  return run;
+}
+
+export async function loadStudentAccounts(options?: {
+  forceRemote?: boolean;
+  localOnly?: boolean;
+}): Promise<StudentAccountRecord[]> {
+  if (options?.localOnly) {
+    return readLocalStudentAccounts();
+  }
+  return syncStudentAccountsFromRemote(Boolean(options?.forceRemote));
 }
 
 async function readSafePersistedState(): Promise<PersistedState> {
@@ -270,7 +468,7 @@ async function readSafePersistedState(): Promise<PersistedState> {
         attendance: {},
         fundPaid: {},
         kudos: [],
-        seating: { ...parsed.seating, seats: {}, updatedAt: new Date().toISOString() },
+        seating: { ...parsed.seating, seats: {}, updatedAt: '' },
         currentStudentId: null,
       };
     }
@@ -296,7 +494,7 @@ export async function findAccountByStudentId(
 
 /**
  * Checks whether a Login ID is already claimed in either the account registry
- * OR the persisted class roster (returns only a boolean, never leaking names).
+ * (local + cloud) OR the persisted class roster (returns only a boolean, never leaking names).
  */
 export async function isLoginIdTaken(
   loginId: string,
@@ -356,7 +554,8 @@ export async function verifyStudentLogin(
     return { ok: false, reason: 'invalid', error: 'Vui lòng nhập mật khẩu cá nhân.' };
   }
 
-  const accounts = await loadStudentAccounts();
+  // Live remote merge so students can sign in immediately from any device.
+  const accounts = await loadStudentAccounts({ forceRemote: true });
   const key = normalizeLoginIdKey(loginId);
   const found = accounts.find((a) => a.loginIdKey === key);
 
@@ -386,7 +585,7 @@ export async function verifyStudentLogin(
     };
   }
 
-  // Self-heal: ensure Student record exists in class_state so profile & posts always work.
+  // Self-heal: ensure Student record exists in class_state (local + cloud) so profile & posts always work.
   const state = await readSafePersistedState();
   if (!state.students.some((s) => s.id === found.studentId)) {
     const restored = buildStudent(state.students, state.classInfo.name, {
@@ -403,6 +602,10 @@ export async function verifyStudentLogin(
       AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)),
       AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
     ]);
+    emitStudentAccountsChanged({ type: 'registered', account: found, student: restored });
+    if (isSupabaseConfigured) {
+      void upsertRegisteredMemberToCloud({ kind: 'student', student: restored }).catch(() => {});
+    }
   }
 
   return { ok: true, account: found };
@@ -448,10 +651,10 @@ export async function registerStudentAccount(
     };
   }
 
-  const accounts = await loadStudentAccounts();
-  const state = params.writeToClassState || !params.knownStudents
-    ? await readSafePersistedState()
-    : null;
+  // Pull live accounts before checking duplicate IDs across devices.
+  const accounts = await loadStudentAccounts({ forceRemote: true });
+  const state =
+    params.writeToClassState || !params.knownStudents ? await readSafePersistedState() : null;
   const roster = params.knownStudents ?? state?.students ?? [];
 
   // Duplicate Login ID check — enforce exact rule: duplicate ID + wrong password => mật khẩu không đúng!
@@ -516,9 +719,12 @@ export async function registerStudentAccount(
       action: `Đăng ký tài khoản học sinh ${student.name} (ID: ${student.code})`,
       createdAt: now,
     };
+    const nextDeleted = { ...(state.deletedStudentIds ?? {}) };
+    delete nextDeleted[student.id];
     const nextState: PersistedState = {
       ...state,
-      students: [...state.students, student],
+      students: [...state.students.filter((s) => s.id !== student.id), student],
+      deletedStudentIds: nextDeleted,
       activityLog: [logItem, ...state.activityLog].slice(0, 40),
     };
     await Promise.all([
@@ -527,7 +733,131 @@ export async function registerStudentAccount(
     ]);
   }
 
+  emitStudentAccountsChanged({ type: 'registered', account, student });
+
+  // Immediately push account & public student profile to cloud + Realtime Broadcast (offline-safe).
+  if (isSupabaseConfigured) {
+    const cloudPromise = Promise.all([
+      upsertAuthRegistryRemote({ student: account as unknown as Record<string, unknown> }).catch(
+        () => false,
+      ),
+      upsertRegisteredMemberToCloud({ kind: 'student', student })
+        .then(async (mergedRemote) => {
+          if (mergedRemote && params.writeToClassState) {
+            const latestLocal = await readSafePersistedState();
+            const combined = mergeClassStates(mergedRemote, latestLocal);
+            await Promise.all([
+              AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(combined)),
+              AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+            ]);
+          }
+          return mergedRemote;
+        })
+        .catch(() => null),
+    ]);
+    await awaitBriefly(cloudPromise, 2_500);
+  }
+
   return { ok: true, account, student };
+}
+
+/**
+ * Updates a student's name consistently across `STUDENT_ACCOUNTS_KEY`, local `STORAGE_KEY`,
+ * live in-process listeners (`ClassStore`), and Supabase cloud (`class_state` + auth registry).
+ */
+export async function updateStudentAccountName(
+  studentId: string,
+  rawNewName: string,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  account?: StudentAccountRecord;
+  student?: Student;
+}> {
+  const cleanName = normalizeName(rawNewName);
+  if (!cleanName || cleanName.length < 2) {
+    return { ok: false, error: 'Họ và tên phải có ít nhất 2 ký tự.' };
+  }
+
+  const now = new Date().toISOString();
+  const accounts = await readLocalStudentAccounts();
+  const idx = accounts.findIndex((a) => a.studentId === studentId);
+  let updatedAccount: StudentAccountRecord | undefined;
+
+  if (idx >= 0) {
+    updatedAccount = {
+      ...accounts[idx],
+      name: cleanName,
+      updatedAt: now,
+    };
+    await saveStudentAccounts(accounts.map((a, i) => (i === idx ? updatedAccount! : a)));
+  }
+
+  // Keep persisted class_state in sync as well.
+  let updatedStudent: Student | undefined;
+  try {
+    const state = await readSafePersistedState();
+    const existingStu = state.students.find((s) => s.id === studentId);
+    if (existingStu) {
+      updatedStudent = { ...existingStu, name: cleanName, updatedAt: now };
+      const nextState: PersistedState = {
+        ...state,
+        students: state.students.map((s) => (s.id === studentId ? updatedStudent! : s)),
+      };
+      await Promise.all([
+        AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)),
+        AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+      ]);
+    } else if (updatedAccount) {
+      updatedStudent = buildStudent(state.students, state.classInfo.name, {
+        id: updatedAccount.studentId,
+        name: cleanName,
+        code: updatedAccount.loginId,
+        gender: 'male',
+      });
+      const nextState: PersistedState = {
+        ...state,
+        students: [...state.students, updatedStudent],
+      };
+      await Promise.all([
+        AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)),
+        AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+      ]);
+    }
+  } catch {
+    // Non-fatal: live ClassStore still receives the update event below.
+  }
+
+  emitStudentAccountsChanged({
+    type: 'updated',
+    studentId,
+    name: cleanName,
+    loginId: updatedAccount?.loginId,
+    account: updatedAccount,
+  });
+
+  if (isSupabaseConfigured) {
+    const tasks: Promise<unknown>[] = [];
+    if (updatedAccount) {
+      tasks.push(
+        upsertAuthRegistryRemote({
+          student: updatedAccount as unknown as Record<string, unknown>,
+        }).catch(() => false),
+      );
+    }
+    if (updatedStudent) {
+      tasks.push(
+        upsertRegisteredMemberToCloud({ kind: 'student', student: updatedStudent }).catch(
+          () => null,
+        ),
+      );
+    }
+    if (tasks.length > 0) {
+      await awaitBriefly(Promise.all(tasks), 2_000);
+    }
+  }
+
+  return { ok: true, account: updatedAccount, student: updatedStudent };
 }
 
 export async function updateStudentAccountCredentials(params: {
@@ -537,7 +867,7 @@ export async function updateStudentAccountCredentials(params: {
   newPassword?: string;
   knownStudents?: Student[];
 }): Promise<{ ok: boolean; error?: string; account?: StudentAccountRecord }> {
-  const accounts = await loadStudentAccounts();
+  const accounts = await loadStudentAccounts({ forceRemote: true });
   const idx = accounts.findIndex((a) => a.studentId === params.studentId);
   const existing = idx >= 0 ? accounts[idx] : null;
 
@@ -606,6 +936,22 @@ export async function updateStudentAccountCredentials(params: {
       ? accounts.map((a, i) => (i === idx ? updated : a))
       : [...accounts, updated];
   await saveStudentAccounts(nextList);
+
+  emitStudentAccountsChanged({
+    type: 'updated',
+    studentId: params.studentId,
+    name: updated.name,
+    loginId: updated.loginId,
+    account: updated,
+  });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      upsertAuthRegistryRemote({ student: updated as unknown as Record<string, unknown> }),
+      2_000,
+    );
+  }
+
   return { ok: true, account: updated };
 }
 
@@ -614,7 +960,7 @@ export async function changeOwnStudentPassword(params: {
   currentPassword: string;
   newPassword: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  const accounts = await loadStudentAccounts();
+  const accounts = await loadStudentAccounts({ forceRemote: true });
   const idx = accounts.findIndex((a) => a.studentId === params.studentId);
   if (idx < 0) {
     return { ok: false, error: 'Không tìm thấy tài khoản học sinh để đổi mật khẩu.' };
@@ -636,19 +982,53 @@ export async function changeOwnStudentPassword(params: {
     updatedAt: new Date().toISOString(),
   };
   await saveStudentAccounts(accounts.map((a, i) => (i === idx ? next : a)));
+  emitStudentAccountsChanged({
+    type: 'updated',
+    studentId: params.studentId,
+    account: next,
+  });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      upsertAuthRegistryRemote({ student: next as unknown as Record<string, unknown> }),
+      2_000,
+    );
+  }
   return { ok: true };
 }
 
 export async function removeStudentAccount(studentId: string): Promise<void> {
-  const accounts = await loadStudentAccounts();
+  const accounts = await readLocalStudentAccounts();
   const next = accounts.filter((a) => a.studentId !== studentId);
   if (next.length !== accounts.length) {
     await saveStudentAccounts(next);
   }
+  emitStudentAccountsChanged({ type: 'removed', studentId });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      Promise.all([
+        upsertAuthRegistryRemote({ removeStudentId: studentId }).catch(() => false),
+        removeRegisteredMemberFromCloud('student', studentId).catch(() => {}),
+      ]),
+      2_000,
+    );
+  }
 }
 
-export async function clearAllStudentAccounts(): Promise<void> {
+export async function clearAllStudentAccounts(studentIds?: string[]): Promise<void> {
+  const local = await readLocalStudentAccounts();
+  const idSet = new Set<string>(studentIds ?? []);
+  for (const acc of local) {
+    if (acc.studentId) idSet.add(acc.studentId);
+  }
   await saveStudentAccounts([]);
+  emitStudentAccountsChanged({ type: 'cleared' });
+
+  const allIds = Array.from(idSet);
+  if (isSupabaseConfigured && allIds.length > 0) {
+    await awaitBriefly(upsertAuthRegistryRemote({ removeStudentIds: allIds }), 2_500);
+  }
 }
 
 export async function ensureAccountsForBulkStudents(
@@ -657,7 +1037,7 @@ export async function ensureAccountsForBulkStudents(
 ): Promise<void> {
   const cleanPass = initialPassword.trim();
   if (cleanPass.length < MIN_STUDENT_PASSWORD_LENGTH || students.length === 0) return;
-  const accounts = await loadStudentAccounts();
+  const accounts = await loadStudentAccounts({ forceRemote: true });
   const byStudentId = new Set(accounts.map((a) => a.studentId));
   const byLoginKey = new Set(accounts.map((a) => a.loginIdKey));
   const now = new Date().toISOString();
@@ -682,5 +1062,14 @@ export async function ensureAccountsForBulkStudents(
 
   if (additions.length > 0) {
     await saveStudentAccounts([...accounts, ...additions]);
+    emitStudentAccountsChanged({ type: 'bulk', students });
+    if (isSupabaseConfigured) {
+      await awaitBriefly(
+        upsertAuthRegistryRemote({
+          bulkStudents: additions as unknown as Record<string, unknown>[],
+        }),
+        2_500,
+      );
+    }
   }
 }

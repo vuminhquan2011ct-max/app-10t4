@@ -1,5 +1,5 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
@@ -13,8 +13,15 @@ import {
 import { ModalHeader } from '@/components/modal-header';
 import { Button } from '@/components/ui/button';
 import { DatePickerField } from '@/components/ui/date-picker-field';
-import { DriveAttachmentList } from '@/components/ui/drive-attachment-list';
-import { DriveUploadButton, type UploadedDriveFile } from '@/components/ui/drive-upload-button';
+import {
+  DriveAttachmentList,
+  type DriveAttachmentItem,
+} from '@/components/ui/drive-attachment-list';
+import {
+  DriveUploadButton,
+  type PendingUploadPreview,
+  type UploadedDriveFile,
+} from '@/components/ui/drive-upload-button';
 import { OptionPicker } from '@/components/ui/option-picker';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
@@ -34,14 +41,36 @@ import {
   DRIVE_CONFIG,
   buildDriveDownloadUrl,
   buildDriveThumbnailUrl,
+  detectDriveMediaKind,
   extractDriveFileId,
+  getLocalPreviewUri,
+  type DriveMediaKind,
 } from '@/lib/drive';
-import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
+import {
+  getCachedDriveMediaItems,
+  getMemoryDriveMediaItems,
+  saveUploadedFilesToGallery,
+} from '@/lib/drive-gallery';
 import { suggestedPoints } from '@/lib/stats';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
-import type { DriveAttachment, EntryCategory, EntryKind, EntryLevel } from '@/types/models';
+import type { EntryCategory, EntryKind, EntryLevel } from '@/types/models';
+
+function inferProofKindFromUrl(url: string): DriveMediaKind {
+  const trimmed = url.trim();
+  if (/\/(document|spreadsheets|presentation)\/d\//i.test(trimmed)) {
+    return 'document';
+  }
+  if (/lh3\.googleusercontent\.com|drive\.google\.com\/thumbnail/i.test(trimmed)) {
+    return 'photo';
+  }
+  const byExt = detectDriveMediaKind(trimmed);
+  if (byExt === 'photo' || byExt === 'video') return byExt;
+  // Generic Drive `/file/d/.../view` links attached as entry proofs are usually photos
+  // unless gallery metadata identifies them as video/document.
+  return extractDriveFileId(trimmed) ? 'photo' : 'document';
+}
 
 export default function EntryFormScreen() {
   const { id, studentId } = useLocalSearchParams<{ id?: string; studentId?: string }>();
@@ -82,7 +111,14 @@ export default function EntryFormScreen() {
   const [points, setPoints] = useState(String(existing?.points ?? suggestedPoints('school')));
   const [description, setDescription] = useState(existing?.description ?? '');
   const [proofUrl, setProofUrl] = useState(existing?.proofUrl ?? '');
-  const [uploadedProof, setUploadedProof] = useState<DriveAttachment | null>(null);
+  const [uploadedProof, setUploadedProof] = useState<DriveAttachmentItem | null>(null);
+  const [resolvedProofMeta, setResolvedProofMeta] = useState<{
+    fileId: string;
+    name: string;
+    kind: DriveMediaKind;
+    mimeType?: string;
+    sizeBytes?: number;
+  } | null>(null);
   const [reviewNote, setReviewNote] = useState(existing?.reviewNote ?? '');
 
   const uploaderDisplayName =
@@ -93,41 +129,105 @@ export default function EntryFormScreen() {
         ? `GV ${subjectName ?? 'Bộ môn'}`
         : currentStudent?.name || 'Thành viên 10T4');
 
-  const handleProofUploaded = async (files: UploadedDriveFile[]) => {
-    const first = files[0];
+  const proofDriveId = extractDriveFileId(proofUrl);
+  const inMemoryProofItem =
+    proofDriveId && !uploadedProof
+      ? getMemoryDriveMediaItems().find((item) => item.driveFileId === proofDriveId) ?? null
+      : null;
+
+  // Resolve exact file name & media kind asynchronously from AsyncStorage cache if not in memory yet.
+  useEffect(() => {
+    if (!proofDriveId || uploadedProof || inMemoryProofItem) return;
+    let active = true;
+    void getCachedDriveMediaItems().then((cached) => {
+      if (!active) return;
+      const match = cached.find((item) => item.driveFileId === proofDriveId);
+      if (match) {
+        setResolvedProofMeta({
+          fileId: proofDriveId,
+          name: match.fileName,
+          kind: match.itemType,
+          mimeType: match.mimeType,
+          sizeBytes: match.sizeBytes,
+        });
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [proofDriveId, uploadedProof, inMemoryProofItem]);
+
+  const handleProofSelectionStart = (pending: PendingUploadPreview[]) => {
+    const first = pending[0];
     if (!first) return;
+    setUploadedProof({
+      id: first.tempId,
+      name: first.fileName,
+      url: '',
+      thumbnailUrl: first.localUri ?? null,
+      localUri: first.localUri ?? null,
+      mimeType: first.mimeType,
+      sizeBytes: first.sizeBytes,
+      kind: first.kind === 'image' ? 'photo' : first.kind,
+      pending: true,
+    });
+  };
+
+  const handleProofItemUploaded = (first: UploadedDriveFile) => {
     setProofUrl(first.url);
     setUploadedProof({
       id: first.id,
       name: first.name,
       url: first.url,
       thumbnailUrl: first.thumbnailUrl,
+      localUri: getLocalPreviewUri(first.id),
       downloadUrl: first.downloadUrl,
       mimeType: first.mimeType,
       sizeBytes: first.sizeBytes,
       kind: first.kind,
+      pending: false,
     });
-    await saveUploadedFilesToGallery(files, {
+    // Non-blocking mirror to shared Gallery + Realtime Broadcast
+    void saveUploadedFilesToGallery([first], {
       uploaderName: uploaderDisplayName,
       uploaderRole: memberRole,
       uploaderSubject: isSubjectTeacher ? subjectName : null,
       caption: title.trim() ? `Minh chứng: ${title.trim()}` : `Minh chứng thành tích (${first.name})`,
       category: first.kind === 'photo' ? 'class_photo' : 'homework',
     }).catch(() => {});
-    showToast(`Đã tải minh chứng lên Google Drive ${DRIVE_CONFIG.folderName}! ☁️`);
+    showToast(`Đã tải minh chứng lên Google Drive ${DRIVE_CONFIG.folderName}! ⚡`);
   };
 
-  const proofDriveId = extractDriveFileId(proofUrl);
-  const effectiveProofAttachment: DriveAttachment | null =
+  const handleProofItemFailed = (tempId: string) => {
+    setUploadedProof((prev) => (prev && prev.id === tempId && prev.pending ? null : prev));
+  };
+
+  const matchedProofMeta = inMemoryProofItem
+    ? {
+        fileId: proofDriveId ?? '',
+        name: inMemoryProofItem.fileName,
+        kind: inMemoryProofItem.itemType,
+        mimeType: inMemoryProofItem.mimeType,
+        sizeBytes: inMemoryProofItem.sizeBytes,
+      }
+    : proofDriveId && resolvedProofMeta?.fileId === proofDriveId
+      ? resolvedProofMeta
+      : null;
+  const inferredKind: DriveMediaKind = matchedProofMeta?.kind ?? inferProofKindFromUrl(proofUrl);
+
+  const effectiveProofAttachment: DriveAttachmentItem | null =
     uploadedProof ??
     (proofDriveId
       ? {
           id: proofDriveId,
-          name: `Minh chứng Drive (${DRIVE_CONFIG.folderName})`,
+          name: matchedProofMeta?.name || `Minh chứng Drive (${DRIVE_CONFIG.folderName})`,
           url: proofUrl.trim(),
-          thumbnailUrl: buildDriveThumbnailUrl(proofDriveId, 800),
+          thumbnailUrl: inferredKind === 'photo' ? buildDriveThumbnailUrl(proofDriveId, 800) : null,
+          localUri: getLocalPreviewUri(proofDriveId),
           downloadUrl: buildDriveDownloadUrl(proofDriveId),
-          kind: 'document',
+          mimeType: matchedProofMeta?.mimeType,
+          sizeBytes: matchedProofMeta?.sizeBytes,
+          kind: inferredKind,
         }
       : null);
   const [error, setError] = useState<string | null>(null);
@@ -323,7 +423,9 @@ export default function EntryFormScreen() {
             value={proofUrl}
             onChangeText={(val) => {
               setProofUrl(val);
-              if (!val.trim()) setUploadedProof(null);
+              if (uploadedProof && val.trim() !== uploadedProof.url) {
+                setUploadedProof(null);
+              }
             }}
             autoCapitalize={'none'}
             placeholder={'https://drive.google.com/... hoặc tải ảnh/file bên dưới'}
@@ -338,7 +440,9 @@ export default function EntryFormScreen() {
               uploaderName={uploaderDisplayName}
               uploaderRole={memberRole}
               category={'homework'}
-              onUploaded={handleProofUploaded}
+              onSelectionStart={handleProofSelectionStart}
+              onItemUploaded={handleProofItemUploaded}
+              onItemFailed={handleProofItemFailed}
             />
           ) : null}
           {effectiveProofAttachment ? (

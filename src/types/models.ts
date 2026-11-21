@@ -29,6 +29,17 @@ export type Student = {
   updatedAt: string;
 };
 
+/** Thông tin công khai của tài khoản giáo viên đã đăng ký (KHÔNG chứa mật khẩu/hash). */
+export type RegisteredTeacherPublic = {
+  id: string;
+  loginId: string;
+  name: string;
+  role: 'teacher' | 'subject_teacher';
+  subject: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 /** `achievement` = thành tích, `activity` = hoạt động / phong trào đã tham gia. */
 export type EntryKind = 'achievement' | 'activity';
 

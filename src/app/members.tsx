@@ -3,7 +3,7 @@
  */
 
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -44,8 +44,17 @@ const ROLE_ORDER: MemberRole[] = ['teacher', 'editor', 'student'];
 
 export default function MembersScreen() {
   const auth = useAuth();
-  const { isTeacher, students, activityLog, statsOfStudent, updateStudent, logActivity } =
-    useClassStore();
+  const {
+    isTeacher,
+    students,
+    registeredMembers,
+    registeredTeachers,
+    activityLog,
+    statsOfStudent,
+    updateStudent,
+    logActivity,
+    pullNow,
+  } = useClassStore();
   const theme = useTheme();
   const { showToast } = useToast();
 
@@ -55,7 +64,7 @@ export default function MembersScreen() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // Local account management tabs (GVCN only)
-  const [accountTab, setAccountTab] = useState<AccountTab>('teachers');
+  const [accountTab, setAccountTab] = useState<AccountTab>('students');
 
   // Local student account credentials management
   const [studentAccounts, setStudentAccounts] = useState<StudentAccountRecord[]>([]);
@@ -71,10 +80,21 @@ export default function MembersScreen() {
   const [confirmDeleteTeacherId, setConfirmDeleteTeacherId] = useState<string | null>(null);
 
   const refreshAccounts = useCallback(async () => {
-    const [sList, tList] = await Promise.all([loadStudentAccounts(), loadTeacherAccounts()]);
+    const [sList, tList] = await Promise.all([
+      loadStudentAccounts({ forceRemote: true }),
+      loadTeacherAccounts({ forceRemote: true }),
+    ]);
     setStudentAccounts(sList);
     setTeacherAccounts(tList);
-  }, []);
+    await pullNow();
+  }, [pullNow]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!isTeacher) return;
+      void refreshAccounts();
+    }, [isTeacher, refreshAccounts]),
+  );
 
   useEffect(() => {
     if (!isTeacher) return;
@@ -89,12 +109,54 @@ export default function MembersScreen() {
     return () => {
       active = false;
     };
-  }, [isTeacher, students.length, auth.teacherAccountsVersion]);
+  }, [
+    isTeacher,
+    students.length,
+    registeredMembers.length,
+    auth.studentAccountsVersion,
+    auth.teacherAccountsVersion,
+  ]);
 
   const accountByStudentId = useMemo(
     () => new Map(studentAccounts.map((a) => [a.studentId, a])),
     [studentAccounts],
   );
+
+  // Merge cloud public teacher directory with personal teacher account records so any newly
+  // registered teacher on another device appears immediately.
+  const combinedTeachers = useMemo<TeacherAccountRecord[]>(() => {
+    const map = new Map<string, TeacherAccountRecord>();
+    for (const acc of teacherAccounts) {
+      map.set(acc.teacherId, acc);
+    }
+    for (const pub of registeredTeachers) {
+      const existing = map.get(pub.id);
+      if (!existing) {
+        map.set(pub.id, {
+          teacherId: pub.id,
+          loginId: pub.loginId,
+          loginIdKey: pub.loginId.toUpperCase(),
+          name: pub.name,
+          role: pub.role,
+          subject: pub.subject,
+          passwordHash: '',
+          createdAt: pub.createdAt,
+          updatedAt: pub.updatedAt,
+        });
+      } else if (pub.updatedAt.localeCompare(existing.updatedAt) > 0) {
+        map.set(pub.id, {
+          ...existing,
+          loginId: pub.loginId,
+          loginIdKey: pub.loginId.toUpperCase(),
+          name: pub.name,
+          role: pub.role,
+          subject: pub.subject,
+          updatedAt: pub.updatedAt,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [teacherAccounts, registeredTeachers]);
 
   const filteredStudents = useMemo(() => {
     const q = stripVietnamese(accountQuery);
@@ -103,12 +165,12 @@ export default function MembersScreen() {
         if (!q) return true;
         return stripVietnamese(`${s.name} ${s.code} ${s.group ?? ''}`).includes(q);
       })
-      .sort((a, b) => a.code.localeCompare(b.code, 'vi'));
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.code.localeCompare(b.code, 'vi'));
   }, [students, accountQuery]);
 
   const filteredTeachers = useMemo(() => {
     const q = stripVietnamese(teacherQuery);
-    return [...teacherAccounts]
+    return [...combinedTeachers]
       .filter((t) => {
         if (!q) return true;
         return stripVietnamese(
@@ -118,9 +180,9 @@ export default function MembersScreen() {
       .sort(
         (a, b) =>
           (a.role === b.role ? 0 : a.role === 'teacher' ? -1 : 1) ||
-          a.loginId.localeCompare(b.loginId, 'vi'),
+          b.createdAt.localeCompare(a.createdAt),
       );
-  }, [teacherAccounts, teacherQuery]);
+  }, [combinedTeachers, teacherQuery]);
 
   const handleResetStudentPassword = async (studentId: string, studentName: string) => {
     const clean = resetPassDraft.trim();
@@ -257,7 +319,7 @@ export default function MembersScreen() {
                 [
                   {
                     key: 'teachers',
-                    label: `Giáo viên (${teacherAccounts.length})`,
+                    label: `Giáo viên (${combinedTeachers.length})`,
                     icon: 'shield-checkmark-outline' as const,
                   },
                   {

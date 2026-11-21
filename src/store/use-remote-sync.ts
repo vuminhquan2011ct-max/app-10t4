@@ -1,86 +1,69 @@
 /**
- * Authenticated Realtime + polling sync hook.
+ * Live Cloud Realtime + Broadcast + Foreground-Polling Sync Hook.
  *
- * - Activates ONLY when `cloudActive` is true (user signed in via Google AND
- *   approved by teacher in `public.profiles`).
- * - Listens to Supabase Realtime changes on `public.class_state` for instant
- *   updates, with a 10 s fallback poll.
- * - Pushes `class_state` ONLY when `canEdit` is true (teacher or editor).
- * - Separately syncs RLS-protected `student_private`, `student_notes` and
- *   `class_feedback`, merging private fields into memory without ever writing
- *   them back to `class_state`.
+ * - Activates whenever `cloudActive` is true (configured Supabase project).
+ * - Pull-first guard (`hasPulledOnceRef`): NEVER pushes before the initial
+ *   remote pull settles, preventing a fresh device from wiping cloud data.
+ * - Non-destructive merge (`mergeClassStates`) on every pull & push so
+ *   concurrent registrations/entries/announcements merge cleanly.
+ * - Sub-second cross-device updates via `subscribeLiveBroadcast`, Supabase
+ *   `postgres_changes`, Web visibility/focus & Native `AppState`, plus a 4s
+ *   foreground fallback poll (paused when hidden/backgrounded).
+ * - Fast 350ms debounced push + 0ms `flushNow(reason?, overrideState?)` for
+ *   critical mutations (account registration, entries, posts).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState, Platform } from 'react-native';
 
+import { getRealtimeClientId, subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import { supabase } from '@/lib/supabase';
-import type { FeedbackItem } from '@/types/models';
 
-import { hydrateState } from './persist';
 import {
   REMOTE_ROW_ID,
-  fetchFeedbackRemote,
-  fetchPrivateBundle,
-  fetchState,
-  pushState,
-  stripForSharedSync,
-  type PrivateBundle,
+  fetchClassStateRemote,
+  mergeClassStates,
+  pushClassStateMerged,
+  sharedSyncSignature,
 } from './remote';
 import type { PersistedState } from './types';
 
-const PULL_INTERVAL = 10_000;
-const PUSH_DEBOUNCE = 750;
+const FOREGROUND_POLL_MS = 4_000;
+const PUSH_DEBOUNCE_MS = 350;
 
 export type SyncStatus = 'local' | 'syncing' | 'synced' | 'offline';
 
-function sharedKey(state: PersistedState): string {
-  return JSON.stringify(stripForSharedSync(state));
-}
-
-function mergePrivateIntoState(
-  base: PersistedState,
-  priv: PrivateBundle,
-  feedback: FeedbackItem[] | null,
-): PersistedState {
-  return {
-    ...base,
-    students: base.students.map((s) => {
-      const contact = priv.contacts[s.id];
-      const note = priv.notes[s.id];
-      return {
-        ...s,
-        phone: contact ? contact.phone : null,
-        email: contact ? contact.email : null,
-        address: contact ? contact.address : null,
-        note: note ?? null,
-      };
-    }),
-    feedback: feedback ?? base.feedback,
-  };
-}
-
-export function useRemoteSync(params: {
+export function useRemoteSync(options: {
   state: PersistedState;
   commit: (next: PersistedState) => void;
   ready: boolean;
   cloudActive: boolean;
   canEdit: boolean;
+  allowAllRolesPush?: boolean;
 }): {
   syncStatus: SyncStatus;
   lastSyncedAt: string | null;
   pullNow: () => Promise<void>;
+  flushNow: (reason?: string, overrideState?: PersistedState) => Promise<void>;
 } {
-  const { state, commit, ready, cloudActive, canEdit } = params;
+  const { state, commit, ready, cloudActive, canEdit, allowAllRolesPush = true } = options;
+
+  const canPush = cloudActive && (allowAllRolesPush || canEdit);
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(cloudActive ? 'syncing' : 'local');
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
 
-  const skipPush = useRef(false);
-  const lastPushed = useRef<string | null>(null);
   const stateRef = useRef(state);
   const commitRef = useRef(commit);
-  const canEditRef = useRef(canEdit);
-  const privRef = useRef<PrivateBundle>({ contacts: {}, notes: {} });
+  const canPushRef = useRef(canPush);
+
+  const hasPulledOnceRef = useRef(false);
+  const applyingRemoteRef = useRef(false);
+  const lastSyncedSigRef = useRef<string | null>(null);
+  const pushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pullInFlightRef = useRef(false);
+  const pullQueuedRef = useRef(false);
+  const isForegroundRef = useRef(true);
 
   useEffect(() => {
     stateRef.current = state;
@@ -91,70 +74,169 @@ export function useRemoteSync(params: {
   }, [commit]);
 
   useEffect(() => {
-    canEditRef.current = canEdit;
-  }, [canEdit]);
+    canPushRef.current = canPush;
+  }, [canPush]);
+
+  const flushNow = useCallback(
+    async (reason?: string, overrideState?: PersistedState) => {
+      if (!cloudActive || !canPushRef.current) return;
+
+      if (pushTimerRef.current) {
+        clearTimeout(pushTimerRef.current);
+        pushTimerRef.current = null;
+      }
+
+      const target = overrideState ?? stateRef.current;
+      setSyncStatus('syncing');
+
+      try {
+        const res = await pushClassStateMerged(target, { reason });
+        if (!res) {
+          setSyncStatus('local');
+          return;
+        }
+
+        hasPulledOnceRef.current = true;
+        const pushedSig = sharedSyncSignature(res.state);
+        lastSyncedSigRef.current = pushedSig;
+        setSyncStatus('synced');
+        setLastSyncedAt(res.updatedAt);
+
+        // Preserve any newer local mutations that happened while pushClassStateMerged was in flight.
+        const latestLocal = stateRef.current;
+        const reconciled = mergeClassStates(res.state, latestLocal, { prefer: 'local' });
+        const reconciledSig = sharedSyncSignature(reconciled);
+        const latestLocalSig = sharedSyncSignature(latestLocal);
+
+        if (reconciledSig !== latestLocalSig) {
+          applyingRemoteRef.current = true;
+          commitRef.current(reconciled);
+        } else if (reconciledSig !== pushedSig && !pushTimerRef.current) {
+          pushTimerRef.current = setTimeout(() => {
+            pushTimerRef.current = null;
+            void pushClassStateMerged(stateRef.current, { reason: 'in-flight-follow-up' })
+              .then((follow) => {
+                if (!follow) return;
+                lastSyncedSigRef.current = sharedSyncSignature(follow.state);
+                setSyncStatus('synced');
+                setLastSyncedAt(follow.updatedAt);
+              })
+              .catch(() => {
+                setSyncStatus('offline');
+              });
+          }, PUSH_DEBOUNCE_MS);
+        }
+      } catch {
+        setSyncStatus('offline');
+      }
+    },
+    [cloudActive],
+  );
 
   const pullNow = useCallback(async () => {
     if (!cloudActive) return;
+
+    if (pullInFlightRef.current) {
+      pullQueuedRef.current = true;
+      return;
+    }
+
+    pullInFlightRef.current = true;
     try {
-      const [remote, priv, feedback] = await Promise.all([
-        fetchState(),
-        fetchPrivateBundle(),
-        fetchFeedbackRemote().catch(() => null),
-      ]);
-      privRef.current = priv;
-      setSyncStatus('synced');
-      setLastSyncedAt(new Date().toISOString());
+      let keepGoing = true;
+      while (keepGoing) {
+        keepGoing = false;
+        try {
+          const remote = await fetchClassStateRemote();
+          const current = stateRef.current;
 
-      const current = stateRef.current;
+          if (!remote) {
+            hasPulledOnceRef.current = true;
+            // Brand-new Supabase DB: seed only if this device already holds real data.
+            const hasRealLocalData =
+              current.students.length > 0 ||
+              current.entries.length > 0 ||
+              (current.registeredTeachers?.length ?? 0) > 0;
+            if (canPushRef.current && hasRealLocalData) {
+              const seeded = await pushClassStateMerged(current, { reason: 'initial-seed' });
+              if (seeded) {
+                lastSyncedSigRef.current = sharedSyncSignature(seeded.state);
+                setLastSyncedAt(seeded.updatedAt);
+              }
+            } else {
+              lastSyncedSigRef.current = sharedSyncSignature(current);
+              setLastSyncedAt(new Date().toISOString());
+            }
+            setSyncStatus('synced');
+          } else {
+            hasPulledOnceRef.current = true;
+            const merged = mergeClassStates(remote.state, current, { prefer: 'remote' });
+            const currentSig = sharedSyncSignature(current);
+            const remoteSig = sharedSyncSignature(remote.state);
+            const mergedSig = sharedSyncSignature(merged);
 
-      if (!remote) {
-        // First time ever on a brand-new Supabase DB: seed `class_state` if allowed.
-        if (canEditRef.current) {
-          await pushState(current);
-          lastPushed.current = sharedKey(current);
+            setSyncStatus('synced');
+            setLastSyncedAt(remote.updatedAt);
+
+            if (mergedSig !== currentSig) {
+              applyingRemoteRef.current = true;
+              // If merged equals remote, record it so we don't echo-push back.
+              // If merged also contains unsynced local additions (mergedSig !== remoteSig),
+              // record remoteSig so the debounced push uploads our local additions cleanly.
+              lastSyncedSigRef.current = mergedSig === remoteSig ? mergedSig : remoteSig;
+              commitRef.current(merged);
+            } else if (lastSyncedSigRef.current === null) {
+              lastSyncedSigRef.current = remoteSig;
+            }
+          }
+        } catch {
+          setSyncStatus('offline');
         }
-        return;
+
+        if (pullQueuedRef.current) {
+          pullQueuedRef.current = false;
+          keepGoing = true;
+        }
       }
-
-      const hydrated = hydrateState({
-        ...remote,
-        role: current.role,
-        currentStudentId: current.currentStudentId,
-      });
-      const merged = mergePrivateIntoState(hydrated, priv, feedback);
-
-      // Update local state when shared payload OR private bundle OR feedback changed.
-      const changed =
-        sharedKey(merged) !== sharedKey(current) ||
-        JSON.stringify(merged.students.map((s) => [s.id, s.phone, s.email, s.address, s.note])) !==
-          JSON.stringify(current.students.map((s) => [s.id, s.phone, s.email, s.address, s.note])) ||
-        JSON.stringify(merged.feedback) !== JSON.stringify(current.feedback);
-
-      if (!changed) return;
-
-      skipPush.current = true;
-      lastPushed.current = sharedKey(merged);
-      commitRef.current(merged);
-    } catch {
-      setSyncStatus('offline');
+    } finally {
+      pullInFlightRef.current = false;
     }
   }, [cloudActive]);
 
-  // Subscribe to Supabase Realtime + polling while cloud sync is active.
+  // Live reception: initial pull, Realtime Broadcast, postgres_changes, focus/AppState, foreground poll.
   useEffect(() => {
     if (!cloudActive) {
-      lastPushed.current = null;
+      hasPulledOnceRef.current = false;
+      lastSyncedSigRef.current = null;
       return;
     }
     if (!ready) return;
+
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      isForegroundRef.current = document.visibilityState !== 'hidden';
+    } else {
+      isForegroundRef.current = AppState.currentState === 'active';
+    }
 
     const kick = setTimeout(() => {
       void pullNow();
     }, 0);
 
-    const channel = supabase
-      .channel('class10t4-realtime')
+    // 1. Sub-second cross-device & cross-tab Realtime Broadcast.
+    const myClientId = getRealtimeClientId();
+    const unsubBroadcast = subscribeLiveBroadcast((event) => {
+      if (event.type === 'member-registered') {
+        void pullNow();
+        return;
+      }
+      if (event.type === 'state-updated' && event.senderId !== myClientId) {
+        void pullNow();
+      }
+    });
+
+    // 2. Supabase Postgres Changes fallback (fires when table is in `supabase_realtime`).
+    const pgChannel = supabase
+      .channel(`class10t4-pg-${myClientId}`)
       .on(
         'postgres_changes',
         {
@@ -169,48 +251,85 @@ export function useRemoteSync(params: {
       )
       .subscribe();
 
-    const timer = setInterval(() => {
-      void pullNow();
-    }, PULL_INTERVAL);
+    // 3. Foreground visibility / window focus / AppState refresh.
+    let cleanupForeground: (() => void) | undefined;
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof document !== 'undefined') {
+      const handleVisibility = () => {
+        const visible = document.visibilityState !== 'hidden';
+        isForegroundRef.current = visible;
+        if (visible) void pullNow();
+      };
+      const handleFocus = () => {
+        isForegroundRef.current = true;
+        void pullNow();
+      };
+      document.addEventListener('visibilitychange', handleVisibility);
+      window.addEventListener('focus', handleFocus);
+      window.addEventListener('online', handleFocus);
+      cleanupForeground = () => {
+        document.removeEventListener('visibilitychange', handleVisibility);
+        window.removeEventListener('focus', handleFocus);
+        window.removeEventListener('online', handleFocus);
+      };
+    } else {
+      const sub = AppState.addEventListener('change', (nextState) => {
+        const active = nextState === 'active';
+        isForegroundRef.current = active;
+        if (active) void pullNow();
+      });
+      cleanupForeground = () => sub.remove();
+    }
+
+    // 4. Lightweight 4s fallback poll (paused while backgrounded/hidden).
+    const pollTimer = setInterval(() => {
+      if (isForegroundRef.current) {
+        void pullNow();
+      }
+    }, FOREGROUND_POLL_MS);
 
     return () => {
       clearTimeout(kick);
-      clearInterval(timer);
-      supabase.removeChannel(channel);
+      clearInterval(pollTimer);
+      unsubBroadcast();
+      cleanupForeground?.();
+      supabase.removeChannel(pgChannel).catch(() => {});
     };
   }, [cloudActive, ready, pullNow]);
 
-  // Debounced push of shared state (ONLY for teacher & editor).
+  // Fast 350ms debounced push for local mutations (strictly guarded by pull-first).
   useEffect(() => {
-    if (!cloudActive || !ready || !canEdit) return;
-    if (skipPush.current) {
-      skipPush.current = false;
-      lastPushed.current = sharedKey(state);
-      return;
+    if (!cloudActive || !ready || !canPush || !hasPulledOnceRef.current) return;
+
+    const sig = sharedSyncSignature(state);
+
+    if (applyingRemoteRef.current) {
+      applyingRemoteRef.current = false;
+      if (sig === lastSyncedSigRef.current) return;
     }
 
-    const key = sharedKey(state);
-    if (key === lastPushed.current) return;
+    if (sig === lastSyncedSigRef.current) return;
 
-    const timer = setTimeout(() => {
-      setSyncStatus('syncing');
-      pushState(state)
-        .then(() => {
-          lastPushed.current = key;
-          setSyncStatus('synced');
-          setLastSyncedAt(new Date().toISOString());
-        })
-        .catch(() => {
-          setSyncStatus('offline');
-        });
-    }, PUSH_DEBOUNCE);
+    if (pushTimerRef.current) {
+      clearTimeout(pushTimerRef.current);
+    }
 
-    return () => clearTimeout(timer);
-  }, [state, cloudActive, ready, canEdit]);
+    pushTimerRef.current = setTimeout(() => {
+      pushTimerRef.current = null;
+      void flushNow('state-change');
+    }, PUSH_DEBOUNCE_MS);
+
+    return () => {
+      if (pushTimerRef.current) {
+        clearTimeout(pushTimerRef.current);
+        pushTimerRef.current = null;
+      }
+    };
+  }, [state, cloudActive, ready, canPush, flushNow]);
 
   return {
     syncStatus: cloudActive ? syncStatus : 'local',
     lastSyncedAt,
     pullNow,
+    flushNow,
   };
 }

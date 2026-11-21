@@ -20,6 +20,7 @@ import type {
   KudosItem,
   KudosSticker,
   Poll,
+  RegisteredTeacherPublic,
   ResourceType,
   Role,
   ScheduleSession,
@@ -66,6 +67,12 @@ export type PersistedState = {
   resources: ClassResource[];
   /** Sơ đồ chỗ ngồi tương tác của lớp. */
   seating: SeatingPlan;
+  /** Danh bạ công khai giáo viên đã đăng ký (không chứa mật khẩu/hash). */
+  registeredTeachers?: RegisteredTeacherPublic[];
+  /** Dấu thời gian ISO ghi nhận học sinh đã xoá để merge không hồi sinh lại. */
+  deletedStudentIds?: Record<string, string>;
+  /** Dấu thời gian ISO ghi nhận tài khoản giáo viên đã xoá. */
+  deletedTeacherIds?: Record<string, string>;
 };
 
 export type StudentInput = {

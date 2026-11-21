@@ -9,8 +9,15 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { DatePickerField } from '@/components/ui/date-picker-field';
-import { DriveAttachmentList } from '@/components/ui/drive-attachment-list';
-import { DriveUploadButton, type UploadedDriveFile } from '@/components/ui/drive-upload-button';
+import {
+  DriveAttachmentList,
+  type DriveAttachmentItem,
+} from '@/components/ui/drive-attachment-list';
+import {
+  DriveUploadButton,
+  type PendingUploadPreview,
+  type UploadedDriveFile,
+} from '@/components/ui/drive-upload-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -22,7 +29,7 @@ import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { TASK_PRIORITIES, TASK_PRIORITY_LIST } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { daysSince, formatDate, relativeDay, shiftIsoDate, todayIso } from '@/lib/date';
-import { DRIVE_CONFIG } from '@/lib/drive';
+import { DRIVE_CONFIG, getLocalPreviewUri } from '@/lib/drive';
 import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
@@ -56,7 +63,7 @@ export default function TasksScreen() {
   const [dueDate, setDueDate] = useState(shiftIsoDate(todayIso(), 3));
   const [priority, setPriority] = useState<TaskPriority>('medium');
   const [note, setNote] = useState('');
-  const [attachments, setAttachments] = useState<DriveAttachment[]>([]);
+  const [attachments, setAttachments] = useState<DriveAttachmentItem[]>([]);
 
   const doneCount = useMemo(
     () => tasks.filter((t) => Boolean(doneTaskIds[t.id])).length,
@@ -73,25 +80,58 @@ export default function TasksScreen() {
     });
   }, [tasks, doneTaskIds, filter]);
 
-  const handleTaskFilesUploaded = async (files: UploadedDriveFile[]) => {
-    const mapped: DriveAttachment[] = files.map((f) => ({
+  const handleTaskSelectionStart = (pending: PendingUploadPreview[]) => {
+    const optimistic: DriveAttachmentItem[] = pending.map((p) => ({
+      id: p.tempId,
+      name: p.fileName,
+      url: '',
+      thumbnailUrl: p.localUri ?? null,
+      localUri: p.localUri ?? null,
+      mimeType: p.mimeType,
+      sizeBytes: p.sizeBytes,
+      kind: p.kind === 'image' ? 'photo' : p.kind,
+      pending: true,
+    }));
+    setAttachments((prev) => [...prev, ...optimistic]);
+  };
+
+  const handleTaskItemUploaded = (f: UploadedDriveFile, tempId: string) => {
+    const confirmed: DriveAttachmentItem = {
       id: f.id,
       name: f.name,
       url: f.url,
       thumbnailUrl: f.thumbnailUrl,
+      localUri: getLocalPreviewUri(f.id),
       downloadUrl: f.downloadUrl,
       mimeType: f.mimeType,
       sizeBytes: f.sizeBytes,
       kind: f.kind,
-    }));
-    setAttachments((prev) => [...prev, ...mapped]);
-    await saveUploadedFilesToGallery(files, {
+      pending: false,
+    };
+    setAttachments((prev) => {
+      const exists = prev.some((a) => a.id === tempId);
+      if (exists) {
+        return prev.map((a) => (a.id === tempId ? confirmed : a));
+      }
+      return [...prev, confirmed];
+    });
+    // Non-blocking mirror to shared Gallery + Realtime Broadcast
+    void saveUploadedFilesToGallery([f], {
       uploaderName: auth.profile?.displayName?.trim() || classInfo.teacherName,
       uploaderRole: memberRole,
       caption: `${subject} · ${title.trim() || 'Đề bài / Nhiệm vụ lớp 10T4'}`,
-      category: 'homework',
+      category: f.kind === 'photo' ? 'class_photo' : 'homework',
     }).catch(() => {});
-    showToast(`Đã đính kèm ${files.length} tệp lưu trên Drive ${DRIVE_CONFIG.folderName}! ☁️`);
+  };
+
+  const handleTaskItemFailed = (tempId: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== tempId));
+  };
+
+  const handleTaskFilesUploaded = (files: UploadedDriveFile[]) => {
+    if (files.length > 0) {
+      showToast(`Đã đính kèm ${files.length} tệp lưu trên Drive ${DRIVE_CONFIG.folderName}! ⚡`);
+    }
   };
 
   const handleAdd = () => {
@@ -99,7 +139,14 @@ export default function TasksScreen() {
       showToast('Hãy nhập nội dung bài tập / nhiệm vụ', 'warning');
       return;
     }
-    addTask({ title, subject, dueDate, priority, note, attachments });
+    if (attachments.some((a) => a.pending)) {
+      showToast('Đợi vài giây để tệp đính kèm hoàn tất đồng bộ lên Drive nhé!', 'info');
+      return;
+    }
+    const cleanAttachments: DriveAttachment[] = attachments.map(
+      ({ pending: _p, localUri: _l, ...rest }) => rest,
+    );
+    addTask({ title, subject, dueDate, priority, note, attachments: cleanAttachments });
     setTitle('');
     setNote('');
     setAttachments([]);
@@ -187,6 +234,9 @@ export default function TasksScreen() {
               uploaderName={auth.profile?.displayName?.trim() || classInfo.teacherName}
               uploaderRole={memberRole}
               category={'homework'}
+              onSelectionStart={handleTaskSelectionStart}
+              onItemUploaded={handleTaskItemUploaded}
+              onItemFailed={handleTaskItemFailed}
               onUploaded={handleTaskFilesUploaded}
             />
             <DriveAttachmentList
