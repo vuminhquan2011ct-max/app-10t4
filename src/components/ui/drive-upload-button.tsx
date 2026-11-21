@@ -176,9 +176,19 @@ export function DriveUploadButton({
     input.type = 'file';
     input.accept = pickerAccept;
     input.multiple = multiple;
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    input.style.opacity = '0';
+
+    const cleanup = () => {
+      if (input.parentNode) {
+        input.parentNode.removeChild(input);
+      }
+    };
 
     input.onchange = () => {
       const selectedFiles = Array.from(input.files || []);
+      cleanup();
       if (selectedFiles.length === 0) return;
       const batch: PendingUploadItem[] = selectedFiles.map((file) => ({
         name: file.name,
@@ -189,6 +199,8 @@ export function DriveUploadButton({
       void processBatch(batch);
     };
 
+    input.addEventListener('cancel', cleanup);
+    document.body.appendChild(input);
     input.click();
   };
 
@@ -408,70 +420,6 @@ export function DriveUploadButton({
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  wrap: { gap: Spacing.two },
-  dualRow: { flexDirection: 'row', gap: Spacing.two },
-  primaryBtn: {
-    flex: 1,
-    minHeight: 46,
-    borderRadius: Radius.md,
-    paddingHorizontal: Spacing.three,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-    overflow: 'hidden',
-  },
-  secondaryBtn: {
-    flex: 1,
-    minHeight: 46,
-    borderRadius: Radius.md,
-    paddingHorizontal: Spacing.three,
-    borderWidth: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-  },
-  singleBtn: {
-    minHeight: 46,
-    borderRadius: Radius.md,
-    paddingHorizontal: Spacing.three,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    overflow: 'hidden',
-  },
-  compactBtn: { minHeight: 38, paddingHorizontal: 12 },
-  primaryText: { color: '#FFFFFF', fontSize: 13.5, fontWeight: '800' },
-  secondaryText: { fontSize: 13.5, fontWeight: '800' },
-  compactText: { fontSize: 12.5 },
-  progressTrack: {
-    height: 6,
-    borderRadius: Radius.pill,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: Radius.pill,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 5,
-  },
-  statusText: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '700',
-    lineHeight: 17,
-  },
-  pressed: { opacity: 0.88, transform: [{ scale: 0.985 }] },
-  disabled: { opacity: 0.55 },
-});
-
 
 const styles = StyleSheet.create({
   wrap: { gap: Spacing.two },

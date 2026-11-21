@@ -218,6 +218,7 @@ export async function uploadFileToDrive(params: UploadToDriveParams): Promise<Up
 
   const response = await fetch(url, {
     method: 'POST',
+    redirect: 'follow',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({
       apiKey,
