@@ -8,6 +8,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AssistantOverlay } from '@/components/assistant/assistant-overlay';
 import { AuthGate } from '@/components/auth-gate';
 import { CommandPaletteProvider } from '@/components/command-palette';
+import { NewAccountHologramWelcome } from '@/components/new-account-hologram-welcome';
 import { ToastProvider } from '@/components/ui/toast';
 import { AuthProvider, useAuth } from '@/store/auth-store';
 import { ClassStoreProvider, useClassStore } from '@/store/class-store';
@@ -84,6 +85,7 @@ function AppShell() {
                 <WorkspaceStack />
               </ClassStoreProvider>
             </AuthGate>
+            <NewAccountHologramWelcome />
           </ToastProvider>
         </DecorProvider>
       </AuthProvider>

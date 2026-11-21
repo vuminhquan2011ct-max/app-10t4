@@ -56,6 +56,7 @@ export type AccountRole = 'student' | 'subject_teacher' | 'teacher';
 
 const PASS_AUTH_KEY = 'class10t4:pass-auth:v1';
 const LEGACY_OFFLINE_KEY = 'class10t4:offline-demo:v1';
+const NEW_ACCOUNT_WELCOME_PENDING_KEY = 'class10t4:new-account-welcome-pending:v1';
 
 type StoredPassSession = {
   unlocked: boolean;
@@ -191,6 +192,10 @@ export type AuthStore = {
   isCloudActive: boolean;
   /** True only after valid authentication. */
   canEnterApp: boolean;
+  /** True ONLY right after creating a brand-new account until the welcome hologram is dismissed. */
+  isNewAccountWelcomePending: boolean;
+  /** Dismisses the first-boot hologram welcome overlay for newly created accounts. */
+  dismissNewAccountWelcome: () => void;
   pendingMembersCount: number;
   signInWithPassword: (
     password: string,
@@ -264,6 +269,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [teacherAccountsVersion, setTeacherAccountsVersion] = useState(0);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loginEventId, setLoginEventId] = useState(0);
+  const [isNewAccountWelcomePending, setIsNewAccountWelcomePending] = useState(false);
+
+  const dismissNewAccountWelcome = useCallback(() => {
+    setIsNewAccountWelcomePending(false);
+    void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+  }, []);
 
   const refreshStudentAccountCount = useCallback(async () => {
     const list = await loadStudentAccounts();
@@ -326,8 +337,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const init = async () => {
       try {
         await AsyncStorage.removeItem(LEGACY_OFFLINE_KEY).catch(() => {});
-        const [raw, localStudents, localTeachers] = await Promise.all([
+        const [raw, pendingWelcomeAccount, localStudents, localTeachers] = await Promise.all([
           AsyncStorage.getItem(PASS_AUTH_KEY),
+          AsyncStorage.getItem(NEW_ACCOUNT_WELCOME_PENDING_KEY),
           loadStudentAccounts({ localOnly: true }),
           loadTeacherAccounts({ localOnly: true }),
         ]);
@@ -381,12 +393,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
             const resolvedName = linkedAccount.name || parsed.displayName?.trim() || 'Học sinh';
             const resolvedLoginId = linkedAccount.loginId || savedLoginId;
+            const isWelcomePending =
+              pendingWelcomeAccount === `student:${linkedAccount.studentId}`;
             setUnlocked(true);
             setAccountRole('student');
             setSubjectName(null);
             setStudentId(linkedAccount.studentId);
             setTeacherId(null);
             setLoginId(resolvedLoginId);
+            setIsNewAccountWelcomePending(isWelcomePending);
+            if (!isWelcomePending && pendingWelcomeAccount) {
+              void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+            }
             setProfile(
               makeLocalProfile(resolvedName, 'student', null, linkedAccount.studentId, null, ts),
             );
@@ -405,12 +423,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               await AsyncStorage.removeItem(PASS_AUTH_KEY).catch(() => {});
               return;
             }
+            const isWelcomePending =
+              pendingWelcomeAccount === `teacher:${linkedTeacher.teacherId}`;
             setUnlocked(true);
             setAccountRole(linkedTeacher.role);
             setSubjectName(linkedTeacher.subject);
             setStudentId(null);
             setTeacherId(linkedTeacher.teacherId);
             setLoginId(linkedTeacher.loginId);
+            setIsNewAccountWelcomePending(isWelcomePending);
+            if (!isWelcomePending && pendingWelcomeAccount) {
+              void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+            }
             setProfile(
               makeLocalProfile(
                 linkedTeacher.name,
@@ -430,6 +454,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setStudentId(null);
           setTeacherId(null);
           setLoginId(null);
+          setIsNewAccountWelcomePending(false);
+          if (pendingWelcomeAccount) {
+            void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+          }
           setProfile(
             makeLocalProfile(
               parsed.displayName?.trim() ?? '',
@@ -529,6 +557,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const cleanName = rawDisplayName?.trim() ?? '';
           const finalSubject = requestedMode === 'subject_teacher' ? cleanSubject : null;
 
+          await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+          setIsNewAccountWelcomePending(false);
           await persistSession({
             displayName: cleanName,
             accountRole: requestedMode,
@@ -563,6 +593,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError(res.error);
           return false;
         }
+        await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+        setIsNewAccountWelcomePending(false);
         await persistSession({
           displayName: res.account.name,
           accountRole: 'student',
@@ -608,6 +640,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             error: res.error,
           };
         }
+        await AsyncStorage.setItem(
+          NEW_ACCOUNT_WELCOME_PENDING_KEY,
+          `student:${res.account.studentId}`,
+        ).catch(() => {});
+        setIsNewAccountWelcomePending(true);
         await persistSession({
           displayName: res.account.name,
           accountRole: 'student',
@@ -660,6 +697,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError(res.error);
           return false;
         }
+        await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+        setIsNewAccountWelcomePending(false);
         await persistSession({
           displayName: res.account.name,
           accountRole: res.account.role,
@@ -719,6 +758,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           };
         }
 
+        await AsyncStorage.setItem(
+          NEW_ACCOUNT_WELCOME_PENDING_KEY,
+          `teacher:${res.account.teacherId}`,
+        ).catch(() => {});
+        setIsNewAccountWelcomePending(true);
         await persistSession({
           displayName: res.account.name,
           accountRole: res.account.role,
@@ -868,7 +912,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setBusy(true);
     setError(null);
     try {
-      await AsyncStorage.removeItem(PASS_AUTH_KEY);
+      await Promise.all([
+        AsyncStorage.removeItem(PASS_AUTH_KEY),
+        AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {}),
+      ]);
+      setIsNewAccountWelcomePending(false);
       setUnlocked(false);
       setAccountRole('student');
       setSubjectName(null);
@@ -918,6 +966,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return { ok: false, error: res.error };
         }
         try {
+          await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+          setIsNewAccountWelcomePending(false);
           await persistSession({
             displayName: res.account.name,
             accountRole: res.account.role,
@@ -943,6 +993,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       try {
+        await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+        setIsNewAccountWelcomePending(false);
         await persistSession({
           displayName: nextName,
           accountRole: targetRole,
@@ -1097,6 +1149,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isCloudSyncEnabled: isSupabaseConfigured,
       isCloudActive: false,
       canEnterApp: unlocked,
+      isNewAccountWelcomePending,
+      dismissNewAccountWelcome,
       pendingMembersCount: 0,
       signInWithPassword,
       signInAsStudent,
@@ -1137,6 +1191,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       studentAccountsVersion,
       teacherAccountsVersion,
       loginEventId,
+      isNewAccountWelcomePending,
+      dismissNewAccountWelcome,
       signInWithPassword,
       signInAsStudent,
       registerAndSignInStudent,
