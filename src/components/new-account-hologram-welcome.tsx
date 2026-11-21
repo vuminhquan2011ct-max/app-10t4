@@ -1,12 +1,12 @@
 /**
- * Full-Screen First-Boot "Xin chào" & Moving Heart + 10T4 Hologram Welcome Experience.
+ * Full-Screen First-Boot "Xin chào" & Near-Full-Screen Crystalline Moving Heart + 10T4 Hologram Welcome Experience.
  *
  * Triggered exclusively when a brand-new account is registered (`canEnterApp && isNewAccountWelcomePending`).
  * Inspired by a brand-new smartphone's first-boot "Xin chào / Hello" screen, combined with:
- *  1. Progressive moving heart path drawing (parametric heart curve + glowing comet tip & trail)
- *  2. Concentric holographic heart waves expanding outward to fill the entire screen
- *  3. Center "10T4" futuristic emblem with multi-layered chromatic aberration hologram movement,
- *     diagonal light shimmer sweep, and flickering hologram scanlines.
+ *  1. Near-full-screen 5-layer crystalline parametric heart curve drawn progressively with triple orbiting plasma comets
+ *  2. Concentric holographic heart waves & volumetric heart aura expanding across 100% of the viewport
+ *  3. Center "10T4" futuristic emblem with 5-layer chromatic aberration hologram movement,
+ *     diagonal prism light shimmer sweep, flickering hologram scanlines, and Hologram ID "GVCN Ngô Vũ Hảo".
  */
 
 import { Ionicons } from '@expo/vector-icons';
@@ -37,9 +37,10 @@ import Svg, {
   Circle,
   Defs,
   G,
-  Path,
-  Stop,
   LinearGradient as SvgLinearGradient,
+  Path,
+  RadialGradient as SvgRadialGradient,
+  Stop,
 } from 'react-native-svg';
 
 import { useAuth } from '@/store/auth-store';
@@ -47,14 +48,14 @@ import { useAuth } from '@/store/auth-store';
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 /* -------------------------------------------------------------------------- */
-/* Parametric Mathematical Heart Curve Geometry (360x360 ViewBox)             */
+/* High-Resolution Parametric Crystalline Heart Geometry (600x600 ViewBox)    */
 /* -------------------------------------------------------------------------- */
 
-const SVG_SIZE = 360;
-const HEART_CX = 180;
-const HEART_CY = 172;
-const HEART_SCALE = 8.35;
-const HEART_SAMPLE_COUNT = 220;
+const SVG_SIZE = 600;
+const HEART_CX = 300;
+const HEART_CY = 286;
+const HEART_SCALE = 15.6;
+const HEART_SAMPLE_COUNT = 240;
 
 type HeartPoint = {
   x: number;
@@ -68,7 +69,10 @@ type HeartPoint = {
  *   y(t) = -(13 * cos(t) - 5 * cos(2t) - 2 * cos(3t) - cos(4t))
  * for t in [0, 2π].
  */
-function buildHeartGeometry(scaleFactor = HEART_SCALE): {
+function buildHeartGeometry(
+  scaleFactor = HEART_SCALE,
+  cyOffset = 0,
+): {
   points: HeartPoint[];
   fullPath: string;
   totalLength: number;
@@ -86,7 +90,7 @@ function buildHeartGeometry(scaleFactor = HEART_SCALE): {
       Math.cos(4 * t)
     );
     const x = Number((HEART_CX + rawX * scaleFactor).toFixed(2));
-    const y = Number((HEART_CY + rawY * scaleFactor).toFixed(2));
+    const y = Number((HEART_CY + cyOffset + rawY * scaleFactor).toFixed(2));
 
     if (i > 0) {
       const prev = pts[i - 1];
@@ -107,11 +111,63 @@ function buildHeartGeometry(scaleFactor = HEART_SCALE): {
   };
 }
 
+// 5 Concentric Harmonic Heart Geometries for 3D Crystalline Hologram Depth
+const OUTER_HALO_HEART = buildHeartGeometry(HEART_SCALE * 1.07);
 const MAIN_HEART = buildHeartGeometry(HEART_SCALE);
-const INNER_HEART = buildHeartGeometry(HEART_SCALE * 0.84);
-const CORE_HEART = buildHeartGeometry(HEART_SCALE * 0.68);
+const RIBBON_HEART = buildHeartGeometry(HEART_SCALE * 0.91);
+const INNER_HEART = buildHeartGeometry(HEART_SCALE * 0.8);
+const CORE_HEART = buildHeartGeometry(HEART_SCALE * 0.66);
+
 const MINI_HEART_PATH =
   'M 12 21.35 l -1.45 -1.32 C 5.4 15.36 2 12.28 2 8.5 C 2 5.42 4.42 3 7.5 3 c 1.74 0 3.41 0.81 4.5 2.09 C 13.09 3.81 14.76 3 16.5 3 C 19.58 3 22 5.42 22 8.5 c 0 3.78 -3.4 6.86 -8.55 11.54 L 12 21.35 Z';
+
+/**
+ * Build crystalline facet ribs connecting harmonic vertices between outer, main, and inner heart rings
+ * so the heart looks like an engineered 3D holographic crystal.
+ */
+function buildCrystalFacetRibsPath(): string {
+  const step = 10;
+  const parts: string[] = [];
+  for (let i = 0; i < HEART_SAMPLE_COUNT; i += step) {
+    const pMain = MAIN_HEART.points[i];
+    const pInner = INNER_HEART.points[(i + 4) % HEART_SAMPLE_COUNT];
+    const pPrevInner =
+      INNER_HEART.points[(i - 4 + HEART_SAMPLE_COUNT) % HEART_SAMPLE_COUNT];
+    if (pMain && pInner && pPrevInner) {
+      parts.push(
+        `M ${pPrevInner.x} ${pPrevInner.y} L ${pMain.x} ${pMain.y} L ${pInner.x} ${pInner.y}`,
+      );
+    }
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Build 3D glass specular highlight arcs along the upper-left and upper-right heart lobes.
+ */
+function buildHeartSegmentPath(
+  points: HeartPoint[],
+  startRatio: number,
+  endRatio: number,
+): string {
+  const startIdx = Math.max(0, Math.floor(startRatio * (points.length - 1)));
+  const endIdx = Math.min(points.length - 1, Math.floor(endRatio * (points.length - 1)));
+  if (endIdx <= startIdx) return '';
+  let d = `M ${points[startIdx].x} ${points[startIdx].y}`;
+  for (let i = startIdx + 1; i <= endIdx; i++) {
+    d += ` L ${points[i].x} ${points[i].y}`;
+  }
+  return d;
+}
+
+const CRYSTAL_FACET_RIBS_PATH = buildCrystalFacetRibsPath();
+const RIGHT_LOBE_SPECULAR_PATH = buildHeartSegmentPath(RIBBON_HEART.points, 0.05, 0.21);
+const LEFT_LOBE_SPECULAR_PATH = buildHeartSegmentPath(RIBBON_HEART.points, 0.79, 0.95);
+
+// Harmonic vertex indices around the outer halo heart for glowing jewel nodes
+const HARMONIC_JEWEL_INDICES = Array.from({ length: 16 }, (_, idx) =>
+  Math.floor((idx / 16) * HEART_SAMPLE_COUNT),
+);
 
 function buildPartialHeartPath(points: HeartPoint[], endIndex: number): string {
   const clamped = Math.max(1, Math.min(points.length - 1, endIndex));
@@ -149,15 +205,15 @@ function buildTrailPath(
 
 const FIRST_BOOT_GREETINGS = [
   { primary: 'Xin chào', sub: 'Chào mừng thành viên mới gia nhập 10T4' },
-  { primary: 'Hello · 10T4', sub: 'Chúng ta cùng nhau phát triển nhé' },
-  { primary: 'Xin chào!', sub: 'Không gian lớp 10T4 đã sẵn sàng cho bạn' },
-  { primary: 'Chào mừng', sub: 'GVCN: Ngô Vũ Hảo' },
+  { primary: 'Hello · 10T4', sub: 'Không gian Hologram GVCN Ngô Vũ Hảo đã sẵn sàng' },
+  { primary: 'Xin chào!', sub: 'Trái tim 10T4 kết nối toàn màn hình' },
+  { primary: 'Chào mừng', sub: 'Tập thể lớp 10T4 · Khởi đầu hành trình mới' },
 ];
 
 type FloatingMiniHeartConfig = {
   id: number;
   angleDeg: number;
-  radius: number;
+  radiusRatio: number;
   size: number;
   delayMs: number;
   durationMs: number;
@@ -165,14 +221,18 @@ type FloatingMiniHeartConfig = {
 };
 
 const FLOATING_MINI_HEARTS: FloatingMiniHeartConfig[] = [
-  { id: 1, angleDeg: -72, radius: 138, size: 18, delayMs: 200, durationMs: 3200, color: '#FF2A85' },
-  { id: 2, angleDeg: -28, radius: 156, size: 15, delayMs: 650, durationMs: 3500, color: '#00F5FF' },
-  { id: 3, angleDeg: 22, radius: 150, size: 20, delayMs: 420, durationMs: 3100, color: '#FDE047' },
-  { id: 4, angleDeg: 68, radius: 136, size: 16, delayMs: 900, durationMs: 3400, color: '#A855F7' },
-  { id: 5, angleDeg: 118, radius: 144, size: 17, delayMs: 520, durationMs: 3600, color: '#FF2A85' },
-  { id: 6, angleDeg: 162, radius: 152, size: 14, delayMs: 1100, durationMs: 3300, color: '#00F5FF' },
-  { id: 7, angleDeg: -150, radius: 148, size: 19, delayMs: 300, durationMs: 3450, color: '#FB7185' },
-  { id: 8, angleDeg: -112, radius: 160, size: 15, delayMs: 820, durationMs: 3250, color: '#38BDF8' },
+  { id: 1, angleDeg: -75, radiusRatio: 0.48, size: 22, delayMs: 120, durationMs: 3100, color: '#FF2A85' },
+  { id: 2, angleDeg: -38, radiusRatio: 0.54, size: 17, delayMs: 520, durationMs: 3400, color: '#00F5FF' },
+  { id: 3, angleDeg: -8, radiusRatio: 0.52, size: 20, delayMs: 280, durationMs: 3000, color: '#FDE047' },
+  { id: 4, angleDeg: 28, radiusRatio: 0.5, size: 24, delayMs: 740, durationMs: 3300, color: '#A855F7' },
+  { id: 5, angleDeg: 64, radiusRatio: 0.47, size: 18, delayMs: 410, durationMs: 3500, color: '#FF2A85' },
+  { id: 6, angleDeg: 104, radiusRatio: 0.49, size: 16, delayMs: 960, durationMs: 3200, color: '#00F5FF' },
+  { id: 7, angleDeg: 142, radiusRatio: 0.53, size: 21, delayMs: 610, durationMs: 3450, color: '#FDE047' },
+  { id: 8, angleDeg: 176, radiusRatio: 0.5, size: 17, delayMs: 850, durationMs: 3150, color: '#FB7185' },
+  { id: 9, angleDeg: -148, radiusRatio: 0.52, size: 22, delayMs: 230, durationMs: 3350, color: '#38BDF8' },
+  { id: 10, angleDeg: -112, radiusRatio: 0.55, size: 18, delayMs: 690, durationMs: 3250, color: '#C084FC' },
+  { id: 11, angleDeg: -54, radiusRatio: 0.42, size: 15, delayMs: 1120, durationMs: 2950, color: '#00F5FF' },
+  { id: 12, angleDeg: -128, radiusRatio: 0.43, size: 16, delayMs: 480, durationMs: 3050, color: '#FF2A85' },
 ];
 
 /* -------------------------------------------------------------------------- */
@@ -184,22 +244,23 @@ function ExpandingFullScreenHeartWave({
   totalWaves,
   maxScale,
   color,
+  secondaryColor,
 }: {
   index: number;
   totalWaves: number;
   maxScale: number;
   color: string;
+  secondaryColor: string;
 }) {
   const progress = useSharedValue(0);
 
   useEffect(() => {
-    // Phase 2 begins around 1.5s as the center heart finishes drawing and expands outward to full screen
-    const initialDelay = 1450 + index * 680;
+    const initialDelay = 900 + index * 620;
     progress.value = withDelay(
       initialDelay,
       withRepeat(
         withTiming(1, {
-          duration: 3600,
+          duration: 3800,
           easing: Easing.out(Easing.cubic),
         }),
         -1,
@@ -209,11 +270,15 @@ function ExpandingFullScreenHeartWave({
   }, [index, progress]);
 
   const waveStyle = useAnimatedStyle(() => {
-    const scale = interpolate(progress.value, [0, 0.25, 0.7, 1], [0.35, 1.05, 2.65, maxScale]);
+    const scale = interpolate(
+      progress.value,
+      [0, 0.25, 0.72, 1],
+      [0.42, 0.96, 1.85, maxScale],
+    );
     const opacity = interpolate(
       progress.value,
       [0, 0.14, 0.55, 0.88, 1],
-      [0, 0.72 - index * (0.1 / totalWaves), 0.38, 0.14, 0],
+      [0, 0.78 - index * (0.11 / totalWaves), 0.42, 0.16, 0],
     );
     return {
       opacity,
@@ -228,16 +293,30 @@ function ExpandingFullScreenHeartWave({
           d={MAIN_HEART.fullPath}
           fill="none"
           stroke={color}
-          strokeWidth={2.2}
+          strokeWidth={2.8}
           strokeLinecap="round"
           strokeLinejoin="round"
+        />
+        <Path
+          d={INNER_HEART.fullPath}
+          fill="none"
+          stroke={secondaryColor}
+          strokeOpacity={0.55}
+          strokeWidth={1.3}
+          strokeDasharray="10 8"
         />
       </Svg>
     </Animated.View>
   );
 }
 
-function FloatingMiniHeart({ config }: { config: FloatingMiniHeartConfig }) {
+function FloatingMiniHeart({
+  config,
+  heartDisplaySize,
+}: {
+  config: FloatingMiniHeartConfig;
+  heartDisplaySize: number;
+}) {
   const floatVal = useSharedValue(0);
 
   useEffect(() => {
@@ -261,15 +340,16 @@ function FloatingMiniHeart({ config }: { config: FloatingMiniHeartConfig }) {
   }, [config.delayMs, config.durationMs, floatVal]);
 
   const rad = (config.angleDeg * Math.PI) / 180;
-  const baseX = Math.cos(rad) * config.radius;
-  const baseY = Math.sin(rad) * config.radius;
+  const radiusPx = heartDisplaySize * config.radiusRatio;
+  const baseX = Math.cos(rad) * radiusPx;
+  const baseY = Math.sin(rad) * radiusPx;
 
   const animatedStyle = useAnimatedStyle(() => {
-    const driftY = interpolate(floatVal.value, [0, 1], [8, -22]);
-    const driftX = interpolate(floatVal.value, [0, 0.5, 1], [-6, 8, -4]);
-    const scale = interpolate(floatVal.value, [0, 0.5, 1], [0.78, 1.18, 0.85]);
-    const opacity = interpolate(floatVal.value, [0, 0.5, 1], [0.35, 0.92, 0.4]);
-    const rotate = interpolate(floatVal.value, [0, 1], [-14, 16]);
+    const driftY = interpolate(floatVal.value, [0, 1], [10, -26]);
+    const driftX = interpolate(floatVal.value, [0, 0.5, 1], [-8, 10, -6]);
+    const scale = interpolate(floatVal.value, [0, 0.5, 1], [0.8, 1.24, 0.86]);
+    const opacity = interpolate(floatVal.value, [0, 0.5, 1], [0.38, 0.96, 0.44]);
+    const rotate = interpolate(floatVal.value, [0, 1], [-16, 18]);
 
     return {
       opacity,
@@ -316,7 +396,7 @@ function NewAccountHologramWelcomeActive() {
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
 
-  // Frame-accurate progressive heart drawing & orbiting comet state (works identically on Web + iOS + Android)
+  // Frame-accurate progressive heart drawing & triple orbiting comet state (works identically on Web + iOS + Android)
   const [drawStepIndex, setDrawStepIndex] = useState(1);
   const [orbitHeadIndex, setOrbitHeadIndex] = useState(1);
   const [isHeartFullyDrawn, setIsHeartFullyDrawn] = useState(false);
@@ -328,6 +408,7 @@ function NewAccountHologramWelcomeActive() {
   const exitProgress = useSharedValue(0);
   const greetingAnim = useSharedValue(0);
   const heartDrawProgress = useSharedValue(0);
+  const heartGrowScale = useSharedValue(0);
   const heartPulse = useSharedValue(0);
   const fullScreenBloom = useSharedValue(0);
   const holoPhase = useSharedValue(0);
@@ -335,10 +416,23 @@ function NewAccountHologramWelcomeActive() {
   const holoScanline = useSharedValue(0);
   const ctaReveal = useSharedValue(0);
 
-  // Calculate scale needed so the 360x360 heart expands beyond the full screen diagonal
+  // Near-Full-Screen Heart Display Size ("kích thước trái tim to gần full màn hình")
+  const heartDisplaySize = useMemo(() => {
+    const maxByWidth = screenWidth * 0.98;
+    const maxByHeight = screenHeight * 0.68;
+    return Math.round(Math.max(380, Math.min(maxByWidth, maxByHeight, 780)));
+  }, [screenWidth, screenHeight]);
+
+  // Responsive typography size for the center "10T4" hologram core inside the near-full-screen heart
+  const holoCoreFontSize = useMemo(
+    () => Math.round(Math.min(76, Math.max(54, heartDisplaySize * 0.132))),
+    [heartDisplaySize],
+  );
+
+  // Scale needed so the 600x600 heart waves expand beyond the entire screen diagonal
   const fullScreenMaxScale = useMemo(() => {
-    const maxDim = Math.max(screenWidth, screenHeight, 840);
-    return Number(Math.max(3.6, (maxDim / 195) * 1.15).toFixed(2));
+    const diagonal = Math.hypot(screenWidth, screenHeight);
+    return Number(Math.max(2.6, (diagonal / 430) * 1.18).toFixed(2));
   }, [screenWidth, screenHeight]);
 
   // Trigger celebratory haptics on native
@@ -360,10 +454,16 @@ function NewAccountHologramWelcomeActive() {
     overlayOpacity.value = withTiming(1, { duration: 420, easing: Easing.out(Easing.cubic) });
     greetingAnim.value = withTiming(1, { duration: 750, easing: Easing.out(Easing.cubic) });
 
-    // Phase 1 (0s -> 2.4s): Progressive heart contour stroke drawing
+    // Phase 1 (0s -> 2.3s): Progressive heart contour stroke drawing
     heartDrawProgress.value = withTiming(1, {
-      duration: 2400,
+      duration: 2300,
       easing: Easing.inOut(Easing.cubic),
+    });
+
+    // Heart grows smoothly from 0.78x to full near-screen size (1.06x) as it draws & blooms
+    heartGrowScale.value = withTiming(1, {
+      duration: 2500,
+      easing: Easing.out(Easing.cubic),
     });
 
     // Continuous 3D heart pulse & levitation
@@ -376,9 +476,9 @@ function NewAccountHologramWelcomeActive() {
       true,
     );
 
-    // Phase 2 (1.6s -> 4.2s): Heart energy expands to fill the entire screen gradually
+    // Phase 2 (1.0s -> 3.6s): Heart energy expands to fill the entire screen gradually
     fullScreenBloom.value = withDelay(
-      1400,
+      950,
       withTiming(1, {
         duration: 2600,
         easing: Easing.out(Easing.cubic),
@@ -388,16 +488,16 @@ function NewAccountHologramWelcomeActive() {
     // Center "10T4" continuous Hologram chromatic aberration & 3D tilt
     holoPhase.value = withRepeat(
       withSequence(
-        withTiming(1, { duration: 1850, easing: Easing.inOut(Easing.sin) }),
-        withTiming(-1, { duration: 1850, easing: Easing.inOut(Easing.sin) }),
+        withTiming(1, { duration: 1800, easing: Easing.inOut(Easing.sin) }),
+        withTiming(-1, { duration: 1800, easing: Easing.inOut(Easing.sin) }),
       ),
       -1,
       true,
     );
 
-    // Diagonal Hologram Light Beam Shimmer across "10T4"
+    // Diagonal Hologram Light Beam Shimmer across "10T4" & "GVCN Ngô Vũ Hảo"
     holoShimmer.value = withRepeat(
-      withTiming(1, { duration: 2300, easing: Easing.inOut(Easing.quad) }),
+      withTiming(1, { duration: 2200, easing: Easing.inOut(Easing.quad) }),
       -1,
       false,
     );
@@ -405,8 +505,8 @@ function NewAccountHologramWelcomeActive() {
     // Hologram Scanline flicker
     holoScanline.value = withRepeat(
       withSequence(
-        withTiming(1, { duration: 920, easing: Easing.linear }),
-        withTiming(0.25, { duration: 640, easing: Easing.linear }),
+        withTiming(1, { duration: 880, easing: Easing.linear }),
+        withTiming(0.28, { duration: 620, easing: Easing.linear }),
       ),
       -1,
       true,
@@ -414,14 +514,14 @@ function NewAccountHologramWelcomeActive() {
 
     // CTA button entrance
     ctaReveal.value = withDelay(
-      950,
+      900,
       withTiming(1, { duration: 700, easing: Easing.out(Easing.back(1.1)) }),
     );
 
-    // 60fps requestAnimationFrame loop driving the progressive heart path & moving spark comet
+    // 60fps requestAnimationFrame loop driving the progressive heart path & triple moving spark comets
     let rafId: number | null = null;
     const startTime = Date.now();
-    const DRAW_DURATION_MS = 2400;
+    const DRAW_DURATION_MS = 2300;
     const ORBIT_PERIOD_MS = 3200;
     let markedComplete = false;
 
@@ -429,10 +529,12 @@ function NewAccountHologramWelcomeActive() {
       const elapsed = Date.now() - startTime;
       if (elapsed <= DRAW_DURATION_MS) {
         const rawT = Math.min(1, elapsed / DRAW_DURATION_MS);
-        // Smooth cubic ease-in-out for progressive drawing
         const eased =
           rawT < 0.5 ? 4 * rawT * rawT * rawT : 1 - Math.pow(-2 * rawT + 2, 3) / 2;
-        const idx = Math.max(1, Math.min(HEART_SAMPLE_COUNT, Math.round(eased * HEART_SAMPLE_COUNT)));
+        const idx = Math.max(
+          1,
+          Math.min(HEART_SAMPLE_COUNT, Math.round(eased * HEART_SAMPLE_COUNT)),
+        );
         setDrawStepIndex(idx);
         setOrbitHeadIndex(idx);
       } else {
@@ -470,6 +572,7 @@ function NewAccountHologramWelcomeActive() {
     fullScreenBloom,
     greetingAnim,
     heartDrawProgress,
+    heartGrowScale,
     heartPulse,
     holoPhase,
     holoScanline,
@@ -501,7 +604,6 @@ function NewAccountHologramWelcomeActive() {
 
   /* ---------------- Animated Props & Styles ---------------- */
 
-  // Animated strokeDashoffset for native SVG path alongside progressive path geometry
   const heartStrokeAnimatedProps = useAnimatedProps(() => {
     const dashOffset = interpolate(
       heartDrawProgress.value,
@@ -527,13 +629,14 @@ function NewAccountHologramWelcomeActive() {
     ],
   }));
 
-  // Center heart floating & pulsing container
+  // Near-full-screen center heart floating, growing & pulsing container
   const centerHeartAnimatedStyle = useAnimatedStyle(() => {
-    const scale = interpolate(heartPulse.value, [0, 1], [0.97, 1.05]);
-    const translateY = interpolate(heartPulse.value, [0, 1], [5, -7]);
+    const grow = interpolate(heartGrowScale.value, [0, 0.65, 1], [0.76, 1.01, 1.06]);
+    const pulseDelta = interpolate(heartPulse.value, [0, 1], [-0.025, 0.045]);
+    const translateY = interpolate(heartPulse.value, [0, 1], [6, -8]);
     const tiltZ = interpolate(holoPhase.value, [-1, 1], [-1.8, 1.8]);
     return {
-      transform: [{ translateY }, { scale }, { rotateZ: `${tiltZ}deg` }],
+      transform: [{ translateY }, { scale: grow + pulseDelta }, { rotateZ: `${tiltZ}deg` }],
     };
   });
 
@@ -542,61 +645,76 @@ function NewAccountHologramWelcomeActive() {
     const baseScale = interpolate(
       fullScreenBloom.value,
       [0, 0.45, 1],
-      [0.35, 1.35, fullScreenMaxScale * 0.88],
+      [0.42, 1.15, fullScreenMaxScale * 0.92],
     );
-    const breathDelta = interpolate(heartPulse.value, [0, 1], [-0.08, 0.14]);
-    const opacity = interpolate(fullScreenBloom.value, [0, 0.3, 1], [0, 0.32, 0.48]);
+    const breathDelta = interpolate(heartPulse.value, [0, 1], [-0.06, 0.12]);
+    const opacity = interpolate(fullScreenBloom.value, [0, 0.3, 1], [0, 0.36, 0.54]);
     return {
       opacity,
       transform: [{ scale: baseScale + breathDelta }],
     };
   });
 
-  // Hologram "10T4" multi-layered chromatic aberration styles
+  // Near-full-screen secondary giant framing heart silhouette
+  const nearFullScreenFrameHeartStyle = useAnimatedStyle(() => {
+    const scale = interpolate(fullScreenBloom.value, [0, 0.6, 1], [0.55, 1.08, 1.34]);
+    const pulse = interpolate(heartPulse.value, [0, 1], [-0.03, 0.04]);
+    const opacity = interpolate(fullScreenBloom.value, [0, 0.35, 1], [0, 0.32, 0.58]);
+    return {
+      opacity,
+      transform: [{ scale: scale + pulse }],
+    };
+  });
+
+  // Hologram "10T4" + "GVCN Ngô Vũ Hảo" multi-layered chromatic aberration styles
   const holoContainerStyle = useAnimatedStyle(() => {
-    const floatY = interpolate(heartPulse.value, [0, 1], [3, -5]);
+    const floatY = interpolate(heartPulse.value, [0, 1], [3, -6]);
     const scale = interpolate(heartPulse.value, [0, 1], [0.98, 1.04]);
-    const rotateZ = interpolate(holoPhase.value, [-1, 1], [-2.2, 2.2]);
+    const rotateZ = interpolate(holoPhase.value, [-1, 1], [-2.1, 2.1]);
     return {
       transform: [{ translateY: floatY }, { scale }, { rotateZ: `${rotateZ}deg` }],
     };
   });
 
   const cyanGhostStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(holoPhase.value, [-1, 0, 1], [0.85, 0.55, 0.9]),
+    opacity: interpolate(holoPhase.value, [-1, 0, 1], [0.88, 0.58, 0.92]),
     transform: [
-      { translateX: interpolate(holoPhase.value, [-1, 1], [-4.5, 4.5]) },
-      { translateY: interpolate(holoPhase.value, [-1, 1], [-2, 1.8]) },
+      { translateX: interpolate(holoPhase.value, [-1, 1], [-5, 5]) },
+      { translateY: interpolate(holoPhase.value, [-1, 1], [-2.2, 2]) },
     ],
   }));
 
   const magentaGhostStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(holoPhase.value, [-1, 0, 1], [0.88, 0.55, 0.85]),
+    opacity: interpolate(holoPhase.value, [-1, 0, 1], [0.9, 0.58, 0.88]),
     transform: [
-      { translateX: interpolate(holoPhase.value, [-1, 1], [4.5, -4.5]) },
-      { translateY: interpolate(holoPhase.value, [-1, 1], [2.2, -1.8]) },
+      { translateX: interpolate(holoPhase.value, [-1, 1], [5, -5]) },
+      { translateY: interpolate(holoPhase.value, [-1, 1], [2.4, -2]) },
     ],
   }));
 
   const violetGhostStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(holoScanline.value, [0.25, 1], [0.42, 0.82]),
+    opacity: interpolate(holoScanline.value, [0.28, 1], [0.45, 0.86]),
     transform: [
-      { translateX: interpolate(holoPhase.value, [-1, 1], [-2.4, 2.8]) },
-      { translateY: interpolate(holoPhase.value, [-1, 1], [3.2, -3.2]) },
+      { translateX: interpolate(holoPhase.value, [-1, 1], [-2.8, 3]) },
+      { translateY: interpolate(holoPhase.value, [-1, 1], [3.5, -3.5]) },
     ],
   }));
 
   const goldGhostStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(holoScanline.value, [0.25, 1], [0.35, 0.75]),
+    opacity: interpolate(holoScanline.value, [0.28, 1], [0.38, 0.78]),
     transform: [
-      { translateX: interpolate(holoPhase.value, [-1, 1], [2.2, -2.2]) },
-      { translateY: interpolate(holoPhase.value, [-1, 1], [-3, 2.5]) },
+      { translateX: interpolate(holoPhase.value, [-1, 1], [2.5, -2.5]) },
+      { translateY: interpolate(holoPhase.value, [-1, 1], [-3.2, 2.8]) },
     ],
   }));
 
   const shimmerBeamStyle = useAnimatedStyle(() => {
-    const translateX = interpolate(holoShimmer.value, [0, 1], [-150, 150]);
-    const opacity = interpolate(holoShimmer.value, [0, 0.2, 0.5, 0.8, 1], [0, 0.85, 1, 0.85, 0]);
+    const translateX = interpolate(holoShimmer.value, [0, 1], [-180, 180]);
+    const opacity = interpolate(
+      holoShimmer.value,
+      [0, 0.2, 0.5, 0.8, 1],
+      [0, 0.88, 1, 0.88, 0],
+    );
     return {
       opacity,
       transform: [{ translateX }, { rotateZ: '-24deg' }],
@@ -604,10 +722,10 @@ function NewAccountHologramWelcomeActive() {
   });
 
   const scanlineFlickerStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(holoScanline.value, [0.25, 1], [0.22, 0.65]),
+    opacity: interpolate(holoScanline.value, [0.28, 1], [0.24, 0.68]),
     transform: [
       {
-        translateY: interpolate(holoShimmer.value, [0, 1], [-18, 18]),
+        translateY: interpolate(holoShimmer.value, [0, 1], [-22, 22]),
       },
     ],
   }));
@@ -624,7 +742,7 @@ function NewAccountHologramWelcomeActive() {
     ],
   }));
 
-  /* ---------------- Progressive Heart Path & Spark Computations ---------------- */
+  /* ---------------- Progressive Heart Path & Triple Spark Computations ---------------- */
 
   const partialHeartPath = useMemo(
     () =>
@@ -634,12 +752,23 @@ function NewAccountHologramWelcomeActive() {
     [drawStepIndex, isHeartFullyDrawn],
   );
 
+  const partialRibbonPath = useMemo(
+    () =>
+      isHeartFullyDrawn
+        ? RIBBON_HEART.fullPath
+        : buildPartialHeartPath(
+            RIBBON_HEART.points,
+            Math.max(1, Math.floor(drawStepIndex * 0.92)),
+          ),
+    [drawStepIndex, isHeartFullyDrawn],
+  );
+
   const primarySparkPoint =
     MAIN_HEART.points[Math.min(MAIN_HEART.points.length - 1, orbitHeadIndex)] ??
     MAIN_HEART.points[0];
 
   const primaryCometTrailPath = useMemo(
-    () => buildTrailPath(MAIN_HEART.points, orbitHeadIndex, 28, isHeartFullyDrawn),
+    () => buildTrailPath(MAIN_HEART.points, orbitHeadIndex, 34, isHeartFullyDrawn),
     [isHeartFullyDrawn, orbitHeadIndex],
   );
 
@@ -651,9 +780,22 @@ function NewAccountHologramWelcomeActive() {
   const secondaryCometTrailPath = useMemo(
     () =>
       isHeartFullyDrawn
-        ? buildTrailPath(MAIN_HEART.points, secondaryOrbitIndex, 22, true)
+        ? buildTrailPath(MAIN_HEART.points, secondaryOrbitIndex, 28, true)
         : '',
     [isHeartFullyDrawn, secondaryOrbitIndex],
+  );
+
+  const tertiaryInnerIndex =
+    (HEART_SAMPLE_COUNT - (orbitHeadIndex % HEART_SAMPLE_COUNT)) % HEART_SAMPLE_COUNT;
+  const tertiaryInnerSparkPoint =
+    INNER_HEART.points[tertiaryInnerIndex] ?? INNER_HEART.points[0];
+
+  const tertiaryInnerTrailPath = useMemo(
+    () =>
+      isHeartFullyDrawn
+        ? buildTrailPath(INNER_HEART.points, tertiaryInnerIndex, 20, true)
+        : '',
+    [isHeartFullyDrawn, tertiaryInnerIndex],
   );
 
   const activeGreeting = FIRST_BOOT_GREETINGS[greetingIndex] ?? FIRST_BOOT_GREETINGS[0];
@@ -669,12 +811,17 @@ function NewAccountHologramWelcomeActive() {
     ? 100
     : Math.min(99, Math.round((drawStepIndex / HEART_SAMPLE_COUNT) * 100));
 
+  const crystallineRevealOpacity =
+    drawStepIndex > HEART_SAMPLE_COUNT * 0.22
+      ? Math.min(1, (drawStepIndex / HEART_SAMPLE_COUNT - 0.22) / 0.78)
+      : 0;
+
   return (
     <Animated.View style={[styles.overlayRoot, rootOverlayAnimatedStyle]}>
       {/* Deep Cosmic OLED Background with Holographic Auroras */}
       <LinearGradient
-        colors={['#03050C', '#070B1E', '#0D0620', '#040711']}
-        locations={[0, 0.35, 0.72, 1]}
+        colors={['#02040A', '#060A1D', '#0E0522', '#030610']}
+        locations={[0, 0.34, 0.72, 1]}
         start={{ x: 0.1, y: 0 }}
         end={{ x: 0.9, y: 1 }}
         style={StyleSheet.absoluteFill}
@@ -683,63 +830,100 @@ function NewAccountHologramWelcomeActive() {
       {/* Ambient Top & Bottom Holographic Glow Orbs */}
       <View pointerEvents="none" style={styles.auroraTopLeft}>
         <LinearGradient
-          colors={['rgba(0, 245, 255, 0.24)', 'rgba(168, 85, 247, 0.08)', 'transparent']}
+          colors={['rgba(0, 245, 255, 0.28)', 'rgba(168, 85, 247, 0.11)', 'transparent']}
           style={styles.auroraGradientFill}
         />
       </View>
       <View pointerEvents="none" style={styles.auroraBottomRight}>
         <LinearGradient
-          colors={['rgba(255, 42, 133, 0.26)', 'rgba(253, 224, 71, 0.08)', 'transparent']}
+          colors={['rgba(255, 42, 133, 0.3)', 'rgba(253, 224, 71, 0.11)', 'transparent']}
           style={styles.auroraGradientFill}
         />
       </View>
 
       {/* Full-Screen Progressive Expanding Heart Field ("vẽ hình trái tim di chuyển hiện lên full màn hình dần") */}
       <View pointerEvents="none" style={styles.fullScreenHeartField}>
-        {/* Giant Heart Aura that blooms gradually from center (0.35x) to full screen (4x+) */}
+        {/* Giant Heart Aura that blooms gradually from center to cover 100% of the screen */}
         <Animated.View style={[styles.expandingWaveWrap, fullScreenHeartBackdropStyle]}>
           <Svg width={SVG_SIZE} height={SVG_SIZE} viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
             <Defs>
               <SvgLinearGradient id="fullScreenHeartAuraGrad" x1="0" y1="0" x2="1" y2="1">
-                <Stop offset="0%" stopColor="#00F5FF" stopOpacity="0.32" />
-                <Stop offset="50%" stopColor="#FF2A85" stopOpacity="0.26" />
-                <Stop offset="100%" stopColor="#A855F7" stopOpacity="0.22" />
+                <Stop offset="0%" stopColor="#00F5FF" stopOpacity="0.34" />
+                <Stop offset="48%" stopColor="#FF2A85" stopOpacity="0.28" />
+                <Stop offset="100%" stopColor="#A855F7" stopOpacity="0.24" />
               </SvgLinearGradient>
             </Defs>
             <Path
               d={MAIN_HEART.fullPath}
               fill="url(#fullScreenHeartAuraGrad)"
               stroke="#FF2A85"
-              strokeOpacity={0.42}
-              strokeWidth={1.6}
+              strokeOpacity={0.5}
+              strokeWidth={2.2}
             />
           </Svg>
         </Animated.View>
 
-        {/* 4 Continuous Concentric Holographic Heart Waves expanding to full screen */}
+        {/* Near-Full-Screen Secondary Framing Heart Halo */}
+        <Animated.View
+          style={[
+            { width: heartDisplaySize, height: heartDisplaySize, position: 'absolute' },
+            nearFullScreenFrameHeartStyle,
+          ]}>
+          <Svg
+            width={heartDisplaySize}
+            height={heartDisplaySize}
+            viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
+            <Path
+              d={OUTER_HALO_HEART.fullPath}
+              fill="none"
+              stroke="rgba(0, 245, 255, 0.28)"
+              strokeWidth={2}
+              strokeDasharray="14 10"
+            />
+            <Path
+              d={MAIN_HEART.fullPath}
+              fill="none"
+              stroke="rgba(255, 42, 133, 0.24)"
+              strokeWidth={3.2}
+            />
+          </Svg>
+        </Animated.View>
+
+        {/* 5 Continuous Concentric Holographic Heart Waves expanding to full screen */}
         <ExpandingFullScreenHeartWave
           index={0}
-          totalWaves={4}
+          totalWaves={5}
           maxScale={fullScreenMaxScale}
           color="#00F5FF"
+          secondaryColor="#FF2A85"
         />
         <ExpandingFullScreenHeartWave
           index={1}
-          totalWaves={4}
+          totalWaves={5}
           maxScale={fullScreenMaxScale}
           color="#FF2A85"
+          secondaryColor="#FDE047"
         />
         <ExpandingFullScreenHeartWave
           index={2}
-          totalWaves={4}
+          totalWaves={5}
           maxScale={fullScreenMaxScale}
           color="#A855F7"
+          secondaryColor="#00F5FF"
         />
         <ExpandingFullScreenHeartWave
           index={3}
-          totalWaves={4}
+          totalWaves={5}
           maxScale={fullScreenMaxScale}
           color="#FDE047"
+          secondaryColor="#FF2A85"
+        />
+        <ExpandingFullScreenHeartWave
+          index={4}
+          totalWaves={5}
+          maxScale={fullScreenMaxScale}
+          color="#38BDF8"
+          secondaryColor="#A855F7"
         />
       </View>
 
@@ -748,8 +932,8 @@ function NewAccountHologramWelcomeActive() {
         style={[
           styles.contentContainer,
           {
-            paddingTop: Math.max(insets.top + 12, 24),
-            paddingBottom: Math.max(insets.bottom + 18, 28),
+            paddingTop: Math.max(insets.top + 8, 18),
+            paddingBottom: Math.max(insets.bottom + 12, 20),
           },
         ]}>
         {/* Top Bar: First-Boot Status Pill + Skip Button */}
@@ -758,7 +942,7 @@ function NewAccountHologramWelcomeActive() {
             <View style={styles.bootLiveDot} />
             <Text style={styles.bootStatusText}>
               {isHeartFullyDrawn
-                ? 'HOLOGRAM HEART · FULL SCREEN ACTIVE'
+                ? 'HOLOGRAM HEART 10T4 · FULL SCREEN'
                 : `ĐANG VẼ TRÁI TIM 10T4 · ${drawPercentage}%`}
             </Text>
           </View>
@@ -794,7 +978,7 @@ function NewAccountHologramWelcomeActive() {
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
               style={styles.accountIdentityChip}>
-              <Ionicons name="person-circle-outline" size={18} color="#00F5FF" />
+              <Ionicons name="person-circle-outline" size={17} color="#00F5FF" />
               <Text numberOfLines={1} style={styles.accountNameText}>
                 {displayName}
               </Text>
@@ -810,75 +994,200 @@ function NewAccountHologramWelcomeActive() {
           </View>
         </Animated.View>
 
-        {/* Center Stage: Progressive Moving Heart Drawing + Center "10T4" Moving Hologram */}
+        {/* Center Stage: Near-Full-Screen Crystalline Moving Heart + Center "10T4" & "GVCN Ngô Vũ Hảo" Hologram */}
         <View style={styles.heartStageWrap}>
-          {/* Floating & Orbiting Mini Heart Particles */}
+          {/* 12 Floating & Orbiting Mini Heart Particles scaled around the near-full-screen heart */}
           {FLOATING_MINI_HEARTS.map((item) => (
-            <FloatingMiniHeart key={item.id} config={item} />
+            <FloatingMiniHeart
+              key={item.id}
+              config={item}
+              heartDisplaySize={heartDisplaySize}
+            />
           ))}
 
-          <Animated.View style={[styles.centerHeartCanvas, centerHeartAnimatedStyle]}>
-            <Svg width={SVG_SIZE} height={SVG_SIZE} viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
+          <Animated.View
+            style={[
+              styles.centerHeartCanvas,
+              { width: heartDisplaySize, height: heartDisplaySize },
+              centerHeartAnimatedStyle,
+            ]}>
+            <Svg
+              width={heartDisplaySize}
+              height={heartDisplaySize}
+              viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`}>
               <Defs>
-                {/* Primary Neon Hologram Stroke Gradient */}
+                {/* 5-Stop Iridescent Master Hologram Heart Stroke Gradient */}
                 <SvgLinearGradient id="heartHoloStroke" x1="0" y1="0" x2="1" y2="1">
                   <Stop offset="0%" stopColor="#00F5FF" />
-                  <Stop offset="35%" stopColor="#FF2A85" />
-                  <Stop offset="70%" stopColor="#A855F7" />
+                  <Stop offset="26%" stopColor="#38BDF8" />
+                  <Stop offset="52%" stopColor="#FF2A85" />
+                  <Stop offset="78%" stopColor="#A855F7" />
                   <Stop offset="100%" stopColor="#FDE047" />
                 </SvgLinearGradient>
 
-                {/* Comet Tail Gradient */}
+                {/* Volumetric Outer Neon Glow Gradient */}
+                <SvgLinearGradient id="heartOuterGlowGrad" x1="0" y1="0" x2="1" y2="1">
+                  <Stop offset="0%" stopColor="#00F5FF" stopOpacity="0.42" />
+                  <Stop offset="50%" stopColor="#FF2A85" stopOpacity="0.48" />
+                  <Stop offset="100%" stopColor="#A855F7" stopOpacity="0.42" />
+                </SvgLinearGradient>
+
+                {/* Counter-Phased Ribbon Heart Gradient */}
+                <SvgLinearGradient id="ribbonHoloStroke" x1="1" y1="0" x2="0" y2="1">
+                  <Stop offset="0%" stopColor="#FDE047" stopOpacity="0.85" />
+                  <Stop offset="50%" stopColor="#00F5FF" stopOpacity="0.75" />
+                  <Stop offset="100%" stopColor="#FF2A85" stopOpacity="0.85" />
+                </SvgLinearGradient>
+
+                {/* Primary Comet Tail Gradient */}
                 <SvgLinearGradient id="cometTrailGrad" x1="0" y1="0" x2="1" y2="1">
-                  <Stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.98" />
-                  <Stop offset="50%" stopColor="#00F5FF" stopOpacity="0.85" />
-                  <Stop offset="100%" stopColor="#FF2A85" stopOpacity="0.2" />
+                  <Stop offset="0%" stopColor="#FFFFFF" stopOpacity="1" />
+                  <Stop offset="45%" stopColor="#00F5FF" stopOpacity="0.92" />
+                  <Stop offset="80%" stopColor="#FF2A85" stopOpacity="0.55" />
+                  <Stop offset="100%" stopColor="#A855F7" stopOpacity="0.15" />
                 </SvgLinearGradient>
 
                 {/* Inner Holographic Glass Fill */}
                 <SvgLinearGradient id="heartInnerFill" x1="0.15" y1="0" x2="0.85" y2="1">
-                  <Stop offset="0%" stopColor="#00F5FF" stopOpacity="0.18" />
-                  <Stop offset="50%" stopColor="#FF2A85" stopOpacity="0.14" />
-                  <Stop offset="100%" stopColor="#A855F7" stopOpacity="0.22" />
+                  <Stop offset="0%" stopColor="#00F5FF" stopOpacity="0.22" />
+                  <Stop offset="48%" stopColor="#FF2A85" stopOpacity="0.18" />
+                  <Stop offset="100%" stopColor="#A855F7" stopOpacity="0.26" />
+                </SvgLinearGradient>
+
+                {/* Radial Volumetric Core Heart Glow */}
+                <SvgRadialGradient
+                  id="heartRadialCore"
+                  cx="50%"
+                  cy="47%"
+                  rx="46%"
+                  ry="46%">
+                  <Stop offset="0%" stopColor="#00F5FF" stopOpacity="0.28" />
+                  <Stop offset="45%" stopColor="#FF2A85" stopOpacity="0.18" />
+                  <Stop offset="80%" stopColor="#A855F7" stopOpacity="0.09" />
+                  <Stop offset="100%" stopColor="#040711" stopOpacity="0" />
+                </SvgRadialGradient>
+
+                {/* 3D Specular Glass Highlight Gradient */}
+                <SvgLinearGradient id="lobeSpecularGrad" x1="0" y1="0" x2="1" y2="1">
+                  <Stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.78" />
+                  <Stop offset="60%" stopColor="#67E8F9" stopOpacity="0.35" />
+                  <Stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
                 </SvgLinearGradient>
               </Defs>
 
-              {/* Faint Blueprint Guide Track of the Heart */}
+              {/* Layer 0: Outer Cyber-Hologram Halo Heart Track & Harmonic Jewel Nodes */}
+              <Path
+                d={OUTER_HALO_HEART.fullPath}
+                fill="none"
+                stroke="rgba(0, 245, 255, 0.24)"
+                strokeWidth={1.6}
+                strokeDasharray="6 9"
+              />
+              {HARMONIC_JEWEL_INDICES.map((ptIdx, idx) => {
+                const pt = OUTER_HALO_HEART.points[ptIdx];
+                if (!pt) return null;
+                const isGold = idx % 3 === 0;
+                const isMagenta = idx % 3 === 1;
+                return (
+                  <G key={`jewel-${ptIdx}`}>
+                    <Circle
+                      cx={pt.x}
+                      cy={pt.y}
+                      r={5.5}
+                      fill={
+                        isGold
+                          ? 'rgba(253, 224, 71, 0.22)'
+                          : isMagenta
+                            ? 'rgba(255, 42, 133, 0.24)'
+                            : 'rgba(0, 245, 255, 0.24)'
+                      }
+                    />
+                    <Circle
+                      cx={pt.x}
+                      cy={pt.y}
+                      r={2.2}
+                      fill={isGold ? '#FDE047' : isMagenta ? '#FF2A85' : '#00F5FF'}
+                    />
+                  </G>
+                );
+              })}
+
+              {/* Layer 1: Faint Blueprint Guide Track of the Main Heart */}
               <Path
                 d={MAIN_HEART.fullPath}
                 fill="none"
-                stroke="rgba(0, 245, 255, 0.15)"
-                strokeWidth={1.5}
-                strokeDasharray="5 7"
+                stroke="rgba(255, 42, 133, 0.18)"
+                strokeWidth={2}
+                strokeDasharray="8 8"
               />
 
-              {/* Holographic Glass Fill & Inner Concentric Heart Grid (fades in as heart draws) */}
-              {drawStepIndex > HEART_SAMPLE_COUNT * 0.35 ? (
-                <G opacity={Math.min(1, (drawStepIndex / HEART_SAMPLE_COUNT - 0.35) / 0.65)}>
+              {/* Layer 2: Crystalline Facet Ribs, Volumetric Radial Core & Inner Harmonic Hearts */}
+              {crystallineRevealOpacity > 0 ? (
+                <G opacity={crystallineRevealOpacity}>
+                  {/* Volumetric Radial Core Glow & Iridescent Glass Fill */}
                   <Path d={MAIN_HEART.fullPath} fill="url(#heartInnerFill)" />
+                  <Path d={MAIN_HEART.fullPath} fill="url(#heartRadialCore)" />
+
+                  {/* Crystalline Geometric Facet Web connecting Main & Inner Heart Rings */}
+                  <Path
+                    d={CRYSTAL_FACET_RIBS_PATH}
+                    fill="none"
+                    stroke="rgba(0, 245, 255, 0.18)"
+                    strokeWidth={1.1}
+                  />
+
+                  {/* Concentric Inner Heart Ring (0.80x) */}
                   <Path
                     d={INNER_HEART.fullPath}
                     fill="none"
-                    stroke="rgba(0, 245, 255, 0.32)"
-                    strokeWidth={1.2}
-                    strokeDasharray="6 6"
+                    stroke="rgba(0, 245, 255, 0.42)"
+                    strokeWidth={1.8}
+                    strokeDasharray="10 7"
                   />
+
+                  {/* Deep Core Harmonic Heart Ring (0.66x) */}
                   <Path
                     d={CORE_HEART.fullPath}
                     fill="none"
-                    stroke="rgba(255, 42, 133, 0.28)"
-                    strokeWidth={1}
+                    stroke="rgba(255, 42, 133, 0.36)"
+                    strokeWidth={1.5}
+                  />
+
+                  {/* 3D Glass Specular Highlights on Left & Right Heart Lobes */}
+                  <Path
+                    d={RIGHT_LOBE_SPECULAR_PATH}
+                    fill="none"
+                    stroke="url(#lobeSpecularGrad)"
+                    strokeWidth={4.2}
+                    strokeLinecap="round"
+                  />
+                  <Path
+                    d={LEFT_LOBE_SPECULAR_PATH}
+                    fill="none"
+                    stroke="url(#lobeSpecularGrad)"
+                    strokeWidth={4.2}
+                    strokeLinecap="round"
                   />
                 </G>
               ) : null}
 
-              {/* Native UI-thread Animated Stroke Dash Layer */}
+              {/* Layer 3: Secondary Counter-Phased Holographic Ribbon Heart (0.91x) */}
+              <Path
+                d={partialRibbonPath}
+                fill="none"
+                stroke="url(#ribbonHoloStroke)"
+                strokeWidth={2.4}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+
+              {/* Layer 4: Native UI-thread Animated Wide Bloom Stroke */}
               {Platform.OS !== 'web' ? (
                 <AnimatedPath
                   d={MAIN_HEART.fullPath}
                   fill="none"
                   stroke="rgba(255, 42, 133, 0.22)"
-                  strokeWidth={14}
+                  strokeWidth={24}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   strokeDasharray={`${MAIN_HEART.totalLength} ${MAIN_HEART.totalLength}`}
@@ -886,114 +1195,157 @@ function NewAccountHologramWelcomeActive() {
                 />
               ) : null}
 
-              {/* Progressive Drawn Outer Neon Glow Stroke (100% Web + iOS + Android compatible) */}
+              {/* Layer 5: Progressive Drawn Outer Volumetric Neon Halo (100% Web + iOS + Android) */}
               <Path
                 d={partialHeartPath}
                 fill="none"
-                stroke="rgba(255, 42, 133, 0.34)"
+                stroke="rgba(255, 42, 133, 0.25)"
+                strokeWidth={22}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+
+              {/* Layer 6: Progressive Drawn Mid Holographic Glow Stroke */}
+              <Path
+                d={partialHeartPath}
+                fill="none"
+                stroke="url(#heartOuterGlowGrad)"
                 strokeWidth={12}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
 
-              {/* Progressive Drawn Core Holographic Gradient Heart Path */}
+              {/* Layer 7: Progressive Drawn Master 5-Stop Iridescent Hologram Heart Path */}
               <Path
                 d={partialHeartPath}
                 fill="none"
                 stroke="url(#heartHoloStroke)"
-                strokeWidth={4.8}
+                strokeWidth={6}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
 
-              {/* Progressive Drawn High-Energy White/Cyan Filament Centerline */}
+              {/* Layer 8: Progressive Drawn High-Energy White/Cyan Plasma Filament Centerline */}
               <Path
                 d={partialHeartPath}
                 fill="none"
-                stroke="#E0F2FE"
-                strokeOpacity={0.85}
-                strokeWidth={1.5}
+                stroke="#F0F9FF"
+                strokeOpacity={0.92}
+                strokeWidth={2.1}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
 
-              {/* Moving Comet Trail 1 (Follows drawing tip, then orbits continuously) */}
+              {/* Moving Comet Trail 1 (Primary Drawing Brush Comet) */}
               {primaryCometTrailPath ? (
                 <Path
                   d={primaryCometTrailPath}
                   fill="none"
                   stroke="url(#cometTrailGrad)"
-                  strokeWidth={7.5}
+                  strokeWidth={10.5}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
               ) : null}
 
-              {/* Moving Comet Trail 2 (Counter-orbiting cyan/gold energy stream after draw completes) */}
+              {/* Moving Comet Trail 2 (Counter-orbiting cyan/gold energy stream on Main Heart) */}
               {secondaryCometTrailPath ? (
                 <Path
                   d={secondaryCometTrailPath}
                   fill="none"
                   stroke="#00F5FF"
-                  strokeOpacity={0.7}
-                  strokeWidth={5}
+                  strokeOpacity={0.78}
+                  strokeWidth={6.5}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
               ) : null}
 
-              {/* Moving Spark / Comet Head 1 (Drawing Brush Tip) */}
+              {/* Moving Comet Trail 3 (Inner Heart Ring Golden-Rose Energy Stream) */}
+              {tertiaryInnerTrailPath ? (
+                <Path
+                  d={tertiaryInnerTrailPath}
+                  fill="none"
+                  stroke="#FDE047"
+                  strokeOpacity={0.72}
+                  strokeWidth={4.2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ) : null}
+
+              {/* Moving Spark / Comet Head 1 (Primary Plasma Orb) */}
               <G>
                 <Circle
                   cx={primarySparkPoint.x}
                   cy={primarySparkPoint.y}
-                  r={13}
-                  fill="rgba(0, 245, 255, 0.25)"
+                  r={20}
+                  fill="rgba(0, 245, 255, 0.24)"
                 />
                 <Circle
                   cx={primarySparkPoint.x}
                   cy={primarySparkPoint.y}
-                  r={7.5}
-                  fill="rgba(255, 42, 133, 0.65)"
+                  r={11.5}
+                  fill="rgba(255, 42, 133, 0.72)"
                 />
                 <Circle
                   cx={primarySparkPoint.x}
                   cy={primarySparkPoint.y}
-                  r={3.8}
+                  r={5.5}
                   fill="#FFFFFF"
                 />
               </G>
 
-              {/* Moving Spark / Comet Head 2 (Counter-orbiting spark once heart completes) */}
+              {/* Moving Spark / Comet Head 2 & 3 (Active once heart completes) */}
               {isHeartFullyDrawn ? (
                 <G>
+                  {/* Comet Head 2 on Main Heart */}
                   <Circle
                     cx={secondarySparkPoint.x}
                     cy={secondarySparkPoint.y}
-                    r={10}
-                    fill="rgba(253, 224, 71, 0.26)"
+                    r={15}
+                    fill="rgba(253, 224, 71, 0.28)"
                   />
                   <Circle
                     cx={secondarySparkPoint.x}
                     cy={secondarySparkPoint.y}
-                    r={5.2}
+                    r={8}
                     fill="#00F5FF"
                   />
                   <Circle
                     cx={secondarySparkPoint.x}
                     cy={secondarySparkPoint.y}
-                    r={2.6}
+                    r={3.8}
+                    fill="#FFFFFF"
+                  />
+
+                  {/* Comet Head 3 on Inner Heart Ring */}
+                  <Circle
+                    cx={tertiaryInnerSparkPoint.x}
+                    cy={tertiaryInnerSparkPoint.y}
+                    r={11}
+                    fill="rgba(255, 42, 133, 0.28)"
+                  />
+                  <Circle
+                    cx={tertiaryInnerSparkPoint.x}
+                    cy={tertiaryInnerSparkPoint.y}
+                    r={5.5}
+                    fill="#FDE047"
+                  />
+                  <Circle
+                    cx={tertiaryInnerSparkPoint.x}
+                    cy={tertiaryInnerSparkPoint.y}
+                    r={2.5}
                     fill="#FFFFFF"
                   />
                 </G>
               ) : null}
             </Svg>
 
-            {/* Center "10T4" with Moving Hologram Effect ("có chữ 10T4 ở giữa chuyển động hologram") */}
+            {/* Center "10T4" & "GVCN Ngô Vũ Hảo" with Moving Hologram Effect */}
             <Animated.View
               pointerEvents="none"
               style={[styles.centerHologramEmblem, holoContainerStyle]}>
-              {/* Hologram HUD Reticle Frame */}
               <View style={styles.holoFrameBox}>
                 {/* Corner HUD Brackets */}
                 <View style={[styles.hudCorner, styles.hudCornerTL]} />
@@ -1004,46 +1356,74 @@ function NewAccountHologramWelcomeActive() {
                 {/* Top Micro Hologram Telemetry Label */}
                 <View style={styles.holoTopTag}>
                   <View style={styles.holoCyanDot} />
-                  <Text style={styles.holoTopTagText}>HOLOGRAM · CORE</Text>
+                  <Text style={styles.holoTopTagText}>HOLOGRAM · CORE 10T4</Text>
+                  <View style={styles.holoPinkDot} />
                 </View>
 
                 {/* Multi-Layered Chromatic Aberration "10T4" Typography */}
                 <View style={styles.holoTypographyStage}>
                   {/* Layer 1: Electric Violet Prism Ghost */}
                   <Animated.Text
-                    style={[styles.holoTextBase, styles.holoTextViolet, violetGhostStyle]}>
+                    style={[
+                      styles.holoTextBase,
+                      { fontSize: holoCoreFontSize },
+                      styles.holoTextViolet,
+                      violetGhostStyle,
+                    ]}>
                     10T4
                   </Animated.Text>
 
                   {/* Layer 2: Gold Prism Ghost */}
                   <Animated.Text
-                    style={[styles.holoTextBase, styles.holoTextGold, goldGhostStyle]}>
+                    style={[
+                      styles.holoTextBase,
+                      { fontSize: holoCoreFontSize },
+                      styles.holoTextGold,
+                      goldGhostStyle,
+                    ]}>
                     10T4
                   </Animated.Text>
 
                   {/* Layer 3: Cyan Hologram Shift */}
                   <Animated.Text
-                    style={[styles.holoTextBase, styles.holoTextCyan, cyanGhostStyle]}>
+                    style={[
+                      styles.holoTextBase,
+                      { fontSize: holoCoreFontSize },
+                      styles.holoTextCyan,
+                      cyanGhostStyle,
+                    ]}>
                     10T4
                   </Animated.Text>
 
                   {/* Layer 4: Neon Magenta/Rose Hologram Shift */}
                   <Animated.Text
-                    style={[styles.holoTextBase, styles.holoTextMagenta, magentaGhostStyle]}>
+                    style={[
+                      styles.holoTextBase,
+                      { fontSize: holoCoreFontSize },
+                      styles.holoTextMagenta,
+                      magentaGhostStyle,
+                    ]}>
                     10T4
                   </Animated.Text>
 
                   {/* Layer 5: Luminous Core "10T4" Text */}
-                  <Text style={[styles.holoTextBase, styles.holoTextCore]}>10T4</Text>
+                  <Text
+                    style={[
+                      styles.holoTextBase,
+                      { fontSize: holoCoreFontSize },
+                      styles.holoTextCore,
+                    ]}>
+                    10T4
+                  </Text>
 
                   {/* Continuous Diagonal Holographic Light Beam Sweep */}
                   <Animated.View style={[styles.shimmerBeamWrap, shimmerBeamStyle]}>
                     <LinearGradient
                       colors={[
                         'transparent',
-                        'rgba(0, 245, 255, 0.35)',
-                        'rgba(255, 255, 255, 0.75)',
-                        'rgba(255, 42, 133, 0.35)',
+                        'rgba(0, 245, 255, 0.38)',
+                        'rgba(255, 255, 255, 0.82)',
+                        'rgba(255, 42, 133, 0.38)',
                         'transparent',
                       ]}
                       start={{ x: 0, y: 0 }}
@@ -1061,11 +1441,24 @@ function NewAccountHologramWelcomeActive() {
                   </Animated.View>
                 </View>
 
-                {/* Subtitle Badges Under "10T4" */}
-                <View style={styles.holoSubtitleBadge}>
-                  <Text style={styles.holoSubtitlePrimary}>HOLOGRAM ID · KỶ NGUYÊN 10T4</Text>
-                </View>
-                <Text style={styles.holoSubtitleSecondary}>TÀI KHOẢN MỚI KÍCH HOẠT</Text>
+                {/* Upgraded Hologram ID Badge: "GVCN Ngô Vũ Hảo" */}
+                <LinearGradient
+                  colors={[
+                    'rgba(0, 245, 255, 0.22)',
+                    'rgba(168, 85, 247, 0.22)',
+                    'rgba(255, 42, 133, 0.24)',
+                  ]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.holoTeacherBadge}>
+                  <Ionicons name="shield-checkmark" size={13} color="#FDE047" />
+                  <Text style={styles.holoTeacherBadgeText}>GVCN Ngô Vũ Hảo</Text>
+                  <Ionicons name="sparkles" size={12} color="#00F5FF" />
+                </LinearGradient>
+
+                <Text style={styles.holoSubtitleSecondary}>
+                  KỶ NGUYÊN 10T4 · TÀI KHOẢN MỚI KÍCH HOẠT
+                </Text>
               </View>
             </Animated.View>
           </Animated.View>
@@ -1074,7 +1467,7 @@ function NewAccountHologramWelcomeActive() {
         {/* Bottom Interactive Completion CTA */}
         <Animated.View style={[styles.footerSection, ctaAnimatedStyle]}>
           <Text style={styles.footerHintText}>
-            Trái tim hologram 10T4 đã đồng bộ toàn màn hình cho tài khoản mới của bạn
+            Trái tim Hologram 10T4 · GVCN Ngô Vũ Hảo đã đồng bộ toàn màn hình cho tài khoản mới
           </Text>
 
           <Pressable
@@ -1084,12 +1477,12 @@ function NewAccountHologramWelcomeActive() {
               pressed && { transform: [{ scale: 0.97 }], opacity: 0.92 },
             ]}>
             <LinearGradient
-              colors={['#00F5FF', '#A855F7', '#FF2A85']}
+              colors={['#00F5FF', '#A855F7', '#FF2A85', '#FDE047']}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
               style={styles.enterButtonBorder}>
               <LinearGradient
-                colors={['rgba(8, 13, 32, 0.88)', 'rgba(19, 10, 38, 0.88)']}
+                colors={['rgba(7, 11, 28, 0.9)', 'rgba(18, 9, 36, 0.9)']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
                 style={styles.enterButtonInner}>
@@ -1098,7 +1491,9 @@ function NewAccountHologramWelcomeActive() {
                 </View>
                 <View style={styles.enterButtonTextCol}>
                   <Text style={styles.enterButtonTitle}>Chạm để bước vào lớp 10T4 ✨</Text>
-                  <Text style={styles.enterButtonSub}>Bắt đầu hành trình · Khám phá ngay</Text>
+                  <Text style={styles.enterButtonSub}>
+                    GVCN Ngô Vũ Hảo · Khám phá không gian lớp ngay
+                  </Text>
                 </View>
                 <Ionicons name="arrow-forward-circle" size={26} color="#00F5FF" />
               </LinearGradient>
@@ -1122,25 +1517,25 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     zIndex: 99999,
-    backgroundColor: '#040711',
+    backgroundColor: '#030610',
     overflow: 'hidden',
   },
   auroraTopLeft: {
     position: 'absolute',
-    top: -120,
-    left: -100,
-    width: 380,
-    height: 380,
-    borderRadius: 190,
+    top: -130,
+    left: -110,
+    width: 440,
+    height: 440,
+    borderRadius: 220,
     overflow: 'hidden',
   },
   auroraBottomRight: {
     position: 'absolute',
-    bottom: -130,
-    right: -100,
-    width: 420,
-    height: 420,
-    borderRadius: 210,
+    bottom: -140,
+    right: -110,
+    width: 480,
+    height: 480,
+    borderRadius: 240,
     overflow: 'hidden',
   },
   auroraGradientFill: {
@@ -1165,7 +1560,7 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     flex: 1,
-    paddingHorizontal: 20,
+    paddingHorizontal: 14,
     justifyContent: 'space-between',
   },
   topBar: {
@@ -1173,6 +1568,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 10,
+    zIndex: 10,
   },
   bootStatusPill: {
     flexDirection: 'row',
@@ -1181,9 +1577,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    backgroundColor: 'rgba(15, 23, 42, 0.76)',
     borderWidth: 1,
-    borderColor: 'rgba(0, 245, 255, 0.28)',
+    borderColor: 'rgba(0, 245, 255, 0.32)',
   },
   bootLiveDot: {
     width: 7,
@@ -1204,9 +1600,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 13,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: 'rgba(30, 41, 59, 0.72)',
+    backgroundColor: 'rgba(30, 41, 59, 0.76)',
     borderWidth: 1,
-    borderColor: 'rgba(226, 232, 240, 0.22)',
+    borderColor: 'rgba(226, 232, 240, 0.25)',
   },
   skipPillText: {
     fontSize: 12.5,
@@ -1215,45 +1611,46 @@ const styles = StyleSheet.create({
   },
   greetingHeader: {
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 2,
+    zIndex: 10,
   },
   helloMultilingualPill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 5,
+    paddingHorizontal: 13,
+    paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: 'rgba(0, 245, 255, 0.1)',
+    backgroundColor: 'rgba(0, 245, 255, 0.11)',
     borderWidth: 1,
-    borderColor: 'rgba(0, 245, 255, 0.25)',
-    marginBottom: 8,
+    borderColor: 'rgba(0, 245, 255, 0.28)',
+    marginBottom: 4,
   },
   helloMultilingualText: {
-    fontSize: 11.5,
+    fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.5,
     color: '#67E8F9',
   },
   xinChaoHeroTitle: {
-    fontSize: 42,
+    fontSize: 38,
     fontWeight: '900',
     letterSpacing: -0.8,
     color: '#FFFFFF',
     textAlign: 'center',
-    textShadowColor: 'rgba(0, 245, 255, 0.55)',
+    textShadowColor: 'rgba(0, 245, 255, 0.6)',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 18,
   },
   xinChaoSubtitle: {
-    fontSize: 13.5,
+    fontSize: 13,
     fontWeight: '600',
     color: '#CBD5E1',
     textAlign: 'center',
-    marginTop: 2,
+    marginTop: 1,
   },
   accountBadgeRow: {
-    marginTop: 10,
+    marginTop: 7,
     maxWidth: '100%',
   },
   accountIdentityChip: {
@@ -1262,17 +1659,17 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     justifyContent: 'center',
     gap: 7,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
+    paddingHorizontal: 13,
+    paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: 'rgba(255, 42, 133, 0.35)',
+    borderColor: 'rgba(255, 42, 133, 0.38)',
   },
   accountNameText: {
-    fontSize: 13.5,
+    fontSize: 13,
     fontWeight: '800',
     color: '#F8FAFC',
-    maxWidth: 160,
+    maxWidth: 170,
   },
   loginIdTag: {
     paddingHorizontal: 8,
@@ -1280,10 +1677,10 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: 'rgba(0, 245, 255, 0.18)',
     borderWidth: 1,
-    borderColor: 'rgba(0, 245, 255, 0.4)',
+    borderColor: 'rgba(0, 245, 255, 0.42)',
   },
   loginIdTagText: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: '800',
     color: '#00F5FF',
   },
@@ -1291,25 +1688,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 999,
-    backgroundColor: 'rgba(255, 42, 133, 0.2)',
+    backgroundColor: 'rgba(255, 42, 133, 0.22)',
   },
   roleTagText: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: '700',
     color: '#FDA4AF',
   },
   heartStageWrap: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    height: 340,
+    overflow: 'visible',
   },
   miniHeartParticle: {
     position: 'absolute',
-    zIndex: 2,
+    zIndex: 3,
   },
   centerHeartCanvas: {
-    width: SVG_SIZE,
-    height: SVG_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1318,55 +1714,55 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    bottom: 18,
+    bottom: '7%',
     alignItems: 'center',
     justifyContent: 'center',
   },
   holoFrameBox: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 22,
-    paddingVertical: 14,
-    borderRadius: 22,
-    backgroundColor: 'rgba(4, 7, 17, 0.48)',
-    borderWidth: 1,
-    borderColor: 'rgba(0, 245, 255, 0.26)',
+    paddingHorizontal: 24,
+    paddingVertical: 15,
+    borderRadius: 24,
+    backgroundColor: 'rgba(3, 6, 17, 0.56)',
+    borderWidth: 1.2,
+    borderColor: 'rgba(0, 245, 255, 0.34)',
     overflow: 'hidden',
   },
   hudCorner: {
     position: 'absolute',
-    width: 11,
-    height: 11,
+    width: 13,
+    height: 13,
     borderColor: '#00F5FF',
   },
   hudCornerTL: {
-    top: 5,
-    left: 5,
-    borderTopWidth: 2,
-    borderLeftWidth: 2,
+    top: 6,
+    left: 6,
+    borderTopWidth: 2.2,
+    borderLeftWidth: 2.2,
   },
   hudCornerTR: {
-    top: 5,
-    right: 5,
-    borderTopWidth: 2,
-    borderRightWidth: 2,
+    top: 6,
+    right: 6,
+    borderTopWidth: 2.2,
+    borderRightWidth: 2.2,
   },
   hudCornerBL: {
-    bottom: 5,
-    left: 5,
-    borderBottomWidth: 2,
-    borderLeftWidth: 2,
+    bottom: 6,
+    left: 6,
+    borderBottomWidth: 2.2,
+    borderLeftWidth: 2.2,
   },
   hudCornerBR: {
-    bottom: 5,
-    right: 5,
-    borderBottomWidth: 2,
-    borderRightWidth: 2,
+    bottom: 6,
+    right: 6,
+    borderBottomWidth: 2.2,
+    borderRightWidth: 2.2,
   },
   holoTopTag: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 6,
     marginBottom: 2,
   },
   holoCyanDot: {
@@ -1374,6 +1770,12 @@ const styles = StyleSheet.create({
     height: 5,
     borderRadius: 3,
     backgroundColor: '#00F5FF',
+  },
+  holoPinkDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#FF2A85',
   },
   holoTopTagText: {
     fontSize: 9.5,
@@ -1385,36 +1787,35 @@ const styles = StyleSheet.create({
     position: 'relative',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 14,
     paddingVertical: 2,
     overflow: 'hidden',
   },
   holoTextBase: {
-    fontSize: 54,
     fontWeight: '900',
-    letterSpacing: 3,
+    letterSpacing: 3.5,
     textAlign: 'center',
   },
   holoTextCyan: {
     position: 'absolute',
     color: '#00F5FF',
-    textShadowColor: 'rgba(0, 245, 255, 0.9)',
-    textShadowOffset: { width: -2, height: 0 },
-    textShadowRadius: 14,
+    textShadowColor: 'rgba(0, 245, 255, 0.95)',
+    textShadowOffset: { width: -2.5, height: 0 },
+    textShadowRadius: 16,
   },
   holoTextMagenta: {
     position: 'absolute',
     color: '#FF2A85',
-    textShadowColor: 'rgba(255, 42, 133, 0.9)',
-    textShadowOffset: { width: 2, height: 0 },
-    textShadowRadius: 14,
+    textShadowColor: 'rgba(255, 42, 133, 0.95)',
+    textShadowOffset: { width: 2.5, height: 0 },
+    textShadowRadius: 16,
   },
   holoTextViolet: {
     position: 'absolute',
     color: '#A855F7',
-    textShadowColor: 'rgba(168, 85, 247, 0.85)',
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 16,
+    textShadowColor: 'rgba(168, 85, 247, 0.9)',
+    textShadowOffset: { width: 0, height: 2.5 },
+    textShadowRadius: 18,
   },
   holoTextGold: {
     position: 'absolute',
@@ -1422,15 +1823,15 @@ const styles = StyleSheet.create({
   },
   holoTextCore: {
     color: '#FFFFFF',
-    textShadowColor: 'rgba(0, 245, 255, 0.85)',
+    textShadowColor: 'rgba(0, 245, 255, 0.9)',
     textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 16,
+    textShadowRadius: 18,
   },
   shimmerBeamWrap: {
     position: 'absolute',
-    top: -20,
-    bottom: -20,
-    width: 56,
+    top: -24,
+    bottom: -24,
+    width: 64,
   },
   shimmerBeamGradient: {
     flex: 1,
@@ -1445,40 +1846,46 @@ const styles = StyleSheet.create({
   },
   scanlineBar: {
     height: 1.5,
-    backgroundColor: 'rgba(0, 245, 255, 0.36)',
+    backgroundColor: 'rgba(0, 245, 255, 0.38)',
   },
   scanlineBarThin: {
     height: 1,
-    backgroundColor: 'rgba(255, 42, 133, 0.28)',
+    backgroundColor: 'rgba(255, 42, 133, 0.3)',
   },
-  holoSubtitleBadge: {
-    marginTop: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
+  holoTeacherBadge: {
+    marginTop: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 5,
     borderRadius: 999,
-    backgroundColor: 'rgba(0, 245, 255, 0.14)',
-    borderWidth: 1,
-    borderColor: 'rgba(0, 245, 255, 0.36)',
+    borderWidth: 1.2,
+    borderColor: 'rgba(253, 224, 71, 0.55)',
   },
-  holoSubtitlePrimary: {
-    fontSize: 9.5,
+  holoTeacherBadgeText: {
+    fontSize: 12.5,
     fontWeight: '900',
-    letterSpacing: 1.2,
-    color: '#E0F2FE',
+    letterSpacing: 0.8,
+    color: '#FEF08A',
+    textShadowColor: 'rgba(0, 245, 255, 0.75)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
   },
   holoSubtitleSecondary: {
-    marginTop: 4,
+    marginTop: 5,
     fontSize: 9,
     fontWeight: '800',
-    letterSpacing: 1.5,
-    color: '#FDE047',
+    letterSpacing: 1.4,
+    color: '#E0F2FE',
   },
   footerSection: {
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
+    zIndex: 10,
   },
   footerHintText: {
-    fontSize: 12,
+    fontSize: 11.5,
     fontWeight: '600',
     color: '#94A3B8',
     textAlign: 'center',
@@ -1496,7 +1903,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 12,
+    paddingVertical: 11,
     paddingHorizontal: 16,
     borderRadius: 999,
     gap: 12,
@@ -1509,7 +1916,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'rgba(255, 42, 133, 0.18)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 42, 133, 0.42)',
+    borderColor: 'rgba(255, 42, 133, 0.45)',
   },
   enterButtonTextCol: {
     flex: 1,
