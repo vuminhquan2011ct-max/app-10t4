@@ -11,7 +11,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
@@ -59,6 +59,7 @@ import {
   DRIVE_MEDIA_CATEGORY_LIST,
   buildOptimisticDriveMediaItem,
   computeDriveStorageStats,
+  isSessionUploadedDriveFile,
   saveExternalDriveLinkToGallery,
   saveUploadedFilesToGallery,
   useDriveGallery,
@@ -66,7 +67,11 @@ import {
   type DriveMediaItem,
   type SaveDriveMediaMeta,
 } from '@/lib/drive-gallery';
-import { shareOrCopyText } from '@/lib/export';
+import {
+  buildDriveMediaExcelCsv,
+  downloadOrShareExcelCsv,
+  shareOrCopyText,
+} from '@/lib/export';
 import { stripVietnamese } from '@/lib/intelligence';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
@@ -98,8 +103,10 @@ export default function GalleryScreen() {
     memberRole,
     isTeacher,
     isSubjectTeacher,
+    canEditClass,
     subjectName,
     currentStudent,
+    deleteUploadedFileEverywhere,
   } = useClassStore();
   const theme = useTheme();
   const isDark = useIsDark();
@@ -115,7 +122,6 @@ export default function GalleryScreen() {
     linkOptimisticDriveId,
     resolveOptimistic,
     failOptimistic,
-    removeItem,
   } = useDriveGallery({ pollMs: 5000 });
 
   const defaultUploaderName = useMemo(() => {
@@ -159,9 +165,21 @@ export default function GalleryScreen() {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [previewItem, setPreviewItem] = useState<DriveMediaItem | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [exportingExcel, setExportingExcel] = useState(false);
 
   // Snapshot metadata per tempId so concurrent uploads keep exact caption/category.
   const pendingMetaRef = useRef<Map<string, SaveDriveMediaMeta>>(new Map());
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current);
+        confirmTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Refresh silently whenever the screen regains navigation focus.
   useFocusEffect(
@@ -344,23 +362,84 @@ export default function GalleryScreen() {
 
   const canDeleteItem = (item: DriveMediaItem): boolean => {
     if (item.pending) return false;
-    if (isTeacher) return true;
+    if (canEditClass) return true;
+    if (isSessionUploadedDriveFile(item.driveFileId)) return true;
     return (
-      item.uploaderName.trim().toLowerCase() ===
-      (uploaderName.trim() || defaultUploaderName).toLowerCase()
+      item.uploaderName.trim().toLowerCase() === defaultUploaderName.trim().toLowerCase()
     );
   };
 
   const handleDelete = async (item: DriveMediaItem) => {
+    if (deletingId) return;
     if (confirmDeleteId !== item.id) {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
       setConfirmDeleteId(item.id);
-      showToast('Bấm lại lần nữa để gỡ mục này khỏi danh sách lớp', 'warning');
+      confirmTimerRef.current = setTimeout(() => {
+        confirmTimerRef.current = null;
+        setConfirmDeleteId(null);
+      }, 3_500);
+      showToast('Bấm lại lần nữa để xoá khỏi App, Google Drive & Excel', 'warning');
       return;
     }
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
+    }
     setConfirmDeleteId(null);
-    await removeItem(item);
-    if (previewItem?.id === item.id) setPreviewItem(null);
-    showToast('Đã gỡ khỏi danh sách kho lớp', 'info');
+    setDeletingId(item.id);
+    try {
+      const res = await deleteUploadedFileEverywhere({
+        id: item.id,
+        driveFileId: item.driveFileId,
+        fileUrl: item.driveUrl || item.imageUrl,
+        fileName: item.fileName,
+      });
+      if (previewItem?.id === item.id) setPreviewItem(null);
+      showToast(
+        res.trashedDrive || res.removedSheetRows > 0
+          ? 'Đã xoá khỏi App, Google Drive & Excel!'
+          : 'Đã gỡ khỏi Kho lớp & đồng bộ mọi thiết bị!',
+        'info',
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleExportExcel = async () => {
+    if (exportingExcel) return;
+    const exportable = items.filter((i) => !i.pending);
+    if (exportable.length === 0) {
+      showToast('Chưa có ảnh hoặc tệp nào để xuất Excel', 'warning');
+      return;
+    }
+    setExportingExcel(true);
+    try {
+      const csv = buildDriveMediaExcelCsv(
+        exportable.map((i) => ({
+          id: i.id,
+          fileName: i.fileName,
+          itemType: i.itemType,
+          uploaderName: i.uploaderName,
+          uploaderRole: formatUploaderRoleLabel(i.uploaderRole, i.uploaderSubject),
+          caption: i.caption,
+          category: DRIVE_MEDIA_CATEGORIES[i.category]?.label ?? i.category,
+          fileSize: i.sizeBytes,
+          driveFileId: i.driveFileId,
+          driveUrl: i.driveUrl,
+          createdAt: i.createdAt,
+        })),
+      );
+      await downloadOrShareExcelCsv('kho-anh-file-10t4.csv', csv);
+      showToast(`Đã xuất file Excel (${exportable.length} ảnh & tệp hiện có)! 📊`, 'success');
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : 'Không thể xuất file Excel lúc này',
+        'danger',
+      );
+    } finally {
+      setExportingExcel(false);
+    }
   };
 
   const openDriveFolder = () => {
@@ -381,9 +460,9 @@ export default function GalleryScreen() {
       <PageHeader
         title={`Kho Ảnh & File ${classInfo.name}`}
         subtitle={`Chuyển thẳng dữ liệu sang Google Drive · ${DRIVE_CONFIG.folderName}`}
-        rightIcon={'logo-google'}
-        rightLabel={DRIVE_CONFIG.folderName}
-        onRightPress={openDriveFolder}
+        rightIcon={'grid-outline'}
+        rightLabel={exportingExcel ? 'Đang xuất...' : 'Xuất Excel'}
+        onRightPress={() => void handleExportExcel()}
       />
 
       {/* Google Drive K8T4_app Cloud Storage Hero */}
@@ -897,7 +976,14 @@ export default function GalleryScreen() {
 
                     {deletable ? (
                       <Pressable
+                        disabled={deletingId === item.id}
                         onPress={() => void handleDelete(item)}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          confirmDeleteId === item.id
+                            ? `Xác nhận xoá ${item.fileName}`
+                            : `Xoá ${item.fileName}`
+                        }
                         style={[
                           styles.footerIconBtn,
                           {
@@ -905,11 +991,15 @@ export default function GalleryScreen() {
                               confirmDeleteId === item.id ? theme.danger : theme.dangerSoft,
                           },
                         ]}>
-                        <Ionicons
-                          name="trash-outline"
-                          size={15}
-                          color={confirmDeleteId === item.id ? '#FFFFFF' : theme.danger}
-                        />
+                        {deletingId === item.id ? (
+                          <ActivityIndicator size="small" color={theme.danger} />
+                        ) : (
+                          <Ionicons
+                            name="trash-outline"
+                            size={15}
+                            color={confirmDeleteId === item.id ? '#FFFFFF' : theme.danger}
+                          />
+                        )}
                       </Pressable>
                     ) : null}
                   </View>
@@ -967,7 +1057,7 @@ export default function GalleryScreen() {
 
               <View style={styles.modalActions}>
                 <Button
-                  label={'Mở Google Drive'}
+                  label={'Mở Drive'}
                   icon={'open-outline'}
                   size={'sm'}
                   style={styles.flex}
@@ -980,6 +1070,22 @@ export default function GalleryScreen() {
                   size={'sm'}
                   onPress={() => openLink(previewItem.downloadUrl)}
                 />
+                {canDeleteItem(previewItem) ? (
+                  <Button
+                    label={
+                      deletingId === previewItem.id
+                        ? 'Đang xoá...'
+                        : confirmDeleteId === previewItem.id
+                          ? 'Xác nhận xoá?'
+                          : 'Xoá'
+                    }
+                    variant={'danger'}
+                    icon={'trash-outline'}
+                    size={'sm'}
+                    disabled={deletingId === previewItem.id}
+                    onPress={() => void handleDelete(previewItem)}
+                  />
+                ) : null}
               </View>
             </View>
           ) : null}

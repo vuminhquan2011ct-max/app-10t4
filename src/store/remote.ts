@@ -11,6 +11,7 @@
  * - Device-local view fields (`role`, `currentStudentId`) are NEVER synced.
  */
 
+import { extractDriveFileIdFromUrl } from '@/lib/drive';
 import { emitLiveBroadcast } from '@/lib/realtime-bus';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { createId } from '@/lib/utils';
@@ -86,6 +87,8 @@ function getLegacyTemplate(): PersistedState {
       registeredTeachers: [],
       deletedStudentIds: {},
       deletedTeacherIds: {},
+      deletedDriveFileIds: {},
+      deletedItemIds: {},
       seating: { ...base.seating, seats: {}, updatedAt: '' },
     };
   }
@@ -136,6 +139,8 @@ export function stripForSharedSync(state: PersistedState): Record<string, unknow
     registeredTeachers: state.registeredTeachers ?? [],
     deletedStudentIds: state.deletedStudentIds ?? {},
     deletedTeacherIds: state.deletedTeacherIds ?? {},
+    deletedDriveFileIds: state.deletedDriveFileIds ?? {},
+    deletedItemIds: state.deletedItemIds ?? {},
   };
 }
 
@@ -191,9 +196,54 @@ function isTombstoned(
   return tombMs >= itemMs;
 }
 
+function isItemTombstoned(deletedItemIds: Record<string, string>, id: string): boolean {
+  return Boolean(id && deletedItemIds[id]);
+}
+
+function resolveAttachmentDriveId(att: DriveAttachment): string | null {
+  const withDrive = att as DriveAttachment & { driveFileId?: string | null };
+  if (typeof withDrive.driveFileId === 'string' && withDrive.driveFileId.trim()) {
+    return withDrive.driveFileId.trim();
+  }
+  const fromUrl =
+    extractDriveFileIdFromUrl(att.url) ??
+    extractDriveFileIdFromUrl(att.thumbnailUrl) ??
+    extractDriveFileIdFromUrl(att.downloadUrl);
+  if (fromUrl) return fromUrl;
+  const trimmedId = att.id?.trim() ?? '';
+  if (trimmedId && !/^(att|local|opt|res|ann|tsk|ent)_/i.test(trimmedId)) {
+    return trimmedId;
+  }
+  return null;
+}
+
+function isDriveFileTombstoned(
+  deletedDriveFileIds: Record<string, string>,
+  fileId: string | null | undefined,
+): boolean {
+  if (!fileId) return false;
+  return Boolean(deletedDriveFileIds[fileId.trim()]);
+}
+
+function filterLiveAttachments(
+  list: DriveAttachment[] | undefined,
+  deletedDriveFileIds: Record<string, string>,
+): DriveAttachment[] | undefined {
+  if (!Array.isArray(list) || list.length === 0) return undefined;
+  const kept = list.filter((att) => {
+    if (!att?.id) return false;
+    if (deletedDriveFileIds[att.id]) return false;
+    const driveId = resolveAttachmentDriveId(att);
+    if (driveId && deletedDriveFileIds[driveId]) return false;
+    return true;
+  });
+  return kept.length > 0 ? kept : undefined;
+}
+
 function mergeAttachments(
-  a?: DriveAttachment[],
-  b?: DriveAttachment[],
+  a: DriveAttachment[] | undefined,
+  b: DriveAttachment[] | undefined,
+  deletedDriveFileIds: Record<string, string>,
 ): DriveAttachment[] | undefined {
   const listA = Array.isArray(a) ? a : [];
   const listB = Array.isArray(b) ? b : [];
@@ -201,9 +251,13 @@ function mergeAttachments(
   const map = new Map<string, DriveAttachment>();
   for (const att of [...listA, ...listB]) {
     if (!att?.id) continue;
+    if (deletedDriveFileIds[att.id]) continue;
+    const driveId = resolveAttachmentDriveId(att);
+    if (driveId && deletedDriveFileIds[driveId]) continue;
     map.set(att.id, att);
   }
-  return Array.from(map.values());
+  const values = Array.from(map.values());
+  return values.length > 0 ? values : undefined;
 }
 
 function mergeStudents(
@@ -290,6 +344,8 @@ function mergeEntries(
   remoteList: Entry[],
   localList: Entry[],
   deletedStudentIds: Record<string, string>,
+  deletedItemIds: Record<string, string>,
+  deletedDriveFileIds: Record<string, string>,
   prefer: 'local' | 'remote',
 ): Entry[] {
   const map = new Map<string, Entry>();
@@ -310,13 +366,27 @@ function mergeEntries(
   }
 
   return Array.from(map.values())
-    .filter((e) => !isTombstoned(deletedStudentIds, e.studentId, e.updatedAt, e.createdAt))
+    .filter(
+      (e) =>
+        !isItemTombstoned(deletedItemIds, e.id) &&
+        !isTombstoned(deletedStudentIds, e.studentId, e.updatedAt, e.createdAt),
+    )
+    .map((e) => {
+      if (!e.proofUrl) return e;
+      const proofDriveId = extractDriveFileIdFromUrl(e.proofUrl);
+      if (isDriveFileTombstoned(deletedDriveFileIds, proofDriveId)) {
+        return { ...e, proofUrl: null };
+      }
+      return e;
+    })
     .sort((a, b) => ts(b.createdAt) - ts(a.createdAt));
 }
 
 function mergeAnnouncements(
   remoteList: Announcement[],
   localList: Announcement[],
+  deletedItemIds: Record<string, string>,
+  deletedDriveFileIds: Record<string, string>,
   prefer: 'local' | 'remote',
 ): Announcement[] {
   const byId = new Map<string, Announcement>();
@@ -324,19 +394,27 @@ function mergeAnnouncements(
   const secondaryList = prefer === 'local' ? remoteList : localList;
 
   for (const item of primaryList) {
-    if (item?.id) byId.set(item.id, item);
+    if (item?.id) {
+      byId.set(item.id, {
+        ...item,
+        attachments: filterLiveAttachments(item.attachments, deletedDriveFileIds),
+      });
+    }
   }
   for (const item of secondaryList) {
     if (!item?.id) continue;
     const primary = byId.get(item.id);
     if (!primary) {
-      byId.set(item.id, item);
+      byId.set(item.id, {
+        ...item,
+        attachments: filterLiveAttachments(item.attachments, deletedDriveFileIds),
+      });
     } else {
       byId.set(item.id, {
         ...item,
         ...primary,
         likes: Math.max(primary.likes ?? 0, item.likes ?? 0),
-        attachments: mergeAttachments(item.attachments, primary.attachments),
+        attachments: mergeAttachments(item.attachments, primary.attachments, deletedDriveFileIds),
       });
     }
   }
@@ -345,6 +423,7 @@ function mergeAnnouncements(
   // Because primaryList was inserted first, primary IDs & timestamps win.
   const byContent = new Map<string, Announcement>();
   for (const item of byId.values()) {
+    if (isItemTombstoned(deletedItemIds, item.id)) continue;
     const key = `${normText(item.title)}|${normText(item.content)}|${normText(item.author)}`;
     const existing = byContent.get(key);
     if (!existing) {
@@ -353,7 +432,7 @@ function mergeAnnouncements(
       byContent.set(key, {
         ...existing,
         likes: Math.max(existing.likes ?? 0, item.likes ?? 0),
-        attachments: mergeAttachments(existing.attachments, item.attachments),
+        attachments: mergeAttachments(existing.attachments, item.attachments, deletedDriveFileIds),
       });
     }
   }
@@ -361,7 +440,12 @@ function mergeAnnouncements(
   return Array.from(byContent.values()).sort((a, b) => ts(b.createdAt) - ts(a.createdAt));
 }
 
-function mergePolls(remoteList: Poll[], localList: Poll[], prefer: 'local' | 'remote'): Poll[] {
+function mergePolls(
+  remoteList: Poll[],
+  localList: Poll[],
+  deletedItemIds: Record<string, string>,
+  prefer: 'local' | 'remote',
+): Poll[] {
   const byId = new Map<string, Poll>();
   const primaryList = prefer === 'local' ? localList : remoteList;
   const secondaryList = prefer === 'local' ? remoteList : localList;
@@ -386,6 +470,7 @@ function mergePolls(remoteList: Poll[], localList: Poll[], prefer: 'local' | 're
   // Deduplicate identical seed polls (preserving primary ID/timestamp & all votes).
   const byContent = new Map<string, Poll>();
   for (const item of byId.values()) {
+    if (isItemTombstoned(deletedItemIds, item.id)) continue;
     const key = `${normText(item.question)}|${normText(item.author)}`;
     const existing = byContent.get(key);
     if (!existing) {
@@ -405,6 +490,8 @@ function mergePolls(remoteList: Poll[], localList: Poll[], prefer: 'local' | 're
 function mergeTasks(
   remoteList: ClassTask[],
   localList: ClassTask[],
+  deletedItemIds: Record<string, string>,
+  deletedDriveFileIds: Record<string, string>,
   prefer: 'local' | 'remote',
 ): ClassTask[] {
   const byId = new Map<string, ClassTask>();
@@ -412,7 +499,12 @@ function mergeTasks(
   const secondaryList = prefer === 'local' ? remoteList : localList;
 
   for (const item of primaryList) {
-    if (item?.id) byId.set(item.id, item);
+    if (item?.id) {
+      byId.set(item.id, {
+        ...item,
+        attachments: filterLiveAttachments(item.attachments, deletedDriveFileIds),
+      });
+    }
   }
   for (const item of secondaryList) {
     if (!item?.id) continue;
@@ -420,13 +512,21 @@ function mergeTasks(
     byId.set(
       item.id,
       primary
-        ? { ...item, ...primary, attachments: mergeAttachments(item.attachments, primary.attachments) }
-        : item,
+        ? {
+            ...item,
+            ...primary,
+            attachments: mergeAttachments(item.attachments, primary.attachments, deletedDriveFileIds),
+          }
+        : {
+            ...item,
+            attachments: filterLiveAttachments(item.attachments, deletedDriveFileIds),
+          },
     );
   }
 
   const byContent = new Map<string, ClassTask>();
   for (const item of byId.values()) {
+    if (isItemTombstoned(deletedItemIds, item.id)) continue;
     const key = `${normText(item.title)}|${normText(item.subject)}|${normText(item.author)}`;
     const existing = byContent.get(key);
     if (!existing) {
@@ -434,7 +534,7 @@ function mergeTasks(
     } else {
       byContent.set(key, {
         ...existing,
-        attachments: mergeAttachments(existing.attachments, item.attachments),
+        attachments: mergeAttachments(existing.attachments, item.attachments, deletedDriveFileIds),
       });
     }
   }
@@ -446,6 +546,7 @@ function mergeKudos(
   remoteList: KudosItem[],
   localList: KudosItem[],
   deletedStudentIds: Record<string, string>,
+  deletedItemIds: Record<string, string>,
   prefer: 'local' | 'remote',
 ): KudosItem[] {
   const byId = new Map<string, KudosItem>();
@@ -468,6 +569,7 @@ function mergeKudos(
 
   const byContent = new Map<string, KudosItem>();
   for (const item of byId.values()) {
+    if (isItemTombstoned(deletedItemIds, item.id)) continue;
     if (isTombstoned(deletedStudentIds, item.toStudentId, item.createdAt)) continue;
     const key = `${item.toStudentId}|${normText(item.fromName)}|${normText(item.message)}`;
     const existing = byContent.get(key);
@@ -489,6 +591,8 @@ function mergeKudos(
 function mergeResources(
   remoteList: ClassResource[],
   localList: ClassResource[],
+  deletedItemIds: Record<string, string>,
+  deletedDriveFileIds: Record<string, string>,
   prefer: 'local' | 'remote',
 ): ClassResource[] {
   const byId = new Map<string, ClassResource>();
@@ -506,6 +610,9 @@ function mergeResources(
 
   const byContent = new Map<string, ClassResource>();
   for (const item of byId.values()) {
+    if (isItemTombstoned(deletedItemIds, item.id)) continue;
+    const urlDriveId = extractDriveFileIdFromUrl(item.url);
+    if (isDriveFileTombstoned(deletedDriveFileIds, urlDriveId)) continue;
     const key = `${normText(item.title)}|${normText(item.url)}`;
     if (!byContent.has(key)) {
       byContent.set(key, item);
@@ -518,6 +625,7 @@ function mergeResources(
 function mergeFeedback(
   remoteList: FeedbackItem[],
   localList: FeedbackItem[],
+  deletedItemIds: Record<string, string>,
   prefer: 'local' | 'remote',
 ): FeedbackItem[] {
   const byId = new Map<string, FeedbackItem>();
@@ -544,6 +652,7 @@ function mergeFeedback(
 
   const byContent = new Map<string, FeedbackItem>();
   for (const item of byId.values()) {
+    if (isItemTombstoned(deletedItemIds, item.id)) continue;
     const key = `${item.authorId}|${normText(item.content)}`;
     const existing = byContent.get(key);
     if (!existing) {
@@ -563,6 +672,7 @@ function mergeFeedback(
 function mergeFundTransactions(
   remoteList: FundTransaction[],
   localList: FundTransaction[],
+  deletedItemIds: Record<string, string>,
   prefer: 'local' | 'remote',
 ): FundTransaction[] {
   const byId = new Map<string, FundTransaction>();
@@ -582,6 +692,7 @@ function mergeFundTransactions(
   // don't duplicate initial seed transactions created via `isoOffset(...)`.
   const byContent = new Map<string, FundTransaction>();
   for (const item of byId.values()) {
+    if (isItemTombstoned(deletedItemIds, item.id)) continue;
     const key = `${normText(item.title)}|${item.kind}|${item.category}|${item.amount}|${normText(item.note)}`;
     if (!byContent.has(key)) {
       byContent.set(key, item);
@@ -665,6 +776,8 @@ export function mergeClassStates(
 
   const deletedStudentIds = mergeTombstones(r.deletedStudentIds, l.deletedStudentIds);
   const deletedTeacherIds = mergeTombstones(r.deletedTeacherIds, l.deletedTeacherIds);
+  const deletedDriveFileIds = mergeTombstones(r.deletedDriveFileIds, l.deletedDriveFileIds);
+  const deletedItemIds = mergeTombstones(r.deletedItemIds, l.deletedItemIds);
 
   const students = mergeStudents(r.students, l.students, deletedStudentIds, prefer);
   const registeredTeachers = mergeRegisteredTeachers(
@@ -673,14 +786,38 @@ export function mergeClassStates(
     deletedTeacherIds,
     prefer,
   );
-  const entries = mergeEntries(r.entries, l.entries, deletedStudentIds, prefer);
-  const announcements = mergeAnnouncements(r.announcements, l.announcements, prefer);
-  const polls = mergePolls(r.polls, l.polls, prefer);
-  const tasks = mergeTasks(r.tasks, l.tasks, prefer);
-  const kudos = mergeKudos(r.kudos, l.kudos, deletedStudentIds, prefer);
-  const resources = mergeResources(r.resources, l.resources, prefer);
-  const feedback = mergeFeedback(r.feedback, l.feedback, prefer);
-  const fundTransactions = mergeFundTransactions(r.fundTransactions, l.fundTransactions, prefer);
+  const entries = mergeEntries(
+    r.entries,
+    l.entries,
+    deletedStudentIds,
+    deletedItemIds,
+    deletedDriveFileIds,
+    prefer,
+  );
+  const announcements = mergeAnnouncements(
+    r.announcements,
+    l.announcements,
+    deletedItemIds,
+    deletedDriveFileIds,
+    prefer,
+  );
+  const polls = mergePolls(r.polls, l.polls, deletedItemIds, prefer);
+  const tasks = mergeTasks(r.tasks, l.tasks, deletedItemIds, deletedDriveFileIds, prefer);
+  const kudos = mergeKudos(r.kudos, l.kudos, deletedStudentIds, deletedItemIds, prefer);
+  const resources = mergeResources(
+    r.resources,
+    l.resources,
+    deletedItemIds,
+    deletedDriveFileIds,
+    prefer,
+  );
+  const feedback = mergeFeedback(r.feedback, l.feedback, deletedItemIds, prefer);
+  const fundTransactions = mergeFundTransactions(
+    r.fundTransactions,
+    l.fundTransactions,
+    deletedItemIds,
+    prefer,
+  );
   const activityLog = mergeActivityLog(r.activityLog, l.activityLog);
   const attendance = mergeAttendance(r.attendance, l.attendance, deletedStudentIds, prefer);
 
@@ -759,6 +896,8 @@ export function mergeClassStates(
     registeredTeachers,
     deletedStudentIds,
     deletedTeacherIds,
+    deletedDriveFileIds,
+    deletedItemIds,
   };
 }
 

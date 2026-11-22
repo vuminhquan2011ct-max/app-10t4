@@ -43,7 +43,7 @@ import {
 } from '@/constants/utilities-meta';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDate, relativeDay } from '@/lib/date';
-import { DRIVE_CONFIG, getLocalPreviewUri } from '@/lib/drive';
+import { DRIVE_CONFIG, extractDriveFileIdFromUrl, getLocalPreviewUri } from '@/lib/drive';
 import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
@@ -67,6 +67,8 @@ export default function AnnouncementsScreen() {
     togglePinAnnouncement,
     likeAnnouncement,
     removeAnnouncement,
+    removeAnnouncementAttachment,
+    deleteUploadedFileEverywhere,
   } = useClassStore();
   const theme = useTheme();
   const { showToast } = useToast();
@@ -99,6 +101,7 @@ export default function AnnouncementsScreen() {
   const [eventDate, setEventDate] = useState<string | null>(null);
   const [pinned, setPinned] = useState(isTeacher);
   const [attachments, setAttachments] = useState<DriveAttachmentItem[]>([]);
+  const [deletingAttachmentIds, setDeletingAttachmentIds] = useState<Record<string, boolean>>({});
   const [likedIds, setLikedIds] = useState<Record<string, boolean>>({});
 
   const subjectAnnCount = useMemo(
@@ -229,6 +232,40 @@ export default function AnnouncementsScreen() {
   const handleAttachmentUploaded = (files: UploadedDriveFile[]) => {
     if (files.length > 0) {
       showToast(`Đã đính kèm ${files.length} tệp lưu trên Drive ${DRIVE_CONFIG.folderName}! ⚡`);
+    }
+  };
+
+  const handleRemoveDraftAttachment = (id: string) => {
+    const target = attachments.find((a) => a.id === id);
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    if (target && !target.pending) {
+      const driveFileId = extractDriveFileIdFromUrl(target.url) || target.id;
+      void deleteUploadedFileEverywhere({
+        driveFileId,
+        fileUrl: target.url,
+        fileName: target.name,
+      }).catch(() => {});
+      showToast('Đã xoá tệp đính kèm khỏi bài soạn, Drive & Excel', 'info');
+    }
+  };
+
+  const handleRemovePublishedAttachment = async (announcementId: string, att: DriveAttachment) => {
+    setDeletingAttachmentIds((prev) => ({ ...prev, [att.id]: true }));
+    try {
+      const driveFileId = extractDriveFileIdFromUrl(att.url) || att.id;
+      await removeAnnouncementAttachment(announcementId, {
+        id: att.id,
+        driveFileId,
+        url: att.url,
+        name: att.name,
+      });
+      showToast('Đã xoá tệp đính kèm khỏi thông báo, Drive & Excel!', 'info');
+    } finally {
+      setDeletingAttachmentIds((prev) => {
+        const next = { ...prev };
+        delete next[att.id];
+        return next;
+      });
     }
   };
 
@@ -590,7 +627,7 @@ export default function AnnouncementsScreen() {
               <DriveAttachmentList
                 attachments={attachments}
                 editable
-                onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+                onRemove={handleRemoveDraftAttachment}
               />
             </View>
             <Pressable
@@ -701,7 +738,18 @@ export default function AnnouncementsScreen() {
                 <Text style={[styles.title, { color: theme.text }]}>{item.title}</Text>
                 <Text style={[styles.body, { color: theme.textSecondary }]}>{item.content}</Text>
                 {item.attachments && item.attachments.length > 0 ? (
-                  <DriveAttachmentList attachments={item.attachments} />
+                  <DriveAttachmentList
+                    attachments={item.attachments}
+                    editable={manageable}
+                    confirmBeforeRemove
+                    deletingIds={deletingAttachmentIds}
+                    onRemove={(attId) => {
+                      const found = item.attachments?.find((a) => a.id === attId);
+                      if (found) {
+                        void handleRemovePublishedAttachment(item.id, found);
+                      }
+                    }}
+                  />
                 ) : null}
 
                 <View style={[styles.footer, { borderColor: theme.border }]}>
@@ -750,7 +798,7 @@ export default function AnnouncementsScreen() {
                         <Pressable
                           onPress={() => {
                             removeAnnouncement(item.id);
-                            showToast('Đã xóa thông báo', 'warning');
+                            showToast('Đã xoá thông báo & tệp đính kèm khỏi App, Drive & Excel', 'warning');
                           }}
                           style={[styles.iconAction, { backgroundColor: theme.dangerSoft }]}>
                           <Ionicons name="trash-outline" size={15} color={theme.danger} />

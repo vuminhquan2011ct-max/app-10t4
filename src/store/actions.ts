@@ -5,6 +5,7 @@
 
 import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { formatDate, todayIso } from '@/lib/date';
+import { extractDriveFileIdFromUrl } from '@/lib/drive';
 import { createId, normalizeName } from '@/lib/utils';
 import type { StudentPrivateData } from '@/types/auth';
 import type {
@@ -14,6 +15,7 @@ import type {
   ClassInfo,
   ClassResource,
   ClassTask,
+  DriveAttachment,
   Entry,
   EntryCategory,
   EntryKind,
@@ -61,6 +63,44 @@ function appendLog(
     createdAt: new Date().toISOString(),
   };
   return [item, ...prev.activityLog].slice(0, 40);
+}
+
+function resolveAttachmentDriveId(att: DriveAttachment): string | null {
+  const fromUrl =
+    extractDriveFileIdFromUrl(att.url) ??
+    extractDriveFileIdFromUrl(att.thumbnailUrl) ??
+    extractDriveFileIdFromUrl(att.downloadUrl);
+  if (fromUrl) return fromUrl;
+  const trimmedId = att.id?.trim() ?? '';
+  if (trimmedId && !/^(att|local|opt|res|ann|tsk|ent)_/i.test(trimmedId)) {
+    return trimmedId;
+  }
+  return null;
+}
+
+function stampDeletedItems(
+  prev: PersistedState,
+  ids: string[],
+  now: string,
+): Record<string, string> {
+  const next = { ...(prev.deletedItemIds ?? {}) };
+  for (const id of ids) {
+    if (id) next[id] = now;
+  }
+  return next;
+}
+
+function stampDeletedDriveFiles(
+  prev: PersistedState,
+  driveIds: (string | null | undefined)[],
+  now: string,
+): Record<string, string> {
+  const next = { ...(prev.deletedDriveFileIds ?? {}) };
+  for (const id of driveIds) {
+    const clean = id?.trim();
+    if (clean) next[clean] = now;
+  }
+  return next;
 }
 
 export function createActions(
@@ -190,7 +230,13 @@ export function createActions(
 
     removeStudent: (id: string) =>
       mutate((prev) => {
+        const now = new Date().toISOString();
         const target = prev.students.find((s) => s.id === id);
+        const removedEntries = prev.entries.filter((e) => e.studentId === id);
+        const removedKudos = prev.kudos.filter((k) => k.toStudentId === id);
+        const removedDriveIds = removedEntries
+          .map((e) => extractDriveFileIdFromUrl(e.proofUrl))
+          .filter((fid): fid is string => Boolean(fid));
         const nextPaid = { ...prev.fundPaid };
         delete nextPaid[id];
         const nextSeats: Record<string, string> = {};
@@ -202,8 +248,17 @@ export function createActions(
           students: prev.students.filter((s) => s.id !== id),
           entries: prev.entries.filter((e) => e.studentId !== id),
           kudos: prev.kudos.filter((k) => k.toStudentId !== id),
+          deletedItemIds: stampDeletedItems(
+            prev,
+            [...removedEntries.map((e) => e.id), ...removedKudos.map((k) => k.id)],
+            now,
+          ),
+          deletedDriveFileIds:
+            removedDriveIds.length > 0
+              ? stampDeletedDriveFiles(prev, removedDriveIds, now)
+              : prev.deletedDriveFileIds,
           fundPaid: nextPaid,
-          seating: { ...prev.seating, seats: nextSeats, updatedAt: new Date().toISOString() },
+          seating: { ...prev.seating, seats: nextSeats, updatedAt: now },
           currentStudentId: prev.currentStudentId === id ? null : prev.currentStudentId,
           activityLog: appendLog(prev, actorName(), `Xoá học sinh ${target?.name ?? ''}`.trim()),
         };
@@ -258,11 +313,45 @@ export function createActions(
       })),
 
     removeEntry: (id: string) =>
-      mutate((prev) => ({
-        ...prev,
-        entries: prev.entries.filter((e) => e.id !== id),
-        activityLog: appendLog(prev, actorName(), 'Xoá một mục thành tích'),
-      })),
+      mutate((prev) => {
+        const now = new Date().toISOString();
+        const target = prev.entries.find((e) => e.id === id);
+        const proofDriveId = extractDriveFileIdFromUrl(target?.proofUrl);
+        return {
+          ...prev,
+          entries: prev.entries.filter((e) => e.id !== id),
+          deletedItemIds: stampDeletedItems(prev, [id], now),
+          deletedDriveFileIds: proofDriveId
+            ? stampDeletedDriveFiles(prev, [proofDriveId], now)
+            : prev.deletedDriveFileIds,
+          activityLog: appendLog(prev, actorName(), 'Xoá một mục thành tích', actorStudentId()),
+        };
+      }),
+
+    clearEntryProof: (entryId: string, driveFileId?: string | null) =>
+      mutate((prev) => {
+        const target = prev.entries.find((e) => e.id === entryId);
+        if (!target) return prev;
+        const now = new Date().toISOString();
+        const resolvedDriveId =
+          driveFileId?.trim() || extractDriveFileIdFromUrl(target.proofUrl);
+        if (!target.proofUrl && !resolvedDriveId) return prev;
+        return {
+          ...prev,
+          entries: prev.entries.map((e) =>
+            e.id === entryId ? { ...e, proofUrl: null, updatedAt: now } : e,
+          ),
+          deletedDriveFileIds: resolvedDriveId
+            ? stampDeletedDriveFiles(prev, [resolvedDriveId], now)
+            : prev.deletedDriveFileIds,
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Xoá tệp minh chứng của "${target.title}"`,
+            actorStudentId(),
+          ),
+        };
+      }),
 
     setEntryStatus: (id: string, status: Entry['status'], reviewNote?: string | null) =>
       mutate((prev) => {
@@ -395,10 +484,75 @@ export function createActions(
       })),
 
     removeAnnouncement: (id: string) =>
-      mutate((prev) => ({
-        ...prev,
-        announcements: prev.announcements.filter((a) => a.id !== id),
-      })),
+      mutate((prev) => {
+        const now = new Date().toISOString();
+        const target = prev.announcements.find((a) => a.id === id);
+        const driveIds = (target?.attachments ?? [])
+          .map(resolveAttachmentDriveId)
+          .filter((fid): fid is string => Boolean(fid));
+        return {
+          ...prev,
+          announcements: prev.announcements.filter((a) => a.id !== id),
+          deletedItemIds: stampDeletedItems(prev, [id], now),
+          deletedDriveFileIds:
+            driveIds.length > 0
+              ? stampDeletedDriveFiles(prev, driveIds, now)
+              : prev.deletedDriveFileIds,
+        };
+      }),
+
+    removeAnnouncementAttachment: (
+      announcementId: string,
+      attachmentIdOrDriveId: string,
+      driveFileId?: string | null,
+    ) =>
+      mutate((prev) => {
+        const target = prev.announcements.find((a) => a.id === announcementId);
+        if (!target) return prev;
+        const now = new Date().toISOString();
+        const targetDriveId = driveFileId?.trim() || null;
+        const existing = target.attachments ?? [];
+        const removedDriveIds: string[] = [];
+        if (targetDriveId) removedDriveIds.push(targetDriveId);
+
+        const nextAttachments = existing.filter((att) => {
+          const attDriveId = resolveAttachmentDriveId(att);
+          const isMatch =
+            att.id === attachmentIdOrDriveId ||
+            (targetDriveId !== null &&
+              (att.id === targetDriveId || attDriveId === targetDriveId));
+          if (isMatch && attDriveId) {
+            removedDriveIds.push(attDriveId);
+          }
+          return !isMatch;
+        });
+
+        if (nextAttachments.length === existing.length && removedDriveIds.length === 0) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          announcements: prev.announcements.map((a) =>
+            a.id === announcementId
+              ? {
+                  ...a,
+                  attachments: nextAttachments.length > 0 ? nextAttachments : undefined,
+                }
+              : a,
+          ),
+          deletedDriveFileIds:
+            removedDriveIds.length > 0
+              ? stampDeletedDriveFiles(prev, removedDriveIds, now)
+              : prev.deletedDriveFileIds,
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Xoá tệp đính kèm khỏi thông báo "${target.title}"`,
+            actorStudentId(),
+          ),
+        };
+      }),
 
     /* ---------- Class Fund ---------- */
 
@@ -429,6 +583,7 @@ export function createActions(
       mutate((prev) => ({
         ...prev,
         fundTransactions: prev.fundTransactions.filter((tx) => tx.id !== id),
+        deletedItemIds: stampDeletedItems(prev, [id], new Date().toISOString()),
       })),
 
     toggleFundPaid: (studentId: string) =>
@@ -522,6 +677,7 @@ export function createActions(
       mutate((prev) => ({
         ...prev,
         polls: prev.polls.filter((p) => p.id !== pollId),
+        deletedItemIds: stampDeletedItems(prev, [pollId], new Date().toISOString()),
       })),
 
     /* ---------- Class Tasks & Deadlines ---------- */
@@ -547,10 +703,75 @@ export function createActions(
       }),
 
     removeTask: (taskId: string) =>
-      mutate((prev) => ({
-        ...prev,
-        tasks: prev.tasks.filter((t) => t.id !== taskId),
-      })),
+      mutate((prev) => {
+        const now = new Date().toISOString();
+        const target = prev.tasks.find((t) => t.id === taskId);
+        const driveIds = (target?.attachments ?? [])
+          .map(resolveAttachmentDriveId)
+          .filter((fid): fid is string => Boolean(fid));
+        return {
+          ...prev,
+          tasks: prev.tasks.filter((t) => t.id !== taskId),
+          deletedItemIds: stampDeletedItems(prev, [taskId], now),
+          deletedDriveFileIds:
+            driveIds.length > 0
+              ? stampDeletedDriveFiles(prev, driveIds, now)
+              : prev.deletedDriveFileIds,
+        };
+      }),
+
+    removeTaskAttachment: (
+      taskId: string,
+      attachmentIdOrDriveId: string,
+      driveFileId?: string | null,
+    ) =>
+      mutate((prev) => {
+        const target = prev.tasks.find((t) => t.id === taskId);
+        if (!target) return prev;
+        const now = new Date().toISOString();
+        const targetDriveId = driveFileId?.trim() || null;
+        const existing = target.attachments ?? [];
+        const removedDriveIds: string[] = [];
+        if (targetDriveId) removedDriveIds.push(targetDriveId);
+
+        const nextAttachments = existing.filter((att) => {
+          const attDriveId = resolveAttachmentDriveId(att);
+          const isMatch =
+            att.id === attachmentIdOrDriveId ||
+            (targetDriveId !== null &&
+              (att.id === targetDriveId || attDriveId === targetDriveId));
+          if (isMatch && attDriveId) {
+            removedDriveIds.push(attDriveId);
+          }
+          return !isMatch;
+        });
+
+        if (nextAttachments.length === existing.length && removedDriveIds.length === 0) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          tasks: prev.tasks.map((t) =>
+            t.id === taskId
+              ? {
+                  ...t,
+                  attachments: nextAttachments.length > 0 ? nextAttachments : undefined,
+                }
+              : t,
+          ),
+          deletedDriveFileIds:
+            removedDriveIds.length > 0
+              ? stampDeletedDriveFiles(prev, removedDriveIds, now)
+              : prev.deletedDriveFileIds,
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Xoá tệp đính kèm khỏi nhiệm vụ "${target.title}"`,
+            actorStudentId(),
+          ),
+        };
+      }),
 
     /* ---------- Private Feedback (Local / Optimistic) ---------- */
 
@@ -582,6 +803,7 @@ export function createActions(
       mutate((prev) => ({
         ...prev,
         feedback: prev.feedback.filter((f) => f.id !== id),
+        deletedItemIds: stampDeletedItems(prev, [id], new Date().toISOString()),
       })),
 
     setFeedbackList: (items: FeedbackItem[]) =>
@@ -627,6 +849,7 @@ export function createActions(
       mutate((prev) => ({
         ...prev,
         kudos: prev.kudos.filter((k) => k.id !== id),
+        deletedItemIds: stampDeletedItems(prev, [id], new Date().toISOString()),
       })),
 
     /* ---------- Study Resources Vault ---------- */
@@ -664,10 +887,112 @@ export function createActions(
       })),
 
     removeResource: (id: string) =>
-      mutate((prev) => ({
-        ...prev,
-        resources: prev.resources.filter((r) => r.id !== id),
-      })),
+      mutate((prev) => {
+        const now = new Date().toISOString();
+        const target = prev.resources.find((r) => r.id === id);
+        const driveId = extractDriveFileIdFromUrl(target?.url);
+        return {
+          ...prev,
+          resources: prev.resources.filter((r) => r.id !== id),
+          deletedItemIds: stampDeletedItems(prev, [id], now),
+          deletedDriveFileIds: driveId
+            ? stampDeletedDriveFiles(prev, [driveId], now)
+            : prev.deletedDriveFileIds,
+        };
+      }),
+
+    /**
+     * Stamps a deleted Drive file ID tombstone (unless `recordTombstone === false`
+     * or already tombstoned) and scrubs every reference across announcements,
+     * tasks, entry proofs, and Drive-linked resources cleanly.
+     */
+    purgeDriveFileReferences: (
+      driveFileId: string,
+      options?: { recordTombstone?: boolean },
+    ) =>
+      mutate((prev) => {
+        const cleanId = driveFileId.trim();
+        if (!cleanId) return prev;
+        const now = new Date().toISOString();
+        const shouldRecordTombstone = options?.recordTombstone !== false;
+        const alreadyTombstoned = Boolean(prev.deletedDriveFileIds?.[cleanId]);
+
+        let announcementsChanged = false;
+        const nextAnnouncements = prev.announcements.map((ann) => {
+          if (!ann.attachments || ann.attachments.length === 0) return ann;
+          const filtered = ann.attachments.filter(
+            (att) => att.id !== cleanId && resolveAttachmentDriveId(att) !== cleanId,
+          );
+          if (filtered.length === ann.attachments.length) return ann;
+          announcementsChanged = true;
+          return {
+            ...ann,
+            attachments: filtered.length > 0 ? filtered : undefined,
+          };
+        });
+
+        let tasksChanged = false;
+        const nextTasks = prev.tasks.map((task) => {
+          if (!task.attachments || task.attachments.length === 0) return task;
+          const filtered = task.attachments.filter(
+            (att) => att.id !== cleanId && resolveAttachmentDriveId(att) !== cleanId,
+          );
+          if (filtered.length === task.attachments.length) return task;
+          tasksChanged = true;
+          return {
+            ...task,
+            attachments: filtered.length > 0 ? filtered : undefined,
+          };
+        });
+
+        let entriesChanged = false;
+        const nextEntries = prev.entries.map((entry) => {
+          if (!entry.proofUrl || extractDriveFileIdFromUrl(entry.proofUrl) !== cleanId) {
+            return entry;
+          }
+          entriesChanged = true;
+          return {
+            ...entry,
+            proofUrl: null,
+            updatedAt: now,
+          };
+        });
+
+        const removedResourceIds: string[] = [];
+        const nextResources = prev.resources.filter((res) => {
+          if (extractDriveFileIdFromUrl(res.url) === cleanId) {
+            removedResourceIds.push(res.id);
+            return false;
+          }
+          return true;
+        });
+        const resourcesChanged = removedResourceIds.length > 0;
+        const needsTombstoneWrite = shouldRecordTombstone && !alreadyTombstoned;
+
+        if (
+          !needsTombstoneWrite &&
+          !announcementsChanged &&
+          !tasksChanged &&
+          !entriesChanged &&
+          !resourcesChanged
+        ) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          announcements: announcementsChanged ? nextAnnouncements : prev.announcements,
+          tasks: tasksChanged ? nextTasks : prev.tasks,
+          entries: entriesChanged ? nextEntries : prev.entries,
+          resources: resourcesChanged ? nextResources : prev.resources,
+          deletedDriveFileIds: needsTombstoneWrite
+            ? stampDeletedDriveFiles(prev, [cleanId], now)
+            : prev.deletedDriveFileIds,
+          deletedItemIds: resourcesChanged
+            ? stampDeletedItems(prev, removedResourceIds, now)
+            : prev.deletedItemIds,
+        };
+      }),
 
     /* ---------- Interactive Seating Chart ---------- */
 

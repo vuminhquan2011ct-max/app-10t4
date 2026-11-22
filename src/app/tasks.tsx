@@ -29,7 +29,7 @@ import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { TASK_PRIORITIES, TASK_PRIORITY_LIST } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { daysSince, formatDate, relativeDay, shiftIsoDate, todayIso } from '@/lib/date';
-import { DRIVE_CONFIG, getLocalPreviewUri } from '@/lib/drive';
+import { DRIVE_CONFIG, extractDriveFileIdFromUrl, getLocalPreviewUri } from '@/lib/drive';
 import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
@@ -49,6 +49,8 @@ export default function TasksScreen() {
     toggleTaskDone,
     addTask,
     removeTask,
+    removeTaskAttachment,
+    deleteUploadedFileEverywhere,
   } = useClassStore();
   const theme = useTheme();
   const gradient = useBrandGradient();
@@ -64,6 +66,7 @@ export default function TasksScreen() {
   const [priority, setPriority] = useState<TaskPriority>('medium');
   const [note, setNote] = useState('');
   const [attachments, setAttachments] = useState<DriveAttachmentItem[]>([]);
+  const [deletingAttachmentIds, setDeletingAttachmentIds] = useState<Record<string, boolean>>({});
 
   const doneCount = useMemo(
     () => tasks.filter((t) => Boolean(doneTaskIds[t.id])).length,
@@ -131,6 +134,40 @@ export default function TasksScreen() {
   const handleTaskFilesUploaded = (files: UploadedDriveFile[]) => {
     if (files.length > 0) {
       showToast(`Đã đính kèm ${files.length} tệp lưu trên Drive ${DRIVE_CONFIG.folderName}! ⚡`);
+    }
+  };
+
+  const handleRemoveDraftAttachment = (id: string) => {
+    const target = attachments.find((a) => a.id === id);
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    if (target && !target.pending) {
+      const driveFileId = extractDriveFileIdFromUrl(target.url) || target.id;
+      void deleteUploadedFileEverywhere({
+        driveFileId,
+        fileUrl: target.url,
+        fileName: target.name,
+      }).catch(() => {});
+      showToast('Đã xoá tệp khỏi bài soạn, Drive & Excel', 'info');
+    }
+  };
+
+  const handleRemovePublishedAttachment = async (taskId: string, att: DriveAttachment) => {
+    setDeletingAttachmentIds((prev) => ({ ...prev, [att.id]: true }));
+    try {
+      const driveFileId = extractDriveFileIdFromUrl(att.url) || att.id;
+      await removeTaskAttachment(taskId, {
+        id: att.id,
+        driveFileId,
+        url: att.url,
+        name: att.name,
+      });
+      showToast('Đã xoá tệp đính kèm khỏi nhiệm vụ, Drive & Excel!', 'info');
+    } finally {
+      setDeletingAttachmentIds((prev) => {
+        const next = { ...prev };
+        delete next[att.id];
+        return next;
+      });
     }
   };
 
@@ -242,7 +279,7 @@ export default function TasksScreen() {
             <DriveAttachmentList
               attachments={attachments}
               editable
-              onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+              onRemove={handleRemoveDraftAttachment}
             />
             <Button label={'Đăng lên bảng nhiệm vụ'} icon={'checkmark-circle'} onPress={handleAdd} />
           </Card>
@@ -327,7 +364,7 @@ export default function TasksScreen() {
                     <Pressable
                       onPress={() => {
                         removeTask(task.id);
-                        showToast('Đã xoá nhiệm vụ', 'warning');
+                        showToast('Đã xoá nhiệm vụ & tệp đính kèm khỏi App, Drive & Excel', 'warning');
                       }}
                       hitSlop={8}>
                       <Ionicons name="trash-outline" size={16} color={theme.textMuted} />
@@ -339,7 +376,18 @@ export default function TasksScreen() {
                   <Text style={[styles.note, { color: theme.textSecondary }]}>{task.note}</Text>
                 ) : null}
                 {task.attachments && task.attachments.length > 0 ? (
-                  <DriveAttachmentList attachments={task.attachments} />
+                  <DriveAttachmentList
+                    attachments={task.attachments}
+                    editable={canEditClass}
+                    confirmBeforeRemove
+                    deletingIds={deletingAttachmentIds}
+                    onRemove={(attId) => {
+                      const found = task.attachments?.find((a) => a.id === attId);
+                      if (found) {
+                        void handleRemovePublishedAttachment(task.id, found);
+                      }
+                    }}
+                  />
                 ) : null}
               </Card>
             </FadeIn>

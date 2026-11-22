@@ -29,6 +29,13 @@ import { Platform } from 'react-native';
 
 import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { currentSchoolWeekday } from '@/lib/date';
+import { extractDriveFileIdFromUrl } from '@/lib/drive';
+import {
+  deleteDriveFileEverywhere,
+  type DeleteDriveMediaResult,
+  type DeleteDriveMediaTarget,
+} from '@/lib/drive-gallery';
+import { getRealtimeClientId, subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import {
   attendanceStatsFor,
   buildCategoryStats,
@@ -124,6 +131,27 @@ import { useRemoteSync, type SyncStatus } from './use-remote-sync';
 const DONE_TASKS_PREFIX = 'class10t4:done-tasks:v2:';
 const SAVED_RESOURCES_PREFIX = 'class10t4:saved-resources:v2:';
 
+function resolveDriveIdFromAttachmentLike(att: {
+  id?: string;
+  driveFileId?: string | null;
+  url?: string | null;
+  thumbnailUrl?: string | null;
+  downloadUrl?: string | null;
+}): string | null {
+  const direct = att.driveFileId?.trim();
+  if (direct) return direct;
+  const fromUrl =
+    extractDriveFileIdFromUrl(att.url) ??
+    extractDriveFileIdFromUrl(att.thumbnailUrl) ??
+    extractDriveFileIdFromUrl(att.downloadUrl);
+  if (fromUrl) return fromUrl;
+  const trimmedId = att.id?.trim() ?? '';
+  if (trimmedId && !/^(att|local|opt|res|ann|tsk|ent)_/i.test(trimmedId)) {
+    return trimmedId;
+  }
+  return null;
+}
+
 export type FundSummary = {
   balance: number;
   totalIncome: number;
@@ -152,8 +180,20 @@ type BaseActions = Omit<
   | 'bulkAddStudentsLocal'
   | 'updateStudent'
   | 'addEntry'
+  | 'updateEntry'
+  | 'removeEntry'
+  | 'clearEntryProof'
   | 'addAnnouncement'
+  | 'removeAnnouncement'
+  | 'removeAnnouncementAttachment'
   | 'addTask'
+  | 'removeTask'
+  | 'removeTaskAttachment'
+  | 'removeResource'
+  | 'removePoll'
+  | 'removeKudos'
+  | 'removeFundTransaction'
+  | 'purgeDriveFileReferences'
   | 'removeStudent'
   | 'clearAll'
   | 'likeAnnouncementLocal'
@@ -249,8 +289,28 @@ export type ClassStore = BaseActions & {
     options?: { group?: string | null; autoDistributeGroups?: boolean; initialPassword?: string },
   ) => Promise<void>;
   addEntry: (input: EntryInput) => Promise<void>;
+  updateEntry: (id: string, patch: Partial<EntryInput>) => void;
+  removeEntry: (id: string) => void;
+  clearEntryProof: (entryId: string) => Promise<void>;
   addAnnouncement: (input: AnnouncementInput) => void;
+  removeAnnouncement: (id: string) => void;
+  removeAnnouncementAttachment: (
+    announcementId: string,
+    attachment: { id: string; driveFileId?: string; url?: string; name?: string },
+  ) => Promise<void>;
   addTask: (input: TaskInput) => void;
+  removeTask: (taskId: string) => void;
+  removeTaskAttachment: (
+    taskId: string,
+    attachment: { id: string; driveFileId?: string; url?: string; name?: string },
+  ) => Promise<void>;
+  removeResource: (id: string) => void;
+  removePoll: (pollId: string) => void;
+  removeKudos: (id: string) => void;
+  removeFundTransaction: (id: string) => void;
+  deleteUploadedFileEverywhere: (
+    target: DeleteDriveMediaTarget,
+  ) => Promise<DeleteDriveMediaResult>;
   removeStudent: (id: string) => void;
   clearAll: () => void;
   saveStudentPrivate: (studentId: string, data: StudentPrivateData) => Promise<void>;
@@ -653,6 +713,20 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     };
   }, [mutate]);
 
+  // Scrub stale Drive file references immediately when another device deletes a photo/file.
+  useEffect(() => {
+    const unsub = subscribeLiveBroadcast((event) => {
+      if (
+        event.type === 'photo-deleted' &&
+        event.driveFileId &&
+        event.senderId !== getRealtimeClientId()
+      ) {
+        actions.purgeDriveFileReferences(event.driveFileId, { recordTombstone: false });
+      }
+    });
+    return unsub;
+  }, [actions]);
+
   // Hydrate personal checklists strictly scoped per authenticated account.
   const doneKey = `${DONE_TASKS_PREFIX}${auth.accountScopeKey}`;
   const savedKey = `${SAVED_RESOURCES_PREFIX}${auth.accountScopeKey}`;
@@ -925,10 +999,255 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [actions, flushCloud],
   );
 
+  const updateEntry = useCallback(
+    (id: string, patch: Partial<EntryInput>) => {
+      const existing = stateRef.current.entries.find((e) => e.id === id);
+      const oldDriveId = extractDriveFileIdFromUrl(existing?.proofUrl);
+      const newDriveId =
+        patch.proofUrl !== undefined ? extractDriveFileIdFromUrl(patch.proofUrl) : oldDriveId;
+      const replacedOldProof =
+        patch.proofUrl !== undefined && Boolean(oldDriveId) && oldDriveId !== newDriveId;
+
+      actions.updateEntry(id, patch);
+      if (replacedOldProof && oldDriveId) {
+        actions.purgeDriveFileReferences(oldDriveId);
+      }
+      flushCloud('update-entry');
+      if (replacedOldProof && oldDriveId) {
+        void deleteDriveFileEverywhere({
+          driveFileId: oldDriveId,
+          fileUrl: existing?.proofUrl ?? null,
+          fileName: existing?.title ?? null,
+        }).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const removeEntry = useCallback(
+    (id: string) => {
+      const target = stateRef.current.entries.find((e) => e.id === id);
+      const driveFileId = extractDriveFileIdFromUrl(target?.proofUrl);
+      actions.removeEntry(id);
+      if (driveFileId) {
+        actions.purgeDriveFileReferences(driveFileId);
+      }
+      flushCloud('remove-entry');
+      if (driveFileId) {
+        void deleteDriveFileEverywhere({
+          driveFileId,
+          fileUrl: target?.proofUrl ?? null,
+          fileName: target?.title ?? null,
+        }).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const clearEntryProof = useCallback(
+    async (entryId: string) => {
+      const target = stateRef.current.entries.find((e) => e.id === entryId);
+      const driveFileId = extractDriveFileIdFromUrl(target?.proofUrl);
+      actions.clearEntryProof(entryId, driveFileId);
+      if (driveFileId) {
+        actions.purgeDriveFileReferences(driveFileId);
+      }
+      flushCloud('clear-entry-proof');
+      if (driveFileId) {
+        await deleteDriveFileEverywhere({
+          driveFileId,
+          fileUrl: target?.proofUrl ?? null,
+          fileName: target?.title ?? null,
+        }).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const removeAnnouncement = useCallback(
+    (id: string) => {
+      const target = stateRef.current.announcements.find((a) => a.id === id);
+      const attachments = target?.attachments ?? [];
+      const driveTargets = attachments
+        .map((att) => ({
+          driveFileId: resolveDriveIdFromAttachmentLike(att),
+          fileUrl: att.url,
+          fileName: att.name,
+        }))
+        .filter((item): item is { driveFileId: string; fileUrl: string; fileName: string } =>
+          Boolean(item.driveFileId),
+        );
+
+      actions.removeAnnouncement(id);
+      for (const item of driveTargets) {
+        actions.purgeDriveFileReferences(item.driveFileId);
+      }
+      flushCloud('remove-announcement');
+      for (const item of driveTargets) {
+        void deleteDriveFileEverywhere(item).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const removeAnnouncementAttachment = useCallback(
+    async (
+      announcementId: string,
+      attachment: { id: string; driveFileId?: string; url?: string; name?: string },
+    ) => {
+      const existingAnn = stateRef.current.announcements.find((a) => a.id === announcementId);
+      const existingAtt = existingAnn?.attachments?.find((a) => a.id === attachment.id);
+      const driveFileId =
+        resolveDriveIdFromAttachmentLike(attachment) ??
+        (existingAtt ? resolveDriveIdFromAttachmentLike(existingAtt) : null);
+      const fileUrl = attachment.url ?? existingAtt?.url ?? null;
+      const fileName = attachment.name ?? existingAtt?.name ?? null;
+
+      actions.removeAnnouncementAttachment(announcementId, attachment.id, driveFileId);
+      if (driveFileId) {
+        actions.purgeDriveFileReferences(driveFileId);
+      }
+      flushCloud('remove-announcement-attachment');
+      if (driveFileId) {
+        await deleteDriveFileEverywhere({
+          driveFileId,
+          fileUrl,
+          fileName,
+        }).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const removeTask = useCallback(
+    (taskId: string) => {
+      const target = stateRef.current.tasks.find((t) => t.id === taskId);
+      const attachments = target?.attachments ?? [];
+      const driveTargets = attachments
+        .map((att) => ({
+          driveFileId: resolveDriveIdFromAttachmentLike(att),
+          fileUrl: att.url,
+          fileName: att.name,
+        }))
+        .filter((item): item is { driveFileId: string; fileUrl: string; fileName: string } =>
+          Boolean(item.driveFileId),
+        );
+
+      actions.removeTask(taskId);
+      for (const item of driveTargets) {
+        actions.purgeDriveFileReferences(item.driveFileId);
+      }
+      flushCloud('remove-task');
+      for (const item of driveTargets) {
+        void deleteDriveFileEverywhere(item).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const removeTaskAttachment = useCallback(
+    async (
+      taskId: string,
+      attachment: { id: string; driveFileId?: string; url?: string; name?: string },
+    ) => {
+      const existingTask = stateRef.current.tasks.find((t) => t.id === taskId);
+      const existingAtt = existingTask?.attachments?.find((a) => a.id === attachment.id);
+      const driveFileId =
+        resolveDriveIdFromAttachmentLike(attachment) ??
+        (existingAtt ? resolveDriveIdFromAttachmentLike(existingAtt) : null);
+      const fileUrl = attachment.url ?? existingAtt?.url ?? null;
+      const fileName = attachment.name ?? existingAtt?.name ?? null;
+
+      actions.removeTaskAttachment(taskId, attachment.id, driveFileId);
+      if (driveFileId) {
+        actions.purgeDriveFileReferences(driveFileId);
+      }
+      flushCloud('remove-task-attachment');
+      if (driveFileId) {
+        await deleteDriveFileEverywhere({
+          driveFileId,
+          fileUrl,
+          fileName,
+        }).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const removeResource = useCallback(
+    (id: string) => {
+      const target = stateRef.current.resources.find((r) => r.id === id);
+      const driveFileId = extractDriveFileIdFromUrl(target?.url);
+      actions.removeResource(id);
+      if (driveFileId) {
+        actions.purgeDriveFileReferences(driveFileId);
+      }
+      flushCloud('remove-resource');
+      if (driveFileId) {
+        void deleteDriveFileEverywhere({
+          driveFileId,
+          fileUrl: target?.url ?? null,
+          fileName: target?.title ?? null,
+        }).catch(() => {});
+      }
+    },
+    [actions, flushCloud],
+  );
+
+  const removePoll = useCallback(
+    (pollId: string) => {
+      actions.removePoll(pollId);
+      flushCloud('remove-poll');
+    },
+    [actions, flushCloud],
+  );
+
+  const removeKudos = useCallback(
+    (id: string) => {
+      actions.removeKudos(id);
+      flushCloud('remove-kudos');
+    },
+    [actions, flushCloud],
+  );
+
+  const removeFundTransaction = useCallback(
+    (id: string) => {
+      actions.removeFundTransaction(id);
+      flushCloud('remove-fund-transaction');
+    },
+    [actions, flushCloud],
+  );
+
+  const deleteUploadedFileEverywhere = useCallback(
+    async (target: DeleteDriveMediaTarget): Promise<DeleteDriveMediaResult> => {
+      const driveFileId =
+        target.driveFileId?.trim() || extractDriveFileIdFromUrl(target.fileUrl) || null;
+      if (driveFileId) {
+        actions.purgeDriveFileReferences(driveFileId);
+        flushCloud('delete-drive-file');
+      }
+      return deleteDriveFileEverywhere({ ...target, driveFileId });
+    },
+    [actions, flushCloud],
+  );
+
   const removeStudent = useCallback(
     (id: string) => {
       const now = new Date().toISOString();
+      const studentProofTargets = stateRef.current.entries
+        .filter((e) => e.studentId === id)
+        .map((e) => ({
+          driveFileId: extractDriveFileIdFromUrl(e.proofUrl),
+          fileUrl: e.proofUrl,
+          fileName: e.title,
+        }))
+        .filter((item): item is { driveFileId: string; fileUrl: string | null; fileName: string } =>
+          Boolean(item.driveFileId),
+        );
       actions.removeStudent(id);
+      for (const item of studentProofTargets) {
+        actions.purgeDriveFileReferences(item.driveFileId);
+      }
       mutate((prev) => ({
         ...prev,
         deletedStudentIds: {
@@ -943,6 +1262,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         void removeRegisteredMemberFromCloud('student', id).catch(() => {});
       }
       flushCloud('remove-student');
+      for (const item of studentProofTargets) {
+        void deleteDriveFileEverywhere(item).catch(() => {});
+      }
       if (isCloudOAuth && isTeacher) {
         deleteStudentPrivateRemote(id).catch(() => {});
       }
@@ -953,18 +1275,48 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const clearAll = useCallback(() => {
     const now = new Date().toISOString();
     const existingIds = stateRef.current.students.map((s) => s.id);
+    const existingEntryIds = stateRef.current.entries.map((e) => e.id);
+    const existingKudosIds = stateRef.current.kudos.map((k) => k.id);
+    const clearedProofTargets = stateRef.current.entries
+      .map((e) => ({
+        driveFileId: extractDriveFileIdFromUrl(e.proofUrl),
+        fileUrl: e.proofUrl,
+        fileName: e.title,
+      }))
+      .filter((item): item is { driveFileId: string; fileUrl: string | null; fileName: string } =>
+        Boolean(item.driveFileId),
+      );
+
     actions.clearAll();
-    if (existingIds.length > 0) {
+    if (
+      existingIds.length > 0 ||
+      existingEntryIds.length > 0 ||
+      existingKudosIds.length > 0 ||
+      clearedProofTargets.length > 0
+    ) {
       mutate((prev) => {
-        const nextDeleted = { ...(prev.deletedStudentIds ?? {}) };
-        for (const sid of existingIds) nextDeleted[sid] = now;
-        return { ...prev, deletedStudentIds: nextDeleted };
+        const nextDeletedStudents = { ...(prev.deletedStudentIds ?? {}) };
+        for (const sid of existingIds) nextDeletedStudents[sid] = now;
+        const nextDeletedItems = { ...(prev.deletedItemIds ?? {}) };
+        for (const eid of existingEntryIds) nextDeletedItems[eid] = now;
+        for (const kid of existingKudosIds) nextDeletedItems[kid] = now;
+        const nextDeletedDrive = { ...(prev.deletedDriveFileIds ?? {}) };
+        for (const item of clearedProofTargets) nextDeletedDrive[item.driveFileId] = now;
+        return {
+          ...prev,
+          deletedStudentIds: nextDeletedStudents,
+          deletedItemIds: nextDeletedItems,
+          deletedDriveFileIds: nextDeletedDrive,
+        };
       });
     }
     clearAllStudentAccounts(existingIds)
       .then(() => auth.refreshStudentAccountCount())
       .catch(() => {});
     flushCloud('clear-all');
+    for (const item of clearedProofTargets) {
+      void deleteDriveFileEverywhere(item).catch(() => {});
+    }
   }, [actions, auth, flushCloud, mutate]);
 
   const saveStudentPrivate = useCallback(
@@ -1404,17 +1756,19 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       bulkAddStudents,
       updateStudent,
       quickReward: actions.quickReward,
-      updateEntry: actions.updateEntry,
-      removeEntry: actions.removeEntry,
+      updateEntry,
+      removeEntry,
+      clearEntryProof,
       setEntryStatus: actions.setEntryStatus,
       approveAllPending: actions.approveAllPending,
       setAttendance: actions.setAttendance,
       markAllPresent: actions.markAllPresent,
       addAnnouncement,
       togglePinAnnouncement: actions.togglePinAnnouncement,
-      removeAnnouncement: actions.removeAnnouncement,
+      removeAnnouncement,
+      removeAnnouncementAttachment,
       addFundTransaction: actions.addFundTransaction,
-      removeFundTransaction: actions.removeFundTransaction,
+      removeFundTransaction,
       toggleFundPaid: actions.toggleFundPaid,
       updateFundCycle: actions.updateFundCycle,
       addScheduleSlot: actions.addScheduleSlot,
@@ -1422,12 +1776,14 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       updateDutyRoster: actions.updateDutyRoster,
       addPoll: actions.addPoll,
       togglePollClosed: actions.togglePollClosed,
-      removePoll: actions.removePoll,
+      removePoll,
       addTask,
-      removeTask: actions.removeTask,
-      removeKudos: actions.removeKudos,
+      removeTask,
+      removeTaskAttachment,
+      removeKudos,
       togglePinResource: actions.togglePinResource,
-      removeResource: actions.removeResource,
+      removeResource,
+      deleteUploadedFileEverywhere,
       setSeat: actions.setSeat,
       swapSeats: actions.swapSeats,
       setSeatingSize: actions.setSeatingSize,
@@ -1519,7 +1875,19 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       bulkAddStudents,
       updateStudent,
       addAnnouncement,
+      removeAnnouncement,
+      removeAnnouncementAttachment,
       addTask,
+      removeTask,
+      removeTaskAttachment,
+      updateEntry,
+      removeEntry,
+      clearEntryProof,
+      removeResource,
+      removePoll,
+      removeKudos,
+      removeFundTransaction,
+      deleteUploadedFileEverywhere,
       clearAll,
       checkLoginIdTaken,
       suggestNextStudentCode,

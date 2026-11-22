@@ -19,8 +19,11 @@ import {
   buildDriveFallbackThumbnailUrl,
   buildDriveThumbnailUrl,
   buildDriveViewUrl,
+  deleteFileFromDrive,
   detectDriveMediaKind,
+  evictLocalPreviewUri,
   extractDriveFileId,
+  extractDriveFileIdFromUrl,
   formatFallbackUploaderName,
   getLocalPreviewUri,
   parseUploaderMetadata,
@@ -156,6 +159,51 @@ let memoryItemsCache: DriveMediaItem[] | null = null;
 let memoryMetaMap: Record<string, LocalFileMeta> | null = null;
 let cachedSchemaMode: ClassPhotosSchemaMode | null = null;
 
+/** Tracks Drive file IDs uploaded during this session so the uploader can always delete them immediately. */
+const sessionUploadedDriveIds = new Set<string>();
+/** Tracks in-flight/recent deletions (15s) so concurrent polls cannot resurrect a just-deleted item. */
+const recentlyDeletedDriveIds = new Map<string, number>();
+const recentlyDeletedRowIds = new Map<string, number>();
+const RECENT_DELETE_TTL_MS = 15_000;
+
+function pruneRecentDeletes(): void {
+  const now = Date.now();
+  for (const [k, ts] of recentlyDeletedDriveIds.entries()) {
+    if (now - ts > RECENT_DELETE_TTL_MS) recentlyDeletedDriveIds.delete(k);
+  }
+  for (const [k, ts] of recentlyDeletedRowIds.entries()) {
+    if (now - ts > RECENT_DELETE_TTL_MS) recentlyDeletedRowIds.delete(k);
+  }
+}
+
+function isRecentlyDeletedItem(item: { id?: string | null; driveFileId?: string | null }): boolean {
+  pruneRecentDeletes();
+  const rowId = item.id?.trim();
+  const drvId = item.driveFileId?.trim();
+  if (rowId && recentlyDeletedRowIds.has(rowId)) return true;
+  if (drvId && recentlyDeletedDriveIds.has(drvId)) return true;
+  return false;
+}
+
+function recordDeletedTargets(rowId?: string | null, driveFileId?: string | null): void {
+  const now = Date.now();
+  const cleanRow = rowId?.trim();
+  const cleanDrive = driveFileId?.trim();
+  if (cleanRow) recentlyDeletedRowIds.set(cleanRow, now);
+  if (cleanDrive) {
+    recentlyDeletedDriveIds.set(cleanDrive, now);
+    sessionUploadedDriveIds.delete(cleanDrive);
+    evictLocalPreviewUri(cleanDrive);
+    void removeLocalMetaEntry(cleanDrive);
+  }
+}
+
+export function isSessionUploadedDriveFile(driveFileId?: string | null): boolean {
+  const clean = driveFileId?.trim();
+  if (!clean) return false;
+  return sessionUploadedDriveIds.has(clean);
+}
+
 type GalleryListener = (items: DriveMediaItem[]) => void;
 const galleryListeners = new Set<GalleryListener>();
 
@@ -231,6 +279,21 @@ async function saveLocalMetaEntries(entries: Record<string, LocalFileMeta>): Pro
     await AsyncStorage.setItem(META_MAP_KEY, JSON.stringify(merged));
   } catch {
     // Ignore storage quota errors
+  }
+}
+
+async function removeLocalMetaEntry(driveFileId: string): Promise<void> {
+  const clean = driveFileId.trim();
+  if (!clean) return;
+  try {
+    const existing = await loadLocalMetaMap();
+    if (!(clean in existing)) return;
+    const next = { ...existing };
+    delete next[clean];
+    memoryMetaMap = next;
+    await AsyncStorage.setItem(META_MAP_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage errors
   }
 }
 
@@ -569,10 +632,15 @@ export async function fetchDriveMediaItems(): Promise<{
       void persistSchemaMode(hasExtended ? 'extended' : 'legacy10');
     }
 
-    const remoteItems = rows.map((r) => normalizeRow(r, metaMap));
+    const remoteItems = rows
+      .map((r) => normalizeRow(r, metaMap))
+      .filter((item) => !isRecentlyDeletedItem(item));
     const remoteFileIds = new Set(remoteItems.map((i) => i.driveFileId).filter(Boolean));
     const localOnlyExtras = cached.filter(
-      (item) => item.localOnly && (!item.driveFileId || !remoteFileIds.has(item.driveFileId)),
+      (item) =>
+        !isRecentlyDeletedItem(item) &&
+        item.localOnly &&
+        (!item.driveFileId || !remoteFileIds.has(item.driveFileId)),
     );
     const merged = [...localOnlyExtras, ...remoteItems].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt),
@@ -621,6 +689,14 @@ export async function saveUploadedFilesToGallery(
 }> {
   if (files.length === 0) {
     return { items: [], savedToCloud: true };
+  }
+
+  for (const f of files) {
+    const cleanId = f.id?.trim();
+    if (cleanId) {
+      sessionUploadedDriveIds.add(cleanId);
+      recentlyDeletedDriveIds.delete(cleanId);
+    }
   }
 
   const cleanName = meta.uploaderName.trim() || 'Thành viên 10T4';
@@ -845,16 +921,108 @@ export async function saveExternalDriveLinkToGallery(params: {
   return saveUploadedFilesToGallery([synthetic], params.meta);
 }
 
-export async function deleteDriveMediaItem(item: DriveMediaItem): Promise<void> {
+export type DeleteDriveMediaTarget = {
+  id?: string;
+  driveFileId?: string | null;
+  fileUrl?: string | null;
+  fileName?: string | null;
+};
+
+export type DeleteDriveMediaResult = {
+  ok: boolean;
+  trashedDrive: boolean;
+  removedSheetRows: number;
+};
+
+function isPersistableDbRowId(id: string): boolean {
+  if (!id) return false;
+  if (/^(local_|tmp_|opt_|drv_|bcast_)/i.test(id)) return false;
+  return (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ||
+    /^\d+$/.test(id)
+  );
+}
+
+/**
+ * Universal deletion pipeline: removes an uploaded photo/file from:
+ * 1. Local memory cache, AsyncStorage cache, meta map & local preview URI cache (instant 0ms UI)
+ * 2. All open browser tabs & devices via Realtime Broadcast (`photo-deleted` with `id` + `driveFileId`)
+ * 3. Supabase `public.class_photos` (by `drive_file_id` AND by row `id`, cleaning duplicates too)
+ * 4. Google Drive (`K8T4_app`) Trash + any connected Google Sheets ("Excel") log rows via Apps Script.
+ */
+export async function deleteDriveFileEverywhere(
+  target: DeleteDriveMediaTarget,
+): Promise<DeleteDriveMediaResult> {
+  const cleanId = target.id?.trim() || '';
+  const driveFileId =
+    target.driveFileId?.trim() ||
+    extractDriveFileIdFromUrl(target.fileUrl) ||
+    (cleanId && !isPersistableDbRowId(cleanId) && extractDriveFileId(cleanId)) ||
+    null;
+
+  if (!cleanId && !driveFileId) {
+    return { ok: false, trashedDrive: false, removedSheetRows: 0 };
+  }
+
+  recordDeletedTargets(cleanId, driveFileId);
+
+  // 1. Instant local cache + in-app subscriber removal (0ms UI update)
   const existing = await getCachedDriveMediaItems();
-  const next = existing.filter((x) => x.id !== item.id && x.driveFileId !== item.driveFileId);
+  const next = existing.filter((x) => {
+    if (cleanId && (x.id === cleanId || x.driveFileId === cleanId)) return false;
+    if (driveFileId && (x.driveFileId === driveFileId || x.id === driveFileId)) return false;
+    return true;
+  });
   await saveCachedItems(next);
 
-  emitLiveBroadcast({ type: 'photo-deleted', id: item.id });
+  // 2. Broadcast cross-tab & cross-device immediately
+  emitLiveBroadcast({
+    type: 'photo-deleted',
+    id: cleanId || driveFileId || '',
+    driveFileId: driveFileId || undefined,
+  });
 
-  if (isSupabaseConfigured && !item.localOnly && !item.pending) {
-    await supabase.from('class_photos').delete().eq('id', item.id);
-  }
+  // 3. Delete in Supabase `class_photos` AND Google Drive + Google Sheets in parallel
+  const supabaseDeleteTask = (async () => {
+    if (!isSupabaseConfigured) return;
+    try {
+      if (driveFileId) {
+        await supabase.from('class_photos').delete().eq('drive_file_id', driveFileId);
+      }
+      if (cleanId && isPersistableDbRowId(cleanId)) {
+        await supabase.from('class_photos').delete().eq('id', cleanId);
+      }
+    } catch {
+      // Non-fatal: cache & broadcast already updated cleanly
+    }
+  })();
+
+  const driveDeleteTask = deleteFileFromDrive({
+    fileId: driveFileId,
+    fileUrl: target.fileUrl,
+    fileName: target.fileName,
+  }).catch(() => ({
+    ok: false,
+    trashedDrive: false,
+    removedSheetRows: 0,
+  }));
+
+  const [, driveRes] = await Promise.all([supabaseDeleteTask, driveDeleteTask]);
+
+  return {
+    ok: true,
+    trashedDrive: Boolean(driveRes.trashedDrive),
+    removedSheetRows: typeof driveRes.removedSheetRows === 'number' ? driveRes.removedSheetRows : 0,
+  };
+}
+
+export async function deleteDriveMediaItem(item: DriveMediaItem): Promise<DeleteDriveMediaResult> {
+  return deleteDriveFileEverywhere({
+    id: item.id,
+    driveFileId: item.driveFileId,
+    fileUrl: item.driveUrl || item.imageUrl,
+    fileName: item.fileName,
+  });
 }
 
 export function computeDriveStorageStats(items: DriveMediaItem[]): {
@@ -915,7 +1083,7 @@ export interface UseDriveGalleryResult {
   linkOptimisticDriveId: (tempId: string, driveFileId: string) => void;
   resolveOptimistic: (tempId: string, savedItem: DriveMediaItem) => void;
   failOptimistic: (tempId: string) => void;
-  removeItem: (item: DriveMediaItem) => Promise<void>;
+  removeItem: (item: DriveMediaItem) => Promise<DeleteDriveMediaResult>;
 }
 
 /**
@@ -997,15 +1165,25 @@ export function useDriveGallery(options: UseDriveGalleryOptions = {}): UseDriveG
         void (async () => {
           const metaMap = await loadLocalMetaMap();
           const normalized = normalizeBroadcastItem(event.item, metaMap);
-          if (!normalized || !mountedRef.current) return;
+          if (!normalized || !mountedRef.current || isRecentlyDeletedItem(normalized)) return;
           const existing = await getCachedDriveMediaItems();
           const merged = mergeItemLists([normalized], existing);
           await saveCachedItems(merged);
         })();
       } else if (event.type === 'photo-deleted') {
         void (async () => {
+          const eventId = event.id?.trim() || '';
+          const eventDriveId = event.driveFileId?.trim() || '';
+          if (!eventId && !eventDriveId) return;
+          recordDeletedTargets(eventId, eventDriveId);
           const existing = await getCachedDriveMediaItems();
-          const next = existing.filter((x) => x.id !== event.id && x.driveFileId !== event.id);
+          const next = existing.filter((x) => {
+            if (eventId && (x.id === eventId || x.driveFileId === eventId)) return false;
+            if (eventDriveId && (x.driveFileId === eventDriveId || x.id === eventDriveId)) {
+              return false;
+            }
+            return true;
+          });
           if (next.length !== existing.length) {
             await saveCachedItems(next);
           }
@@ -1027,6 +1205,7 @@ export function useDriveGallery(options: UseDriveGalleryOptions = {}): UseDriveG
               if (!row) return;
               const metaMap = await loadLocalMetaMap();
               const item = normalizeRow(row, metaMap);
+              if (isRecentlyDeletedItem(item)) return;
               const existing = await getCachedDriveMediaItems();
               const merged = mergeItemLists([item], existing);
               await saveCachedItems(merged);
@@ -1040,9 +1219,15 @@ export function useDriveGallery(options: UseDriveGalleryOptions = {}): UseDriveG
             void (async () => {
               const oldRow = payload.old as RawSupabaseRow | null;
               const deletedId = oldRow?.id ? String(oldRow.id) : '';
-              if (!deletedId) return;
+              const deletedDriveId = oldRow?.drive_file_id?.trim() || '';
+              if (!deletedId && !deletedDriveId) return;
+              recordDeletedTargets(deletedId, deletedDriveId);
               const existing = await getCachedDriveMediaItems();
-              const next = existing.filter((x) => x.id !== deletedId);
+              const next = existing.filter((x) => {
+                if (deletedId && x.id === deletedId) return false;
+                if (deletedDriveId && x.driveFileId === deletedDriveId) return false;
+                return true;
+              });
               if (next.length !== existing.length) {
                 await saveCachedItems(next);
               }
@@ -1158,10 +1343,19 @@ export function useDriveGallery(options: UseDriveGalleryOptions = {}): UseDriveG
     setOptimisticItems((prev) => prev.filter((p) => p.tempId !== tempId && p.id !== tempId));
   }, []);
 
-  const removeItem = useCallback(async (item: DriveMediaItem) => {
-    setOptimisticItems((prev) => prev.filter((x) => x.id !== item.id && x.tempId !== item.tempId));
-    setBaseItems((prev) => prev.filter((x) => x.id !== item.id));
-    await deleteDriveMediaItem(item);
+  const removeItem = useCallback(async (item: DriveMediaItem): Promise<DeleteDriveMediaResult> => {
+    setOptimisticItems((prev) =>
+      prev.filter(
+        (x) =>
+          x.id !== item.id &&
+          x.tempId !== item.tempId &&
+          (!item.driveFileId || x.driveFileId !== item.driveFileId),
+      ),
+    );
+    setBaseItems((prev) =>
+      prev.filter((x) => x.id !== item.id && (!item.driveFileId || x.driveFileId !== item.driveFileId)),
+    );
+    return deleteDriveMediaItem(item);
   }, []);
 
   const items = useMemo(() => {

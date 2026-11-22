@@ -22,13 +22,13 @@ export type LiveBroadcastEvent =
       senderId: string;
     }
   | { type: 'photo-added'; item: Record<string, unknown>; senderId: string }
-  | { type: 'photo-deleted'; id: string; senderId: string };
+  | { type: 'photo-deleted'; id: string; driveFileId?: string; senderId: string };
 
 export type LiveBroadcastPayload =
   | { type: 'state-updated'; updatedAt: string; reason?: string }
   | { type: 'member-registered'; kind: 'student' | 'teacher'; id: string; name: string }
   | { type: 'photo-added'; item: Record<string, unknown> }
-  | { type: 'photo-deleted'; id: string };
+  | { type: 'photo-deleted'; id: string; driveFileId?: string };
 
 type LiveBroadcastListener = (event: LiveBroadcastEvent) => void;
 
@@ -72,7 +72,10 @@ function isValidLiveEvent(value: unknown): value is LiveBroadcastEvent {
     case 'photo-added':
       return Boolean(candidate.item) && typeof candidate.item === 'object';
     case 'photo-deleted':
-      return typeof candidate.id === 'string';
+      return (
+        typeof candidate.id === 'string' &&
+        (candidate.driveFileId === undefined || typeof candidate.driveFileId === 'string')
+      );
     default:
       return false;
   }

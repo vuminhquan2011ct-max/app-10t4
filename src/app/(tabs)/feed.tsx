@@ -2,8 +2,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Linking,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -115,6 +123,7 @@ export default function FeedScreen() {
     currentStudentId,
     getStudent,
     setEntryStatus,
+    clearEntryProof,
     approveAllPending,
     pullNow,
   } = useClassStore();
@@ -124,6 +133,18 @@ export default function FeedScreen() {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [catFilter, setCatFilter] = useState<CatFilter>('all');
+  const [confirmProofEntryId, setConfirmProofEntryId] = useState<string | null>(null);
+  const [deletingProofEntryId, setDeletingProofEntryId] = useState<string | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current);
+        confirmTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const counts = useMemo(() => {
     const result: Record<Filter, number> = {
@@ -159,6 +180,32 @@ export default function FeedScreen() {
   const openProof = (url: string) => {
     const target = /^https?:\/\//i.test(url) ? url : `https://${url}`;
     Linking.openURL(target).catch(() => showToast('Không thể mở liên kết minh chứng', 'warning'));
+  };
+
+  const handleRemoveEntryProof = async (entryId: string) => {
+    if (deletingProofEntryId) return;
+    if (confirmProofEntryId !== entryId) {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      setConfirmProofEntryId(entryId);
+      confirmTimerRef.current = setTimeout(() => {
+        confirmTimerRef.current = null;
+        setConfirmProofEntryId(null);
+      }, 3_500);
+      showToast('Bấm lại lần nữa để xoá tệp minh chứng khỏi bài, Drive & Excel', 'warning');
+      return;
+    }
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
+    }
+    setConfirmProofEntryId(null);
+    setDeletingProofEntryId(entryId);
+    try {
+      await clearEntryProof(entryId);
+      showToast('Đã xoá tệp minh chứng khỏi bài đăng, Drive & Excel!', 'info');
+    } finally {
+      setDeletingProofEntryId(null);
+    }
   };
 
   return (
@@ -459,24 +506,77 @@ export default function FeedScreen() {
                     soft={'accentSoft'}
                   />
                   {entry.proofUrl ? (
-                    <Pressable
-                      onPress={() => openProof(entry.proofUrl!)}
-                      style={[
-                        styles.proofChip,
-                        {
-                          backgroundColor: theme.accentSoft,
-                          borderColor: theme.accent,
-                        },
-                      ]}>
-                      <Ionicons
-                        name={isGoogleDriveUrl(entry.proofUrl) ? 'cloud-done-outline' : 'link'}
-                        size={12}
-                        color={theme.accentText}
-                      />
-                      <Text style={[styles.proofText, { color: theme.accentText }]}>
-                        {isGoogleDriveUrl(entry.proofUrl) ? 'Minh chứng Drive' : 'Minh chứng'}
-                      </Text>
-                    </Pressable>
+                    <>
+                      <Pressable
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          openProof(entry.proofUrl!);
+                        }}
+                        style={[
+                          styles.proofChip,
+                          {
+                            backgroundColor: theme.accentSoft,
+                            borderColor: theme.accent,
+                          },
+                        ]}>
+                        <Ionicons
+                          name={isGoogleDriveUrl(entry.proofUrl) ? 'cloud-done-outline' : 'link'}
+                          size={12}
+                          color={theme.accentText}
+                        />
+                        <Text style={[styles.proofText, { color: theme.accentText }]}>
+                          {isGoogleDriveUrl(entry.proofUrl) ? 'Minh chứng Drive' : 'Minh chứng'}
+                        </Text>
+                      </Pressable>
+
+                      {canEditClass ||
+                      (Boolean(currentStudentId) &&
+                        entry.studentId === currentStudentId &&
+                        entry.status === 'pending') ? (
+                        <Pressable
+                          disabled={deletingProofEntryId === entry.id}
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            void handleRemoveEntryProof(entry.id);
+                          }}
+                          hitSlop={6}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            confirmProofEntryId === entry.id
+                              ? 'Xác nhận xoá tệp minh chứng'
+                              : 'Xoá tệp minh chứng'
+                          }
+                          style={[
+                            styles.proofChip,
+                            {
+                              backgroundColor:
+                                confirmProofEntryId === entry.id ? theme.danger : theme.dangerSoft,
+                              borderColor: theme.danger,
+                            },
+                          ]}>
+                          {deletingProofEntryId === entry.id ? (
+                            <ActivityIndicator size="small" color={theme.danger} />
+                          ) : (
+                            <Ionicons
+                              name={confirmProofEntryId === entry.id ? 'trash' : 'trash-outline'}
+                              size={12}
+                              color={confirmProofEntryId === entry.id ? '#FFFFFF' : theme.danger}
+                            />
+                          )}
+                          <Text
+                            style={[
+                              styles.proofText,
+                              { color: confirmProofEntryId === entry.id ? '#FFFFFF' : theme.danger },
+                            ]}>
+                            {deletingProofEntryId === entry.id
+                              ? 'Đang xoá...'
+                              : confirmProofEntryId === entry.id
+                                ? 'Xác nhận xoá?'
+                                : 'Xoá tệp'}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                    </>
                   ) : null}
                 </View>
 

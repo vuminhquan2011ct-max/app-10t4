@@ -441,7 +441,10 @@ export default function StudentDetailScreen() {
             key={entry.id}
             entry={entry}
             onPress={
-              canEditClass
+              canEditClass ||
+              (currentStudentId !== null &&
+                entry.studentId === currentStudentId &&
+                entry.status === 'pending')
                 ? () =>
                     router.push({ pathname: '/entry-form', params: { id: entry.id } } as never)
                 : undefined

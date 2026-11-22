@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useCallback, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import {
   ActivityIndicator,
   Linking,
@@ -34,6 +34,7 @@ import {
 } from '@/lib/drive';
 import {
   buildOptimisticDriveMediaItem,
+  isSessionUploadedDriveFile,
   saveUploadedFilesToGallery,
   useDriveGallery,
   type DriveMediaCategory,
@@ -42,6 +43,8 @@ import {
 } from '@/lib/drive-gallery';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
+
+const CONFIRM_RESET_MS = 3_500;
 
 function formatShortTime(iso: string): string {
   const ts = Date.parse(iso);
@@ -66,17 +69,29 @@ function categoryForKind(kind: 'image' | 'photo' | 'video' | 'document'): DriveM
   return 'lecture';
 }
 
+function normalizeOwnerName(name?: string | null): string {
+  return (name ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 /**
  * Prominent Photo & File Upload Hub mounted exclusively on the Overview (Tổng quan) tab.
  *
- * Replaces the old 5 historical photos showcase with direct 1-tap buttons to upload
- * photos, videos, PDFs, Word/PowerPoint/ZIP documents to Google Drive `K8T4_app`
- * with <50ms optimistic previews, parallel compression, and live Realtime updates.
+ * Direct 1-tap buttons to upload photos, videos, PDFs, Word/PowerPoint/ZIP documents
+ * to Google Drive `K8T4_app` with <50ms optimistic previews, parallel compression,
+ * live Realtime updates, and 2-tap universal deletion (App + Drive + Excel/Sheets).
  */
 export function LiveRecentPhotosStrip(): ReactElement | null {
   const auth = useAuth();
-  const { classInfo, memberRole, isTeacher, isSubjectTeacher, subjectName, currentStudent } =
-    useClassStore();
+  const {
+    classInfo,
+    memberRole,
+    isTeacher,
+    isSubjectTeacher,
+    canEditClass,
+    subjectName,
+    currentStudent,
+    deleteUploadedFileEverywhere,
+  } = useClassStore();
   const theme = useTheme();
   const isDark = useIsDark();
   const gradient = useBrandGradient();
@@ -92,7 +107,19 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
   } = useDriveGallery();
 
   const [previewItem, setPreviewItem] = useState<DriveMediaItem | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const metaSnapshotsRef = useRef<Map<string, SaveDriveMediaMeta>>(new Map());
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current);
+        confirmTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const uploaderName = useMemo(() => {
     const profileName = auth.profile?.displayName?.trim();
@@ -109,6 +136,61 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
     subjectName,
     currentStudent?.name,
   ]);
+
+  const canDeleteItem = useCallback(
+    (item: DriveMediaItem): boolean => {
+      if (item.pending) return false;
+      if (canEditClass) return true;
+      if (isSessionUploadedDriveFile(item.driveFileId)) return true;
+      const myNorm = normalizeOwnerName(uploaderName);
+      if (myNorm && normalizeOwnerName(item.uploaderName) === myNorm) return true;
+      return false;
+    },
+    [canEditClass, uploaderName],
+  );
+
+  const handleDeleteItem = useCallback(
+    async (item: DriveMediaItem) => {
+      if (deletingId) return;
+      if (confirmDeleteId !== item.id) {
+        if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+        setConfirmDeleteId(item.id);
+        confirmTimerRef.current = setTimeout(() => {
+          confirmTimerRef.current = null;
+          setConfirmDeleteId(null);
+        }, CONFIRM_RESET_MS);
+        showToast('Bấm lại lần nữa để xoá khỏi App, Drive & Excel', 'warning');
+        return;
+      }
+
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current);
+        confirmTimerRef.current = null;
+      }
+      setConfirmDeleteId(null);
+      setDeletingId(item.id);
+      try {
+        const res = await deleteUploadedFileEverywhere({
+          id: item.id,
+          driveFileId: item.driveFileId,
+          fileUrl: item.driveUrl || item.imageUrl,
+          fileName: item.fileName,
+        });
+        if (previewItem?.id === item.id) {
+          setPreviewItem(null);
+        }
+        showToast(
+          res.trashedDrive || res.removedSheetRows > 0
+            ? 'Đã xoá tệp khỏi App, Google Drive & Excel!'
+            : 'Đã xoá tệp khỏi App & đồng bộ toàn lớp!',
+          'info',
+        );
+      } finally {
+        setDeletingId(null);
+      }
+    },
+    [confirmDeleteId, deletingId, deleteUploadedFileEverywhere, previewItem?.id, showToast],
+  );
 
   const recentItems = useMemo(() => items.slice(0, 12), [items]);
 
@@ -327,39 +409,68 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
           contentContainerStyle={styles.strip}>
           {recentItems.map((item) => {
             const fresh = !item.pending && isVeryRecent(item.createdAt);
+            const deletable = canDeleteItem(item);
+            const isConfirming = confirmDeleteId === item.id;
+            const isDeleting = deletingId === item.id;
 
             if (item.itemType === 'photo') {
               return (
-                <Pressable
+                <View
                   key={item.id}
-                  disabled={Boolean(item.pending)}
-                  onPress={() => setPreviewItem(item)}
-                  style={({ pressed }) => [
+                  style={[
                     styles.thumbCard,
                     { backgroundColor: theme.backgroundElement, borderColor: theme.border },
-                    pressed && styles.pressed,
                   ]}>
-                  <DriveImage
-                    driveFileId={item.driveFileId}
-                    primaryUri={item.imageUrl}
-                    localUri={item.localPreviewUri}
-                    width={480}
-                    contentFit="cover"
-                    style={styles.thumbImg}
-                  />
+                  <Pressable
+                    disabled={Boolean(item.pending) || isDeleting}
+                    onPress={() => setPreviewItem(item)}
+                    style={({ pressed }) => [StyleSheet.absoluteFill, pressed && styles.pressed]}>
+                    <DriveImage
+                      driveFileId={item.driveFileId}
+                      primaryUri={item.imageUrl}
+                      localUri={item.localPreviewUri}
+                      width={480}
+                      contentFit="cover"
+                      style={styles.thumbImg}
+                    />
+                  </Pressable>
 
                   {item.pending ? (
-                    <View style={styles.pendingPill}>
+                    <View pointerEvents="none" style={styles.pendingPill}>
                       <ActivityIndicator size="small" color="#FFFFFF" />
                       <Text style={styles.pendingText}>Đang tải...</Text>
                     </View>
                   ) : fresh ? (
-                    <View style={styles.newPill}>
+                    <View pointerEvents="none" style={styles.newPill}>
                       <Text style={styles.newPillText}>MỚI</Text>
                     </View>
                   ) : null}
 
-                  <View style={styles.thumbScrim}>
+                  {deletable ? (
+                    <Pressable
+                      disabled={isDeleting}
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        void handleDeleteItem(item);
+                      }}
+                      hitSlop={6}
+                      accessibilityRole="button"
+                      accessibilityLabel={isConfirming ? `Xác nhận xoá ${item.fileName}` : `Xoá ${item.fileName}`}
+                      style={({ pressed }) => [
+                        isConfirming ? styles.tileDeleteConfirm : styles.tileDeleteBtn,
+                        pressed && styles.pressed,
+                      ]}>
+                      {isDeleting ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : isConfirming ? (
+                        <Text style={styles.tileDeleteConfirmText}>Xoá?</Text>
+                      ) : (
+                        <Ionicons name="trash-outline" size={12} color="#FFFFFF" />
+                      )}
+                    </Pressable>
+                  ) : null}
+
+                  <View pointerEvents="none" style={styles.thumbScrim}>
                     <Text style={styles.thumbAuthor} numberOfLines={1}>
                       {item.uploaderName}
                     </Text>
@@ -367,7 +478,7 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
                       {item.pending ? 'Đang đồng bộ' : formatShortTime(item.createdAt)}
                     </Text>
                   </View>
-                </Pressable>
+                </View>
               );
             }
 
@@ -380,57 +491,88 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
               | 'purpleSoft';
 
             return (
-              <Pressable
+              <View
                 key={item.id}
-                disabled={Boolean(item.pending)}
-                onPress={() => openLink(item.driveUrl)}
-                style={({ pressed }) => [
+                style={[
                   styles.fileCard,
                   { backgroundColor: theme.backgroundElement, borderColor: theme.border },
-                  pressed && styles.pressed,
                 ]}>
                 <View style={styles.fileCardTop}>
-                  <View style={[styles.fileIconBox, { backgroundColor: theme[fileSoftKey] }]}>
+                  <Pressable
+                    disabled={Boolean(item.pending) || isDeleting}
+                    onPress={() => openLink(item.driveUrl)}
+                    style={[styles.fileIconBox, { backgroundColor: theme[fileSoftKey] }]}>
                     {item.pending ? (
                       <ActivityIndicator size="small" color={theme[fileVisual.tone]} />
                     ) : (
                       <Ionicons name={fileVisual.icon} size={20} color={theme[fileVisual.tone]} />
                     )}
+                  </Pressable>
+                  <View style={styles.fileCardTopRight}>
+                    {item.pending ? (
+                      <View style={[styles.fileBadge, { backgroundColor: theme.accentSoft }]}>
+                        <Text style={[styles.fileBadgeText, { color: theme.accentText }]}>
+                          Đang tải
+                        </Text>
+                      </View>
+                    ) : deletable ? (
+                      <Pressable
+                        disabled={isDeleting}
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          void handleDeleteItem(item);
+                        }}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={isConfirming ? `Xác nhận xoá ${item.fileName}` : `Xoá ${item.fileName}`}
+                        style={({ pressed }) => [
+                          isConfirming
+                            ? [styles.fileDeleteConfirm, { backgroundColor: theme.danger }]
+                            : [styles.fileDeleteBtn, { backgroundColor: theme.dangerSoft }],
+                          pressed && styles.pressed,
+                        ]}>
+                        {isDeleting ? (
+                          <ActivityIndicator size="small" color={isConfirming ? '#FFFFFF' : theme.danger} />
+                        ) : isConfirming ? (
+                          <Text style={styles.tileDeleteConfirmText}>Xoá?</Text>
+                        ) : (
+                          <Ionicons name="trash-outline" size={13} color={theme.danger} />
+                        )}
+                      </Pressable>
+                    ) : fresh ? (
+                      <View style={styles.newPillInline}>
+                        <Text style={styles.newPillText}>MỚI</Text>
+                      </View>
+                    ) : (
+                      <View style={[styles.fileBadge, { backgroundColor: theme[fileSoftKey] }]}>
+                        <Text style={[styles.fileBadgeText, { color: theme[fileVisual.tone] }]}>
+                          {fileVisual.badge}
+                        </Text>
+                      </View>
+                    )}
                   </View>
-                  {item.pending ? (
-                    <View style={[styles.fileBadge, { backgroundColor: theme.accentSoft }]}>
-                      <Text style={[styles.fileBadgeText, { color: theme.accentText }]}>
-                        Đang tải
-                      </Text>
-                    </View>
-                  ) : fresh ? (
-                    <View style={styles.newPillInline}>
-                      <Text style={styles.newPillText}>MỚI</Text>
-                    </View>
-                  ) : (
-                    <View style={[styles.fileBadge, { backgroundColor: theme[fileSoftKey] }]}>
-                      <Text style={[styles.fileBadgeText, { color: theme[fileVisual.tone] }]}>
-                        {fileVisual.badge}
-                      </Text>
-                    </View>
-                  )}
                 </View>
 
-                <Text style={[styles.fileCardName, { color: theme.text }]} numberOfLines={2}>
-                  {item.fileName}
-                </Text>
+                <Pressable
+                  disabled={Boolean(item.pending) || isDeleting}
+                  onPress={() => openLink(item.driveUrl)}
+                  style={({ pressed }) => [styles.fileCardBody, pressed && styles.pressed]}>
+                  <Text style={[styles.fileCardName, { color: theme.text }]} numberOfLines={2}>
+                    {item.fileName}
+                  </Text>
 
-                <Text style={[styles.fileCardMeta, { color: theme.textMuted }]} numberOfLines={1}>
-                  {item.pending
-                    ? 'Đang đồng bộ...'
-                    : [
-                        item.uploaderName,
-                        item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : formatShortTime(item.createdAt),
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')}
-                </Text>
-              </Pressable>
+                  <Text style={[styles.fileCardMeta, { color: theme.textMuted }]} numberOfLines={1}>
+                    {item.pending
+                      ? 'Đang đồng bộ...'
+                      : [
+                          item.uploaderName,
+                          item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : formatShortTime(item.createdAt),
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                  </Text>
+                </Pressable>
+              </View>
             );
           })}
 
@@ -477,6 +619,8 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
                 />
                 <Pressable
                   onPress={() => setPreviewItem(null)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Đóng xem trước"
                   style={[styles.closeCircle, { backgroundColor: theme.backgroundElement }]}>
                   <Ionicons name="close" size={18} color={theme.text} />
                 </Pressable>
@@ -493,14 +637,14 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
 
               <View style={styles.modalActions}>
                 <Button
-                  label={'Mở trên Drive'}
+                  label={'Mở Drive'}
                   icon={'open-outline'}
                   size={'sm'}
                   style={styles.flex}
                   onPress={() => openLink(previewItem.driveUrl)}
                 />
                 <Button
-                  label={'Vào Kho lớp'}
+                  label={'Kho lớp'}
                   variant={'soft'}
                   icon={'folder-open-outline'}
                   size={'sm'}
@@ -509,6 +653,22 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
                     router.push('/gallery' as never);
                   }}
                 />
+                {canDeleteItem(previewItem) ? (
+                  <Button
+                    label={
+                      deletingId === previewItem.id
+                        ? 'Đang xoá...'
+                        : confirmDeleteId === previewItem.id
+                          ? 'Xác nhận xoá?'
+                          : 'Xoá'
+                    }
+                    variant={'danger'}
+                    icon={'trash-outline'}
+                    size={'sm'}
+                    disabled={deletingId === previewItem.id}
+                    onPress={() => void handleDeleteItem(previewItem)}
+                  />
+                ) : null}
               </View>
             </View>
           ) : null}
@@ -708,6 +868,37 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.4,
   },
+  tileDeleteBtn: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(220, 38, 38, 0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tileDeleteConfirm: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: Radius.pill,
+    backgroundColor: '#DC2626',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tileDeleteConfirmText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+  },
   thumbScrim: {
     position: 'absolute',
     left: 0,
@@ -742,10 +933,34 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 6,
   },
+  fileCardTopRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  fileCardBody: {
+    flex: 1,
+    justifyContent: 'space-between',
+    gap: 4,
+  },
   fileIconBox: {
     width: 36,
     height: 36,
     borderRadius: Radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fileDeleteBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fileDeleteConfirm: {
+    paddingHorizontal: 8,
+    height: 24,
+    borderRadius: Radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -803,7 +1018,7 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   modalTitle: {
-    fontSize: 15.5,
+    fontSize: 16,
     fontWeight: '900',
   },
   closeCircle: {
@@ -823,5 +1038,5 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: Spacing.two,
   },
-  pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
+  pressed: { opacity: 0.85, transform: [{ scale: 0.985 }] },
 });

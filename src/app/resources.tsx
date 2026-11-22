@@ -5,7 +5,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { PageHeader } from '@/components/page-header';
@@ -35,14 +35,19 @@ import {
   RESOURCE_TYPE_LIST,
 } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
-import { DRIVE_CONFIG, formatBytes, getLocalPreviewUri } from '@/lib/drive';
+import {
+  DRIVE_CONFIG,
+  extractDriveFileIdFromUrl,
+  formatBytes,
+  getLocalPreviewUri,
+} from '@/lib/drive';
 import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
 import { shareOrCopyText } from '@/lib/export';
 import { stripVietnamese } from '@/lib/intelligence';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
-import type { ResourceType } from '@/types/models';
+import type { ClassResource, ResourceType } from '@/types/models';
 
 function inferResourceType(file: UploadedDriveFile): ResourceType {
   if (file.kind === 'video') return 'video';
@@ -63,12 +68,14 @@ export default function ResourcesScreen() {
     isTeacher,
     isSubjectTeacher,
     subjectName,
+    currentStudentId,
     currentStudent,
     canEditClass,
     toggleResourceSaved,
     addResource,
     togglePinResource,
     removeResource,
+    deleteUploadedFileEverywhere,
     pullNow,
   } = useClassStore();
   const theme = useTheme();
@@ -89,6 +96,17 @@ export default function ResourcesScreen() {
   const [description, setDescription] = useState('');
   const [pinned, setPinned] = useState(false);
   const [uploadedPreview, setUploadedPreview] = useState<DriveAttachmentItem | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current);
+        confirmTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const savedCount = useMemo(
     () => resources.filter((r) => Boolean(savedResourceIds[r.id])).length,
@@ -189,6 +207,50 @@ export default function ResourcesScreen() {
 
   const handleDriveItemFailed = (tempId: string) => {
     setUploadedPreview((prev) => (prev && prev.id === tempId && prev.pending ? null : prev));
+  };
+
+  const handleRemoveDraftUpload = () => {
+    const target = uploadedPreview;
+    setUploadedPreview(null);
+    setUrl('');
+    if (target && !target.pending) {
+      const driveFileId = extractDriveFileIdFromUrl(target.url) || target.id;
+      void deleteUploadedFileEverywhere({
+        driveFileId,
+        fileUrl: target.url,
+        fileName: target.name,
+      }).catch(() => {});
+      showToast('Đã xoá tệp khỏi bài soạn, Drive & Excel', 'info');
+    }
+  };
+
+  const canDeleteResource = (item: ClassResource): boolean => {
+    if (canEditClass) return true;
+    if (currentStudentId && item.ownerStudentId && item.ownerStudentId === currentStudentId) {
+      return true;
+    }
+    const myNorm = uploaderDisplayName.trim().toLowerCase();
+    return Boolean(myNorm) && item.author.trim().toLowerCase() === myNorm;
+  };
+
+  const handleDeleteResource = (item: ClassResource) => {
+    if (confirmDeleteId !== item.id) {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      setConfirmDeleteId(item.id);
+      confirmTimerRef.current = setTimeout(() => {
+        confirmTimerRef.current = null;
+        setConfirmDeleteId(null);
+      }, 3_500);
+      showToast('Bấm lại lần nữa để xoá tài liệu khỏi App, Drive & Excel', 'warning');
+      return;
+    }
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
+    }
+    setConfirmDeleteId(null);
+    removeResource(item.id);
+    showToast('Đã xoá tài liệu khỏi Kho lớp, Drive & Excel!', 'warning');
   };
 
   const handlePublish = async () => {
@@ -320,10 +382,7 @@ export default function ResourcesScreen() {
               <DriveAttachmentList
                 attachments={[uploadedPreview]}
                 editable
-                onRemove={() => {
-                  setUploadedPreview(null);
-                  setUrl('');
-                }}
+                onRemove={handleRemoveDraftUpload}
               />
             ) : null}
             <TextField
@@ -466,25 +525,39 @@ export default function ResourcesScreen() {
                       </Text>
                     </Pressable>
                     {canEditClass ? (
-                      <>
-                        <Pressable
-                          onPress={() => togglePinResource(item.id)}
-                          style={[styles.miniBtn, { backgroundColor: theme.backgroundElement }]}>
-                          <Ionicons
-                            name={item.pinned ? 'pin' : 'pin-outline'}
-                            size={14}
-                            color={item.pinned ? theme.accent : theme.textSecondary}
-                          />
-                        </Pressable>
-                        <Pressable
-                          onPress={() => {
-                            removeResource(item.id);
-                            showToast('Đã xoá tài liệu', 'warning');
-                          }}
-                          style={[styles.miniBtn, { backgroundColor: theme.dangerSoft }]}>
-                          <Ionicons name="trash-outline" size={14} color={theme.danger} />
-                        </Pressable>
-                      </>
+                      <Pressable
+                        onPress={() => togglePinResource(item.id)}
+                        style={[styles.miniBtn, { backgroundColor: theme.backgroundElement }]}>
+                        <Ionicons
+                          name={item.pinned ? 'pin' : 'pin-outline'}
+                          size={14}
+                          color={item.pinned ? theme.accent : theme.textSecondary}
+                        />
+                      </Pressable>
+                    ) : null}
+                    {canDeleteResource(item) ? (
+                      <Pressable
+                        onPress={() => handleDeleteResource(item)}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          confirmDeleteId === item.id
+                            ? `Xác nhận xoá ${item.title}`
+                            : `Xoá ${item.title}`
+                        }
+                        style={[
+                          confirmDeleteId === item.id
+                            ? [styles.confirmDeleteBtn, { backgroundColor: theme.danger }]
+                            : [styles.miniBtn, { backgroundColor: theme.dangerSoft }],
+                        ]}>
+                        <Ionicons
+                          name={confirmDeleteId === item.id ? 'trash' : 'trash-outline'}
+                          size={14}
+                          color={confirmDeleteId === item.id ? '#FFFFFF' : theme.danger}
+                        />
+                        {confirmDeleteId === item.id ? (
+                          <Text style={styles.confirmDeleteText}>Xoá?</Text>
+                        ) : null}
+                      </Pressable>
                     ) : null}
                   </View>
                 </View>
@@ -573,6 +646,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  confirmDeleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    height: 32,
+    borderRadius: Radius.pill,
+  },
+  confirmDeleteText: { color: '#FFFFFF', fontSize: 11.5, fontWeight: '900' },
   openBtn: {
     flexDirection: 'row',
     alignItems: 'center',

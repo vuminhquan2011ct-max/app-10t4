@@ -69,6 +69,8 @@ export function freshState(): PersistedState {
     registeredTeachers: [],
     deletedStudentIds: {},
     deletedTeacherIds: {},
+    deletedDriveFileIds: {},
+    deletedItemIds: {},
   };
 }
 
@@ -196,6 +198,8 @@ export function hydrateState(parsed: Partial<PersistedState> | null | undefined)
     registeredTeachers: sanitizeRegisteredTeachers(parsed.registeredTeachers),
     deletedStudentIds: sanitizeTombstones(parsed.deletedStudentIds),
     deletedTeacherIds: sanitizeTombstones(parsed.deletedTeacherIds),
+    deletedDriveFileIds: sanitizeTombstones(parsed.deletedDriveFileIds),
+    deletedItemIds: sanitizeTombstones(parsed.deletedItemIds),
   };
 }
 

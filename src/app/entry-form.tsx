@@ -1,5 +1,5 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
@@ -43,6 +43,7 @@ import {
   buildDriveThumbnailUrl,
   detectDriveMediaKind,
   extractDriveFileId,
+  extractDriveFileIdFromUrl,
   getLocalPreviewUri,
   type DriveMediaKind,
 } from '@/lib/drive';
@@ -80,6 +81,8 @@ export default function EntryFormScreen() {
     addEntry,
     updateEntry,
     removeEntry,
+    clearEntryProof,
+    deleteUploadedFileEverywhere,
     setEntryStatus,
     students,
     classInfo,
@@ -157,9 +160,19 @@ export default function EntryFormScreen() {
     };
   }, [proofDriveId, uploadedProof, inMemoryProofItem]);
 
+  const replacedDraftRef = useRef<DriveAttachmentItem | null>(null);
+
   const handleProofSelectionStart = (pending: PendingUploadPreview[]) => {
     const first = pending[0];
     if (!first) return;
+    if (
+      uploadedProof &&
+      !uploadedProof.pending &&
+      uploadedProof.url &&
+      uploadedProof.url.trim() !== (existing?.proofUrl ?? '').trim()
+    ) {
+      replacedDraftRef.current = uploadedProof;
+    }
     setUploadedProof({
       id: first.tempId,
       name: first.fileName,
@@ -174,6 +187,16 @@ export default function EntryFormScreen() {
   };
 
   const handleProofItemUploaded = (first: UploadedDriveFile) => {
+    const prevDraft = replacedDraftRef.current;
+    replacedDraftRef.current = null;
+    if (prevDraft && prevDraft.url && prevDraft.url.trim() !== first.url.trim()) {
+      void deleteUploadedFileEverywhere({
+        driveFileId: extractDriveFileIdFromUrl(prevDraft.url) || prevDraft.id,
+        fileUrl: prevDraft.url,
+        fileName: prevDraft.name,
+      }).catch(() => {});
+    }
+
     setProofUrl(first.url);
     setUploadedProof({
       id: first.id,
@@ -199,7 +222,9 @@ export default function EntryFormScreen() {
   };
 
   const handleProofItemFailed = (tempId: string) => {
-    setUploadedProof((prev) => (prev && prev.id === tempId && prev.pending ? null : prev));
+    const prevDraft = replacedDraftRef.current;
+    replacedDraftRef.current = null;
+    setUploadedProof((prev) => (prev && prev.id === tempId && prev.pending ? prevDraft : prev));
   };
 
   const matchedProofMeta = inMemoryProofItem
@@ -250,6 +275,10 @@ export default function EntryFormScreen() {
   const save = async () => {
     if (readOnly) {
       showToast('Mục này đã khoá chỉnh sửa', 'info');
+      return;
+    }
+    if (uploadedProof?.pending) {
+      showToast('Đợi vài giây để tệp minh chứng hoàn tất đồng bộ lên Drive nhé!', 'info');
       return;
     }
     if (!owner) {
@@ -450,8 +479,37 @@ export default function EntryFormScreen() {
               attachments={[effectiveProofAttachment]}
               editable={!readOnly}
               onRemove={() => {
+                const target = effectiveProofAttachment;
+                const rawUrl = proofUrl.trim();
+                const justUploaded = uploadedProof;
                 setUploadedProof(null);
                 setProofUrl('');
+
+                if (existing) {
+                  if (existing.proofUrl) {
+                    void clearEntryProof(existing.id);
+                  }
+                  if (
+                    justUploaded &&
+                    !justUploaded.pending &&
+                    justUploaded.url &&
+                    justUploaded.url.trim() !== (existing.proofUrl ?? '').trim()
+                  ) {
+                    void deleteUploadedFileEverywhere({
+                      driveFileId: extractDriveFileIdFromUrl(justUploaded.url) || justUploaded.id,
+                      fileUrl: justUploaded.url,
+                      fileName: justUploaded.name,
+                    }).catch(() => {});
+                  }
+                } else if (target && !target.pending) {
+                  const targetUrl = target.url || rawUrl;
+                  void deleteUploadedFileEverywhere({
+                    driveFileId: extractDriveFileIdFromUrl(targetUrl) || target.id,
+                    fileUrl: targetUrl,
+                    fileName: target.name,
+                  }).catch(() => {});
+                }
+                showToast('Đã xoá tệp minh chứng khỏi mục, Drive & Excel!', 'info');
               }}
             />
           ) : null}

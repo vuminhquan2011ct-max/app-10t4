@@ -73,6 +73,10 @@ export type PersistedState = {
   deletedStudentIds?: Record<string, string>;
   /** Dấu thời gian ISO ghi nhận tài khoản giáo viên đã xoá. */
   deletedTeacherIds?: Record<string, string>;
+  /** Dấu thời gian ISO ghi nhận mã tệp Google Drive đã xoá để gỡ sạch mọi liên kết & không hồi sinh. */
+  deletedDriveFileIds?: Record<string, string>;
+  /** Dấu thời gian ISO ghi nhận các mục lớp (thành tích, thông báo, nhiệm vụ, tài liệu...) đã xoá. */
+  deletedItemIds?: Record<string, string>;
 };
 
 export type StudentInput = {
