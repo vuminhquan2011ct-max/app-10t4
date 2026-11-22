@@ -1,13 +1,14 @@
 /**
- * Per-teacher account registry with unique Login ID (Mã ID giáo viên) & personal password.
+ * Per-teacher account registry with unique Login ID (Mã ID giáo viên),
+ * Gmail/OAuth identity & personal password.
  *
  * Security & Sync design:
  * - Every Homeroom Teacher (`teacher`) and Subject Teacher (`subject_teacher`) can
  *   create their own personal account with a unique Login ID and self-chosen password,
- *   hashed with a per-account random salt using SHA-256 (cross-platform Web/iOS/Android).
+ *   Gmail + password, Google OAuth, or GitHub OAuth.
  * - Duplicate Login ID protection: attempting to create an account with an already-taken
  *   Login ID using a non-matching password is strictly rejected.
- * - Passwords are NEVER written into `class_state` (`class10t4`) JSON or exported reports.
+ * - Passwords & emails are NEVER written into `class_state` (`class10t4`) JSON or exported reports.
  * - Cross-device sync: accounts hydrate & merge from Supabase (`class10t4_accounts_v1`)
  *   and public teacher directory profiles are pushed immediately to `class10t4` + Realtime Broadcast.
  */
@@ -16,9 +17,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 import {
+  STUDENT_ACCOUNTS_KEY,
   hashStudentPassword,
+  isEmailTaken,
+  mergeAuthProviders,
+  normalizeAuthProviders,
+  normalizeEmail,
   normalizeLoginIdDisplay,
   normalizeLoginIdKey,
+  validateEmail,
   verifyStudentPassword,
 } from '@/lib/student-accounts';
 import { isSupabaseConfigured } from '@/lib/supabase';
@@ -31,13 +38,17 @@ import {
 } from '@/store/persist';
 import {
   fetchAuthRegistryRemote,
+  findAuthRegistryAccountRemote,
   mergeClassStates,
   removeRegisteredMemberFromCloud,
   upsertAuthRegistryRemote,
   upsertRegisteredMemberToCloud,
 } from '@/store/remote';
 import type { PersistedState } from '@/store/types';
+import type { AuthProviderKind } from '@/types/auth';
 import type { RegisteredTeacherPublic } from '@/types/models';
+
+export { isEmailTaken, normalizeEmail, validateEmail };
 
 export const TEACHER_ACCOUNTS_KEY = 'class10t4:teacher-accounts:v1';
 export const MIN_TEACHER_PASSWORD_LENGTH = 4;
@@ -54,8 +65,18 @@ export type TeacherAccountRecord = {
   role: TeacherRole;
   /** Môn giảng dạy (bắt buộc với GV Bộ môn, tuỳ chọn/null với GVCN). */
   subject: string | null;
-  /** Format: `<salt>:<sha256_hex>`. */
+  /** Format: `<salt>:<sha256_hex>`, or `''` for OAuth-only accounts without a local password yet. */
   passwordHash: string;
+  /** Optional linked email / Gmail (stored ONLY in account registry, NEVER in public `class_state`). */
+  email?: string | null;
+  /** Canonical lowercase email key for uniqueness & lookup. */
+  emailKey?: string | null;
+  /** Linked Supabase Auth `user.id` (for Google / GitHub / Email+Password). */
+  authUserId?: string | null;
+  /** Connected authentication providers. */
+  authProviders?: AuthProviderKind[];
+  /** Optional avatar URL (e.g. from Google or GitHub OAuth). */
+  avatarUrl?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -160,12 +181,26 @@ function parseTeacherRecord(item: unknown): TeacherAccountRecord | null {
   if (
     typeof r.teacherId !== 'string' ||
     !r.teacherId.trim() ||
-    typeof r.passwordHash !== 'string' ||
-    !r.passwordHash.includes(':') ||
     (r.role !== 'teacher' && r.role !== 'subject_teacher')
   ) {
     return null;
   }
+
+  const rawPass = typeof r.passwordHash === 'string' ? r.passwordHash : '';
+  const hasValidPass = rawPass.includes(':');
+  const cleanEmail =
+    typeof r.email === 'string' && r.email.trim() ? normalizeEmail(r.email) : null;
+  const cleanEmailKey =
+    typeof r.emailKey === 'string' && r.emailKey.trim()
+      ? normalizeEmail(r.emailKey)
+      : cleanEmail;
+  const cleanAuthUserId =
+    typeof r.authUserId === 'string' && r.authUserId.trim() ? r.authUserId.trim() : null;
+
+  if (!hasValidPass && !cleanAuthUserId && !cleanEmailKey) {
+    return null;
+  }
+
   const loginId = normalizeLoginIdDisplay(
     typeof r.loginId === 'string' && r.loginId.trim()
       ? r.loginId
@@ -177,17 +212,70 @@ function parseTeacherRecord(item: unknown): TeacherAccountRecord | null {
     typeof r.loginIdKey === 'string' && r.loginIdKey.trim() ? r.loginIdKey : loginId,
   );
   if (!loginIdKey) return null;
+
   const now = new Date().toISOString();
+  const parsedProviders = normalizeAuthProviders(r.authProviders);
+  const authProviders =
+    parsedProviders.length > 0
+      ? parsedProviders
+      : hasValidPass
+        ? cleanEmailKey
+          ? (['email', 'local'] as AuthProviderKind[])
+          : (['local'] as AuthProviderKind[])
+        : cleanEmailKey
+          ? (['email'] as AuthProviderKind[])
+          : undefined;
+  const avatarUrl =
+    typeof r.avatarUrl === 'string' && r.avatarUrl.trim() ? r.avatarUrl.trim() : null;
+
   return {
     teacherId: r.teacherId.trim(),
     loginId: loginId || loginIdKey,
     loginIdKey,
     name: typeof r.name === 'string' ? normalizeName(r.name) : '',
     role: r.role,
-    subject: r.role === 'subject_teacher' ? (typeof r.subject === 'string' ? r.subject.trim() || null : null) : null,
-    passwordHash: r.passwordHash,
+    subject:
+      r.role === 'subject_teacher'
+        ? typeof r.subject === 'string'
+          ? r.subject.trim() || null
+          : null
+        : null,
+    passwordHash: hasValidPass ? rawPass : '',
+    ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmailKey } : {}),
+    ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
+    ...(authProviders && authProviders.length > 0 ? { authProviders } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
     createdAt: typeof r.createdAt === 'string' && r.createdAt ? r.createdAt : now,
     updatedAt: typeof r.updatedAt === 'string' && r.updatedAt ? r.updatedAt : now,
+  };
+}
+
+function mergeTwoTeacherRecords(
+  prev: TeacherAccountRecord,
+  next: TeacherAccountRecord,
+): TeacherAccountRecord {
+  const remoteWins = next.updatedAt.localeCompare(prev.updatedAt) >= 0;
+  const winner = remoteWins ? next : prev;
+  const other = remoteWins ? prev : next;
+
+  const mergedProviders = mergeAuthProviders(winner.authProviders, other.authProviders);
+  const email = winner.email || other.email || null;
+  const emailKey = winner.emailKey || other.emailKey || (email ? normalizeEmail(email) : null);
+  const authUserId = winner.authUserId || other.authUserId || null;
+  const avatarUrl = winner.avatarUrl || other.avatarUrl || null;
+  const passwordHash = winner.passwordHash.includes(':')
+    ? winner.passwordHash
+    : other.passwordHash.includes(':')
+      ? other.passwordHash
+      : '';
+
+  return {
+    ...winner,
+    passwordHash,
+    ...(email ? { email, emailKey } : {}),
+    ...(authUserId ? { authUserId } : {}),
+    ...(mergedProviders.length > 0 ? { authProviders: mergedProviders } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
   };
 }
 
@@ -201,9 +289,7 @@ function mergeTeacherRecords(
   }
   for (const rec of remote) {
     const prev = byId.get(rec.teacherId);
-    if (!prev || rec.updatedAt.localeCompare(prev.updatedAt) >= 0) {
-      byId.set(rec.teacherId, rec);
-    }
+    byId.set(rec.teacherId, prev ? mergeTwoTeacherRecords(prev, rec) : rec);
   }
   return Array.from(byId.values());
 }
@@ -365,6 +451,61 @@ async function persistTeacherToLocalClassState(
   }
 }
 
+async function isAuthUserIdTakenForTeacher(
+  authUserId: string,
+  excludeTeacherId?: string,
+): Promise<boolean> {
+  const cleanId = authUserId.trim();
+  if (!cleanId) return false;
+
+  const teachers = await loadTeacherAccounts({ forceRemote: true });
+  if (teachers.some((t) => t.authUserId === cleanId && t.teacherId !== excludeTeacherId)) {
+    return true;
+  }
+
+  try {
+    const rawStudents = await AsyncStorage.getItem(STUDENT_ACCOUNTS_KEY);
+    if (rawStudents) {
+      const parsed = JSON.parse(rawStudents) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (!item || typeof item !== 'object') continue;
+          const r = item as Record<string, unknown>;
+          if (typeof r.authUserId === 'string' && r.authUserId.trim() === cleanId) {
+            return true;
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  if (isSupabaseConfigured) {
+    try {
+      const remote = await fetchAuthRegistryRemote();
+      if (remote && Array.isArray(remote.students)) {
+        const deletedStudents = remote.deletedStudentIds ?? {};
+        for (const item of remote.students) {
+          if (!item || typeof item !== 'object') continue;
+          const r = item as Record<string, unknown>;
+          const sid = typeof r.studentId === 'string' ? r.studentId.trim() : '';
+          const upd = typeof r.updatedAt === 'string' ? r.updatedAt : '';
+          const crt = typeof r.createdAt === 'string' ? r.createdAt : '';
+          if (sid && isTombstoned(deletedStudents[sid], upd, crt)) continue;
+          if (typeof r.authUserId === 'string' && r.authUserId.trim() === cleanId) {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  return false;
+}
+
 export async function findTeacherAccountById(
   teacherId: string,
 ): Promise<TeacherAccountRecord | null> {
@@ -380,6 +521,56 @@ export async function findTeacherAccountByLoginId(
   if (!key) return null;
   const accounts = await loadTeacherAccounts();
   return accounts.find((a) => a.loginIdKey === key) ?? null;
+}
+
+/**
+ * Resolves a Teacher account by Supabase `authUserId` (priority 1) or linked `email` (priority 2),
+ * checking local + remote registry for instant cross-device 1-tap OAuth matching.
+ */
+export async function findTeacherAccountByAuthIdentity(query: {
+  authUserId?: string | null;
+  email?: string | null;
+  forceRemote?: boolean;
+}): Promise<TeacherAccountRecord | null> {
+  const cleanUid = query.authUserId?.trim() || null;
+  const cleanEmailKey = query.email?.trim() ? normalizeEmail(query.email) : null;
+  if (!cleanUid && !cleanEmailKey) return null;
+
+  const accounts = await loadTeacherAccounts({ forceRemote: query.forceRemote });
+
+  if (cleanUid) {
+    const byUid = accounts.find((a) => a.authUserId === cleanUid);
+    if (byUid) return byUid;
+  }
+  if (cleanEmailKey) {
+    const byEmail = accounts.find(
+      (a) =>
+        a.emailKey === cleanEmailKey ||
+        (a.email ? normalizeEmail(a.email) === cleanEmailKey : false),
+    );
+    if (byEmail) return byEmail;
+  }
+
+  if (isSupabaseConfigured) {
+    try {
+      const remoteMatch = await findAuthRegistryAccountRemote({
+        authUserId: cleanUid,
+        email: cleanEmailKey,
+      });
+      if (remoteMatch && remoteMatch.kind === 'teacher') {
+        const parsed = parseTeacherRecord(remoteMatch.record);
+        if (parsed) {
+          const merged = mergeTeacherRecords(accounts, [parsed]);
+          await saveTeacherAccounts(merged);
+          return merged.find((a) => a.teacherId === parsed.teacherId) ?? parsed;
+        }
+      }
+    } catch {
+      // Offline-safe fallback
+    }
+  }
+
+  return null;
 }
 
 export async function isTeacherLoginIdTaken(
@@ -418,15 +609,16 @@ export type VerifyTeacherLoginResult =
     };
 
 export async function verifyTeacherLogin(
-  rawLoginId: string,
+  rawIdentifier: string,
   rawPassword: string,
   expectedRole?: TeacherRole,
 ): Promise<VerifyTeacherLoginResult> {
-  const loginId = normalizeLoginIdDisplay(rawLoginId);
+  const trimmedIdentifier = rawIdentifier.trim();
+  const isEmailInput = trimmedIdentifier.includes('@');
   const password = rawPassword.trim();
 
-  if (!loginId) {
-    return { ok: false, reason: 'invalid', error: 'Vui lòng nhập Mã ID giáo viên.' };
+  if (!trimmedIdentifier) {
+    return { ok: false, reason: 'invalid', error: 'Vui lòng nhập Gmail hoặc Mã ID giáo viên.' };
   }
   if (!password) {
     return { ok: false, reason: 'invalid', error: 'Vui lòng nhập mật khẩu cá nhân.' };
@@ -434,14 +626,41 @@ export async function verifyTeacherLogin(
 
   // Live remote merge so teachers can sign in immediately from any device.
   const accounts = await loadTeacherAccounts({ forceRemote: true });
-  const key = normalizeLoginIdKey(loginId);
-  const found = accounts.find((a) => a.loginIdKey === key);
+  let found: TeacherAccountRecord | undefined;
 
-  if (!found) {
+  if (isEmailInput) {
+    const emailKey = normalizeEmail(trimmedIdentifier);
+    found = accounts.find(
+      (a) =>
+        a.emailKey === emailKey ||
+        (a.email ? normalizeEmail(a.email) === emailKey : false),
+    );
+    if (!found) {
+      return {
+        ok: false,
+        reason: 'not_found',
+        error: `Không tìm thấy tài khoản giáo viên với Gmail "${emailKey}". Hãy chuyển sang mục "Tạo tài khoản mới" để đăng ký!`,
+      };
+    }
+  } else {
+    const loginId = normalizeLoginIdDisplay(trimmedIdentifier);
+    const key = normalizeLoginIdKey(loginId);
+    found = accounts.find((a) => a.loginIdKey === key);
+
+    if (!found) {
+      return {
+        ok: false,
+        reason: 'not_found',
+        error: `Không tìm thấy tài khoản giáo viên với Mã ID "${loginId}". Hãy chuyển sang mục "Tạo tài khoản mới" để đăng ký!`,
+      };
+    }
+  }
+
+  if (!found.passwordHash.includes(':')) {
     return {
       ok: false,
-      reason: 'not_found',
-      error: `Không tìm thấy tài khoản giáo viên với Mã ID "${loginId}". Hãy chuyển sang mục "Tạo tài khoản mới" để đăng ký!`,
+      reason: 'wrong_password',
+      error: `Tài khoản "${found.email ?? found.loginId}" được tạo bằng Google/GitHub và chưa đặt mật khẩu. Hãy đăng nhập 1 chạm bằng Google/GitHub hoặc chọn "Quên mật khẩu?"!`,
     };
   }
 
@@ -449,7 +668,9 @@ export async function verifyTeacherLogin(
     return {
       ok: false,
       reason: 'wrong_password',
-      error: `Mật khẩu không đúng cho Mã ID "${found.loginId}"! Vui lòng kiểm tra lại.`,
+      error: isEmailInput
+        ? `Mật khẩu không đúng cho Gmail "${found.email ?? trimmedIdentifier}"! Vui lòng kiểm tra lại.`
+        : `Mật khẩu không đúng cho Mã ID "${found.loginId}"! Vui lòng kiểm tra lại.`,
     };
   }
 
@@ -484,6 +705,12 @@ export type RegisterTeacherParams = {
   password: string;
   role: TeacherRole;
   subject?: string | null;
+  email?: string | null;
+  authUserId?: string | null;
+  authProviders?: AuthProviderKind[];
+  avatarUrl?: string | null;
+  /** True for OAuth-only onboarding where password is optional. */
+  allowEmptyPassword?: boolean;
   /** When true (e.g. from AuthGate before ClassStore mounts), also writes an audit log entry. */
   writeAuditLog?: boolean;
 };
@@ -512,18 +739,48 @@ export async function registerTeacherAccount(
   const loginIdKey = normalizeLoginIdKey(params.loginId);
   const password = params.password.trim();
 
-  if (password.length < MIN_TEACHER_PASSWORD_LENGTH) {
-    return {
-      ok: false,
-      error: `Mật khẩu riêng phải có ít nhất ${MIN_TEACHER_PASSWORD_LENGTH} ký tự.`,
-    };
+  if (!params.allowEmptyPassword || password.length > 0) {
+    if (password.length < MIN_TEACHER_PASSWORD_LENGTH) {
+      return {
+        ok: false,
+        error: `Mật khẩu riêng phải có ít nhất ${MIN_TEACHER_PASSWORD_LENGTH} ký tự.`,
+      };
+    }
+  }
+
+  const cleanEmail = params.email?.trim() ? normalizeEmail(params.email) : null;
+  if (cleanEmail) {
+    const emailErr = validateEmail(cleanEmail);
+    if (emailErr) return { ok: false, error: emailErr };
   }
 
   // Check remote accounts too so duplicate teacher IDs across devices are prevented.
   const accounts = await loadTeacherAccounts({ forceRemote: true });
+
+  if (cleanEmail) {
+    const emailUsed = await isEmailTaken(cleanEmail, { forceRemote: true });
+    if (emailUsed) {
+      return {
+        ok: false,
+        error: `Gmail "${cleanEmail}" đã được đăng ký tài khoản khác! Hãy chuyển sang mục Đăng nhập hoặc dùng Quên mật khẩu.`,
+      };
+    }
+  }
+
+  const cleanAuthUserId = params.authUserId?.trim() || null;
+  if (cleanAuthUserId) {
+    const uidUsed = await isAuthUserIdTakenForTeacher(cleanAuthUserId);
+    if (uidUsed) {
+      return {
+        ok: false,
+        error: 'Tài khoản Google/GitHub này đã được liên kết với một hồ sơ khác trên lớp 10T4!',
+      };
+    }
+  }
+
   const existing = accounts.find((a) => a.loginIdKey === loginIdKey);
   if (existing) {
-    const matched = verifyStudentPassword(password, existing.passwordHash);
+    const matched = password.length > 0 && verifyStudentPassword(password, existing.passwordHash);
     if (!matched) {
       return {
         ok: false,
@@ -541,6 +798,12 @@ export async function registerTeacherAccount(
   }
 
   const now = new Date().toISOString();
+  const providers = mergeAuthProviders(
+    params.authProviders,
+    password.length > 0 ? (cleanEmail ? ['email'] : ['local']) : [],
+  );
+  const avatarUrl = params.avatarUrl?.trim() || null;
+
   const account: TeacherAccountRecord = {
     teacherId: createId('gv'),
     loginId,
@@ -548,13 +811,18 @@ export async function registerTeacherAccount(
     name: cleanName,
     role: params.role,
     subject: cleanSubject,
-    passwordHash: hashStudentPassword(password),
+    passwordHash: password.length > 0 ? hashStudentPassword(password) : '',
+    ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmail } : {}),
+    ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
+    ...(providers.length > 0 ? { authProviders: providers } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
     createdAt: now,
     updatedAt: now,
   };
 
   await saveTeacherAccounts([...accounts, account]);
 
+  // Public directory omits email/password/authUserId completely.
   const publicTeacher = toPublicTeacher(account);
   const roleLabel =
     account.role === 'teacher'
@@ -590,6 +858,174 @@ export async function registerTeacherAccount(
   }
 
   return { ok: true, account };
+}
+
+export type RegisterOAuthTeacherParams = {
+  name: string;
+  role: TeacherRole;
+  subject?: string | null;
+  loginId?: string;
+  authUserId: string;
+  email: string;
+  authProviders: AuthProviderKind[];
+  avatarUrl?: string | null;
+  optionalPassword?: string;
+  writeAuditLog?: boolean;
+};
+
+/**
+ * Registers a brand-new teacher account directly from Google/GitHub/Email OAuth onboarding,
+ * auto-suggesting a unique `GVCN-XX` / `GVBM-XX` Login ID if omitted.
+ */
+export async function registerOAuthTeacherAccount(
+  params: RegisterOAuthTeacherParams,
+): Promise<RegisterTeacherResult> {
+  const resolvedLoginId =
+    params.loginId && params.loginId.trim().length > 0
+      ? params.loginId.trim()
+      : await suggestNextTeacherLoginId(params.role);
+
+  const cleanPass = params.optionalPassword?.trim() ?? '';
+  return registerTeacherAccount({
+    name: params.name,
+    role: params.role,
+    subject: params.subject ?? null,
+    loginId: resolvedLoginId,
+    password: cleanPass,
+    allowEmptyPassword: cleanPass.length === 0,
+    email: params.email,
+    authUserId: params.authUserId,
+    authProviders: mergeAuthProviders(params.authProviders, cleanPass ? ['email'] : []),
+    avatarUrl: params.avatarUrl ?? null,
+    writeAuditLog: params.writeAuditLog ?? true,
+  });
+}
+
+/**
+ * Links a Google / GitHub / Email Supabase Auth identity (and avatar) to an existing teacher account.
+ */
+export async function linkAuthIdentityToTeacher(params: {
+  teacherId: string;
+  authUserId?: string | null;
+  email?: string | null;
+  authProviders?: AuthProviderKind[];
+  avatarUrl?: string | null;
+}): Promise<{ ok: boolean; error?: string; account?: TeacherAccountRecord }> {
+  const accounts = await loadTeacherAccounts({ forceRemote: true });
+  const idx = accounts.findIndex((a) => a.teacherId === params.teacherId);
+  if (idx < 0) {
+    return { ok: false, error: 'Không tìm thấy tài khoản giáo viên để liên kết.' };
+  }
+
+  const existing = accounts[idx];
+  const cleanEmail = params.email?.trim() ? normalizeEmail(params.email) : existing.email ?? null;
+  if (cleanEmail && cleanEmail !== existing.emailKey) {
+    const emailErr = validateEmail(cleanEmail);
+    if (emailErr) return { ok: false, error: emailErr };
+    const taken = await isEmailTaken(cleanEmail, {
+      excludeTeacherId: params.teacherId,
+      forceRemote: true,
+    });
+    if (taken) {
+      return {
+        ok: false,
+        error: `Gmail "${cleanEmail}" đã được liên kết với một tài khoản khác trên lớp!`,
+      };
+    }
+  }
+
+  const cleanUid = params.authUserId?.trim() || existing.authUserId || null;
+  if (cleanUid && cleanUid !== existing.authUserId) {
+    const uidTaken = await isAuthUserIdTakenForTeacher(cleanUid, params.teacherId);
+    if (uidTaken) {
+      return {
+        ok: false,
+        error: 'Tài khoản Google/GitHub này đã được liên kết với một tài khoản khác!',
+      };
+    }
+  }
+
+  const mergedProviders = mergeAuthProviders(existing.authProviders, params.authProviders);
+  const nextAvatar =
+    params.avatarUrl !== undefined
+      ? params.avatarUrl?.trim() || existing.avatarUrl || null
+      : existing.avatarUrl || null;
+
+  const updated: TeacherAccountRecord = {
+    ...existing,
+    ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmail } : {}),
+    ...(cleanUid ? { authUserId: cleanUid } : {}),
+    ...(mergedProviders.length > 0 ? { authProviders: mergedProviders } : {}),
+    ...(nextAvatar ? { avatarUrl: nextAvatar } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+
+  await saveTeacherAccounts(accounts.map((a, i) => (i === idx ? updated : a)));
+  emitTeacherAccountsChanged({
+    type: 'updated',
+    account: updated,
+    publicTeacher: toPublicTeacher(updated),
+  });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      upsertAuthRegistryRemote({ teacher: updated as unknown as Record<string, unknown> }),
+      2_000,
+    );
+  }
+
+  return { ok: true, account: updated };
+}
+
+/**
+ * Overwrites a teacher's local + cloud registry password hash (used after Supabase
+ * PASSWORD_RECOVERY reset or when setting a password on an OAuth-only account).
+ */
+export async function syncTeacherPasswordHash(
+  teacherId: string,
+  newPassword: string,
+): Promise<{ ok: boolean; error?: string; account?: TeacherAccountRecord }> {
+  const cleanNew = newPassword.trim();
+  if (cleanNew.length < MIN_TEACHER_PASSWORD_LENGTH) {
+    return {
+      ok: false,
+      error: `Mật khẩu mới phải có ít nhất ${MIN_TEACHER_PASSWORD_LENGTH} ký tự.`,
+    };
+  }
+
+  const accounts = await loadTeacherAccounts({ forceRemote: true });
+  const idx = accounts.findIndex((a) => a.teacherId === teacherId);
+  if (idx < 0) {
+    return { ok: false, error: 'Không tìm thấy tài khoản giáo viên cần cập nhật mật khẩu.' };
+  }
+
+  const current = accounts[idx];
+  const nextProviders = mergeAuthProviders(
+    current.authProviders,
+    current.emailKey ? ['email'] : ['local'],
+  );
+  const updated: TeacherAccountRecord = {
+    ...current,
+    passwordHash: hashStudentPassword(cleanNew),
+    authProviders: nextProviders,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await saveTeacherAccounts(accounts.map((a, i) => (i === idx ? updated : a)));
+  emitTeacherAccountsChanged({
+    type: 'updated',
+    account: updated,
+    publicTeacher: toPublicTeacher(updated),
+  });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      upsertAuthRegistryRemote({ teacher: updated as unknown as Record<string, unknown> }),
+      2_000,
+    );
+  }
+
+  return { ok: true, account: updated };
 }
 
 export async function updateTeacherAccount(params: {
@@ -699,7 +1135,10 @@ export async function changeOwnTeacherPassword(params: {
     return { ok: false, error: 'Không tìm thấy tài khoản giáo viên để đổi mật khẩu.' };
   }
   const current = accounts[idx];
-  if (!verifyStudentPassword(params.currentPassword.trim(), current.passwordHash)) {
+  if (
+    current.passwordHash.includes(':') &&
+    !verifyStudentPassword(params.currentPassword.trim(), current.passwordHash)
+  ) {
     return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
   }
   const cleanNew = params.newPassword.trim();
@@ -712,6 +1151,10 @@ export async function changeOwnTeacherPassword(params: {
   const next: TeacherAccountRecord = {
     ...current,
     passwordHash: hashStudentPassword(cleanNew),
+    authProviders: mergeAuthProviders(
+      current.authProviders,
+      current.emailKey ? ['email'] : ['local'],
+    ),
     updatedAt: new Date().toISOString(),
   };
   await saveTeacherAccounts(accounts.map((a, i) => (i === idx ? next : a)));

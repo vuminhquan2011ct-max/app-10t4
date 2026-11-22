@@ -131,7 +131,7 @@ export default function DecorationStudioScreen() {
           <View style={styles.previewTop}>
             <Avatar
               name={displayName}
-              imageUrl={auth.isCloudActive ? auth.profile?.avatarUrl : null}
+              imageUrl={auth.profile?.avatarUrl ?? null}
               size={62}
               ring
               frame={decor.avatarFrame}

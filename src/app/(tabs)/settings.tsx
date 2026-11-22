@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { MascotAvatar } from '@/components/assistant/mascot-avatar';
@@ -108,12 +108,24 @@ export default function SettingsScreen() {
   const [cMotto, setCMotto] = useState(classInfo.motto);
   const [cGoal, setCGoal] = useState(String(classInfo.goalPoints ?? 200));
 
-  // Change personal student password
+  // Change / set personal account password & OAuth linking
   const [changingPass, setChangingPass] = useState(false);
   const [curPass, setCurPass] = useState('');
   const [newPass, setNewPass] = useState('');
   const [confirmNewPass, setConfirmNewPass] = useState('');
   const [passError, setPassError] = useState<string | null>(null);
+  const [savingPass, setSavingPass] = useState(false);
+  const [linkingProvider, setLinkingProvider] = useState<'google' | 'github' | null>(null);
+  const [sendingResetEmail, setSendingResetEmail] = useState(false);
+  const [resetCooldown, setResetCooldown] = useState(0);
+
+  useEffect(() => {
+    if (resetCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResetCooldown((sec) => (sec <= 1 ? 0 : sec - 1));
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [resetCooldown]);
 
   // Backup import & reset confirmation
   const [showImport, setShowImport] = useState(false);
@@ -209,34 +221,95 @@ export default function SettingsScreen() {
   const canChangeOwnPass =
     (auth.accountRole === 'student' && Boolean(auth.studentId)) ||
     ((isTeacher || isSubjectTeacher) && Boolean(auth.teacherId));
+  const hasGoogleLinked = auth.authProviders.includes('google');
+  const hasGithubLinked = auth.authProviders.includes('github');
+  const isOAuthWithoutPassword = !auth.hasAccountPassword;
+  const minPasswordChars = auth.email || auth.hasSupabaseAuth ? 6 : MIN_STUDENT_PASSWORD_LENGTH;
 
   const handleChangeOwnPassword = async () => {
     setPassError(null);
-    if (!curPass.trim()) {
+    if (!isOAuthWithoutPassword && !curPass.trim()) {
       setPassError('Vui lòng nhập mật khẩu hiện tại.');
       return;
     }
-    if (newPass.trim().length < MIN_STUDENT_PASSWORD_LENGTH) {
-      setPassError(`Mật khẩu mới cần tối thiểu ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`);
+    if (newPass.trim().length < minPasswordChars) {
+      setPassError(`Mật khẩu mới cần tối thiểu ${minPasswordChars} ký tự.`);
       return;
     }
     if (newPass.trim() !== confirmNewPass.trim()) {
       setPassError('Mật khẩu xác nhận không khớp!');
       return;
     }
-    const res =
-      auth.accountRole === 'student'
-        ? await auth.changeStudentPassword(curPass, newPass)
-        : await auth.changeTeacherPassword(curPass, newPass);
-    if (!res.ok) {
-      setPassError(res.error ?? 'Không thể đổi mật khẩu');
-      return;
+    setSavingPass(true);
+    try {
+      const res = await auth.setOrChangeAccountPassword({
+        currentPassword: curPass.trim() || undefined,
+        newPassword: newPass,
+      });
+      if (!res.ok) {
+        setPassError(res.error ?? 'Không thể cập nhật mật khẩu');
+        return;
+      }
+      setCurPass('');
+      setNewPass('');
+      setConfirmNewPass('');
+      setChangingPass(false);
+      showToast(
+        isOAuthWithoutPassword
+          ? 'Đã đặt mật khẩu đăng nhập thành công! 🔐'
+          : 'Đã đổi mật khẩu cá nhân thành công! 🔐',
+      );
+    } finally {
+      setSavingPass(false);
     }
-    setCurPass('');
-    setNewPass('');
-    setConfirmNewPass('');
-    setChangingPass(false);
-    showToast('Đã đổi mật khẩu cá nhân thành công! 🔐');
+  };
+
+  const handleLinkOAuthProvider = async (provider: 'google' | 'github') => {
+    if (linkingProvider) return;
+    setLinkingProvider(provider);
+    const label = provider === 'google' ? 'Google' : 'GitHub';
+    try {
+      const res =
+        provider === 'google'
+          ? await auth.linkGoogleAccount()
+          : await auth.linkGithubAccount();
+      if (!res.ok) {
+        if (res.providerNotEnabled) {
+          showToast(
+            res.error ??
+              `${label} chưa được bật trên Supabase Dashboard — Admin hãy bật trong Authentication -> Providers!`,
+            'warning',
+          );
+          return;
+        }
+        if (res.error) {
+          showToast(res.error, 'danger');
+        }
+        return;
+      }
+      if (res.redirected) {
+        return;
+      }
+      showToast(`Đã liên kết tài khoản ${label} thành công! ✨`);
+    } finally {
+      setLinkingProvider(null);
+    }
+  };
+
+  const handleSendResetEmail = async () => {
+    if (!auth.email || sendingResetEmail || resetCooldown > 0) return;
+    setSendingResetEmail(true);
+    try {
+      const res = await auth.requestPasswordReset(auth.email);
+      if (!res.ok) {
+        showToast(res.error ?? 'Không thể gửi email đặt lại mật khẩu lúc này.', 'danger');
+        return;
+      }
+      setResetCooldown(60);
+      showToast(`Đã gửi email đặt lại mật khẩu tới ${auth.email}! Hãy kiểm tra Gmail. 📩`);
+    } finally {
+      setSendingResetEmail(false);
+    }
   };
 
   const handleExportSummary = async () => {
@@ -403,7 +476,7 @@ export default function SettingsScreen() {
           <View style={styles.bubble} />
           <Avatar
             name={displayName}
-            imageUrl={auth.isCloudActive ? auth.profile?.avatarUrl : null}
+            imageUrl={auth.profile?.avatarUrl ?? null}
             size={62}
             ring
             frame={decor.avatarFrame}
@@ -413,8 +486,8 @@ export default function SettingsScreen() {
               {displayName}
             </Text>
             <Text style={styles.profileSub} numberOfLines={1}>
-              {auth.isCloudActive
-                ? `${auth.email ?? ''} · ${roleMeta.label}`
+              {auth.email
+                ? `${auth.email} · ${roleMeta.label}`
                 : `${roleMeta.label} · Lớp ${classInfo.name}`}
             </Text>
             <Pressable
@@ -460,6 +533,38 @@ export default function SettingsScreen() {
                 color={'accentText'}
                 soft={'accentSoft'}
                 icon={'id-card-outline'}
+              />
+            ) : null}
+            {auth.email ? (
+              <Badge
+                label={auth.email}
+                color={'accentText'}
+                soft={'accentSoft'}
+                icon={'mail-outline'}
+              />
+            ) : null}
+            {hasGoogleLinked ? (
+              <Badge
+                label={'Google ✓'}
+                color={'success'}
+                soft={'successSoft'}
+                icon={'logo-google'}
+              />
+            ) : null}
+            {hasGithubLinked ? (
+              <Badge
+                label={'GitHub ✓'}
+                color={'purple'}
+                soft={'purpleSoft'}
+                icon={'logo-github'}
+              />
+            ) : null}
+            {auth.authProviders.includes('email') ? (
+              <Badge
+                label={'Gmail + Mật khẩu'}
+                color={'accentText'}
+                soft={'accentSoft'}
+                icon={'shield-checkmark-outline'}
               />
             ) : null}
             {currentStudent ? (
@@ -518,7 +623,35 @@ export default function SettingsScreen() {
             </View>
           )}
 
-          {/* Personal Password Change (Students & Personal Teacher Accounts) */}
+          {/* Connected OAuth Account Linking (Google / GitHub) */}
+          {auth.isCloudSyncEnabled && canChangeOwnPass && (!hasGoogleLinked || !hasGithubLinked) ? (
+            <View style={styles.backupActions}>
+              {!hasGoogleLinked ? (
+                <Button
+                  label={linkingProvider === 'google' ? 'Đang mở Google...' : 'Liên kết Google'}
+                  variant={'soft'}
+                  size={'sm'}
+                  icon={'logo-google'}
+                  style={styles.flex}
+                  disabled={linkingProvider !== null}
+                  onPress={() => void handleLinkOAuthProvider('google')}
+                />
+              ) : null}
+              {!hasGithubLinked ? (
+                <Button
+                  label={linkingProvider === 'github' ? 'Đang mở GitHub...' : 'Liên kết GitHub'}
+                  variant={'soft'}
+                  size={'sm'}
+                  icon={'logo-github'}
+                  style={styles.flex}
+                  disabled={linkingProvider !== null}
+                  onPress={() => void handleLinkOAuthProvider('github')}
+                />
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* Personal Password Set / Change (Students & Personal Teacher Accounts) */}
           {canChangeOwnPass ? (
             changingPass ? (
               <View
@@ -529,24 +662,33 @@ export default function SettingsScreen() {
                 <View style={styles.verifyHead}>
                   <Ionicons name="key" size={16} color={theme.accent} />
                   <Text style={[styles.verifyTitle, { color: theme.text }]}>
-                    Đổi mật khẩu cá nhân (ID: {auth.loginId})
+                    {isOAuthWithoutPassword
+                      ? `Đặt mật khẩu đăng nhập (ID: ${auth.loginId})`
+                      : `Đổi mật khẩu cá nhân (ID: ${auth.loginId})`}
                   </Text>
                   <Pressable onPress={() => setChangingPass(false)} hitSlop={8}>
                     <Ionicons name="close" size={18} color={theme.textMuted} />
                   </Pressable>
                 </View>
+                {!isOAuthWithoutPassword ? (
+                  <TextField
+                    label={'Mật khẩu hiện tại'}
+                    value={curPass}
+                    onChangeText={(t) => {
+                      setCurPass(t);
+                      setPassError(null);
+                    }}
+                    secureTextEntry
+                    autoCapitalize={'none'}
+                  />
+                ) : (
+                  <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
+                    Tài khoản Google/GitHub của bạn chưa đặt mật khẩu riêng. Đặt mật khẩu mới để
+                    đăng nhập nhanh bằng cả Gmail + Mật khẩu lẫn Mã ID lớp!
+                  </Text>
+                )}
                 <TextField
-                  label={'Mật khẩu hiện tại'}
-                  value={curPass}
-                  onChangeText={(t) => {
-                    setCurPass(t);
-                    setPassError(null);
-                  }}
-                  secureTextEntry
-                  autoCapitalize={'none'}
-                />
-                <TextField
-                  label={'Mật khẩu mới (tối thiểu 4 ký tự)'}
+                  label={`Mật khẩu mới (tối thiểu ${minPasswordChars} ký tự)`}
                   value={newPass}
                   onChangeText={(t) => {
                     setNewPass(t);
@@ -571,15 +713,16 @@ export default function SettingsScreen() {
                   </Text>
                 ) : null}
                 <Button
-                  label={'Lưu mật khẩu mới'}
+                  label={savingPass ? 'Đang lưu mật khẩu...' : 'Lưu mật khẩu mới'}
                   icon={'checkmark-circle'}
                   size={'sm'}
-                  onPress={handleChangeOwnPassword}
+                  disabled={savingPass}
+                  onPress={() => void handleChangeOwnPassword()}
                 />
               </View>
             ) : (
               <Button
-                label={'Đổi mật khẩu cá nhân'}
+                label={isOAuthWithoutPassword ? 'Đặt mật khẩu Gmail / Mã ID' : 'Đổi mật khẩu cá nhân'}
                 variant={'ghost'}
                 size={'sm'}
                 icon={'key-outline'}
@@ -592,6 +735,23 @@ export default function SettingsScreen() {
                 }}
               />
             )
+          ) : null}
+
+          {auth.email && auth.isCloudSyncEnabled ? (
+            <Button
+              label={
+                sendingResetEmail
+                  ? 'Đang gửi email đặt lại mật khẩu...'
+                  : resetCooldown > 0
+                    ? `Gửi lại email đặt lại mật khẩu (${resetCooldown}s)`
+                    : 'Gửi email đặt lại mật khẩu về Gmail'
+              }
+              variant={'ghost'}
+              size={'sm'}
+              icon={'mail-unread-outline'}
+              disabled={sendingResetEmail || resetCooldown > 0}
+              onPress={() => void handleSendResetEmail()}
+            />
           ) : null}
 
           {auth.isCloudSyncEnabled ? (

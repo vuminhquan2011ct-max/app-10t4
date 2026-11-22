@@ -1,14 +1,14 @@
 /**
- * Per-student account registry with unique Login ID (Số ID) & personal password.
+ * Per-student account registry with unique Login ID (Số ID), Gmail/OAuth identity,
+ * & personal password.
  *
  * Security & Sync design:
- * - Every student has a unique Login ID (`code`, case-insensitive) and a personal
- *   password hashed with a per-account random salt using SHA-256 (pure TS so it
- *   works identically across Web HTTP/HTTPS, iOS, and Android).
+ * - Every student has a unique Login ID (`code`, case-insensitive) and can authenticate
+ *   via personal password (salted SHA-256), Gmail + password, Google OAuth, or GitHub OAuth.
  * - Duplicate Login ID protection: attempting to create or authenticate with an
  *   already-taken Login ID using a non-matching password is always rejected with
  *   a clear "duplicate ID / wrong password" error.
- * - Passwords are NEVER written into `class_state` (`class10t4`) JSON or exported reports.
+ * - Passwords & emails are NEVER written into `class_state` (`class10t4`) JSON or exported reports.
  * - Cross-device sync: accounts hydrate & merge from Supabase (`class10t4_accounts_v1`)
  *   and public student roster updates are pushed immediately to `class10t4` + Realtime Broadcast.
  */
@@ -27,15 +27,18 @@ import {
 import { buildStudent } from '@/store/reducers';
 import {
   fetchAuthRegistryRemote,
+  findAuthRegistryAccountRemote,
   mergeClassStates,
   removeRegisteredMemberFromCloud,
   upsertAuthRegistryRemote,
   upsertRegisteredMemberToCloud,
 } from '@/store/remote';
 import type { PersistedState } from '@/store/types';
+import type { AuthProviderKind } from '@/types/auth';
 import type { Gender, Student } from '@/types/models';
 
 export const STUDENT_ACCOUNTS_KEY = 'class10t4:student-accounts:v1';
+const TEACHER_ACCOUNTS_STORAGE_KEY = 'class10t4:teacher-accounts:v1';
 export const MIN_STUDENT_PASSWORD_LENGTH = 4;
 
 export type StudentAccountRecord = {
@@ -45,8 +48,18 @@ export type StudentAccountRecord = {
   /** Canonical uppercase key with whitespace stripped for duplicate detection. */
   loginIdKey: string;
   name: string;
-  /** Format: `<salt>:<sha256_hex>`. */
+  /** Format: `<salt>:<sha256_hex>`, or `''` for OAuth-only accounts without a local password yet. */
   passwordHash: string;
+  /** Optional linked email / Gmail (stored ONLY in account registry, NEVER in public `class_state`). */
+  email?: string | null;
+  /** Canonical lowercase email key for uniqueness & lookup. */
+  emailKey?: string | null;
+  /** Linked Supabase Auth `user.id` (for Google / GitHub / Email+Password). */
+  authUserId?: string | null;
+  /** Connected authentication providers. */
+  authProviders?: AuthProviderKind[];
+  /** Optional avatar URL (e.g. from Google or GitHub OAuth). */
+  avatarUrl?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -263,7 +276,56 @@ export function verifyStudentPassword(password: string, storedHash: string): boo
   return diff === 0;
 }
 
-/* ---------- Login ID & Password Validation Helpers ---------- */
+/* ---------- Email, Provider & Login ID Validation Helpers ---------- */
+
+const VALID_PROVIDERS: readonly AuthProviderKind[] = ['google', 'github', 'email', 'local'];
+
+export function normalizeEmail(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+export function validateEmail(raw: string): string | null {
+  const clean = normalizeEmail(raw);
+  if (!clean) return 'Vui lòng nhập địa chỉ Gmail / email của bạn.';
+  if (clean.length > 120) return 'Địa chỉ email quá dài (tối đa 120 ký tự).';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(clean)) {
+    return 'Địa chỉ email chưa đúng định dạng (VD: ten@gmail.com).';
+  }
+  return null;
+}
+
+export function normalizeAuthProviders(raw: unknown): AuthProviderKind[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AuthProviderKind[] = [];
+  for (const item of raw) {
+    if (
+      typeof item === 'string' &&
+      (VALID_PROVIDERS as readonly string[]).includes(item) &&
+      !out.includes(item as AuthProviderKind)
+    ) {
+      out.push(item as AuthProviderKind);
+    }
+  }
+  return out;
+}
+
+export function mergeAuthProviders(
+  ...lists: (AuthProviderKind[] | undefined | null)[]
+): AuthProviderKind[] {
+  const out: AuthProviderKind[] = [];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (
+        (VALID_PROVIDERS as readonly string[]).includes(item) &&
+        !out.includes(item)
+      ) {
+        out.push(item);
+      }
+    }
+  }
+  return out;
+}
 
 export function normalizeLoginIdDisplay(raw: string): string {
   return raw.trim().replace(/\s+/g, '').toUpperCase();
@@ -314,14 +376,25 @@ export function evaluatePasswordStrength(password: string): PasswordStrength {
 function parseStudentRecord(item: unknown): StudentAccountRecord | null {
   if (!item || typeof item !== 'object') return null;
   const r = item as Partial<StudentAccountRecord>;
-  if (
-    typeof r.studentId !== 'string' ||
-    !r.studentId.trim() ||
-    typeof r.passwordHash !== 'string' ||
-    !r.passwordHash.includes(':')
-  ) {
+  if (typeof r.studentId !== 'string' || !r.studentId.trim()) {
     return null;
   }
+
+  const rawPass = typeof r.passwordHash === 'string' ? r.passwordHash : '';
+  const hasValidPass = rawPass.includes(':');
+  const cleanEmail =
+    typeof r.email === 'string' && r.email.trim() ? normalizeEmail(r.email) : null;
+  const cleanEmailKey =
+    typeof r.emailKey === 'string' && r.emailKey.trim()
+      ? normalizeEmail(r.emailKey)
+      : cleanEmail;
+  const cleanAuthUserId =
+    typeof r.authUserId === 'string' && r.authUserId.trim() ? r.authUserId.trim() : null;
+
+  if (!hasValidPass && !cleanAuthUserId && !cleanEmailKey) {
+    return null;
+  }
+
   const loginId = normalizeLoginIdDisplay(
     typeof r.loginId === 'string' && r.loginId.trim()
       ? r.loginId
@@ -333,15 +406,63 @@ function parseStudentRecord(item: unknown): StudentAccountRecord | null {
     typeof r.loginIdKey === 'string' && r.loginIdKey.trim() ? r.loginIdKey : loginId,
   );
   if (!loginIdKey) return null;
+
   const now = new Date().toISOString();
+  const parsedProviders = normalizeAuthProviders(r.authProviders);
+  const authProviders =
+    parsedProviders.length > 0
+      ? parsedProviders
+      : hasValidPass
+        ? cleanEmailKey
+          ? (['email', 'local'] as AuthProviderKind[])
+          : (['local'] as AuthProviderKind[])
+        : cleanEmailKey
+          ? (['email'] as AuthProviderKind[])
+          : undefined;
+  const avatarUrl =
+    typeof r.avatarUrl === 'string' && r.avatarUrl.trim() ? r.avatarUrl.trim() : null;
+
   return {
     studentId: r.studentId.trim(),
     loginId: loginId || loginIdKey,
     loginIdKey,
     name: typeof r.name === 'string' ? normalizeName(r.name) : '',
-    passwordHash: r.passwordHash,
+    passwordHash: hasValidPass ? rawPass : '',
+    ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmailKey } : {}),
+    ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
+    ...(authProviders && authProviders.length > 0 ? { authProviders } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
     createdAt: typeof r.createdAt === 'string' && r.createdAt ? r.createdAt : now,
     updatedAt: typeof r.updatedAt === 'string' && r.updatedAt ? r.updatedAt : now,
+  };
+}
+
+function mergeTwoStudentRecords(
+  prev: StudentAccountRecord,
+  next: StudentAccountRecord,
+): StudentAccountRecord {
+  const remoteWins = next.updatedAt.localeCompare(prev.updatedAt) >= 0;
+  const winner = remoteWins ? next : prev;
+  const other = remoteWins ? prev : next;
+
+  const mergedProviders = mergeAuthProviders(winner.authProviders, other.authProviders);
+  const email = winner.email || other.email || null;
+  const emailKey = winner.emailKey || other.emailKey || (email ? normalizeEmail(email) : null);
+  const authUserId = winner.authUserId || other.authUserId || null;
+  const avatarUrl = winner.avatarUrl || other.avatarUrl || null;
+  const passwordHash = winner.passwordHash.includes(':')
+    ? winner.passwordHash
+    : other.passwordHash.includes(':')
+      ? other.passwordHash
+      : '';
+
+  return {
+    ...winner,
+    passwordHash,
+    ...(email ? { email, emailKey } : {}),
+    ...(authUserId ? { authUserId } : {}),
+    ...(mergedProviders.length > 0 ? { authProviders: mergedProviders } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
   };
 }
 
@@ -355,9 +476,7 @@ function mergeStudentRecords(
   }
   for (const rec of remote) {
     const prev = byId.get(rec.studentId);
-    if (!prev || rec.updatedAt.localeCompare(prev.updatedAt) >= 0) {
-      byId.set(rec.studentId, rec);
-    }
+    byId.set(rec.studentId, prev ? mergeTwoStudentRecords(prev, rec) : rec);
   }
   return Array.from(byId.values());
 }
@@ -477,6 +596,147 @@ async function readSafePersistedState(): Promise<PersistedState> {
   return freshState();
 }
 
+function readRawRecordEmailKey(item: unknown): string | null {
+  if (!item || typeof item !== 'object') return null;
+  const r = item as Record<string, unknown>;
+  if (typeof r.emailKey === 'string' && r.emailKey.trim()) return normalizeEmail(r.emailKey);
+  if (typeof r.email === 'string' && r.email.trim()) return normalizeEmail(r.email);
+  return null;
+}
+
+function readRawRecordAuthUserId(item: unknown): string | null {
+  if (!item || typeof item !== 'object') return null;
+  const r = item as Record<string, unknown>;
+  return typeof r.authUserId === 'string' && r.authUserId.trim() ? r.authUserId.trim() : null;
+}
+
+/**
+ * Checks whether an email address is already registered on ANY student or teacher account
+ * (local + cloud registry, respecting deletion tombstones).
+ */
+export async function isEmailTaken(
+  email: string,
+  options?: {
+    excludeStudentId?: string;
+    excludeTeacherId?: string;
+    forceRemote?: boolean;
+  },
+): Promise<boolean> {
+  const key = normalizeEmail(email);
+  if (!key) return false;
+
+  const students = await loadStudentAccounts({ forceRemote: options?.forceRemote });
+  if (
+    students.some(
+      (s) =>
+        (s.emailKey === key || (s.email ? normalizeEmail(s.email) === key : false)) &&
+        s.studentId !== options?.excludeStudentId,
+    )
+  ) {
+    return true;
+  }
+
+  // Check local teacher accounts without introducing circular module imports.
+  try {
+    const rawTeachers = await AsyncStorage.getItem(TEACHER_ACCOUNTS_STORAGE_KEY);
+    if (rawTeachers) {
+      const parsed = JSON.parse(rawTeachers) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (!item || typeof item !== 'object') continue;
+          const r = item as Record<string, unknown>;
+          const tid = typeof r.teacherId === 'string' ? r.teacherId.trim() : '';
+          if (!tid || tid === options?.excludeTeacherId) continue;
+          if (readRawRecordEmailKey(r) === key) return true;
+        }
+      }
+    }
+  } catch {
+    // Ignore malformed local cache
+  }
+
+  if (isSupabaseConfigured) {
+    try {
+      const remote = await fetchAuthRegistryRemote();
+      if (remote && Array.isArray(remote.teachers)) {
+        const deletedTeachers = remote.deletedTeacherIds ?? {};
+        for (const item of remote.teachers) {
+          if (!item || typeof item !== 'object') continue;
+          const r = item as Record<string, unknown>;
+          const tid = typeof r.teacherId === 'string' ? r.teacherId.trim() : '';
+          if (!tid || tid === options?.excludeTeacherId) continue;
+          const upd = typeof r.updatedAt === 'string' ? r.updatedAt : '';
+          const crt = typeof r.createdAt === 'string' ? r.createdAt : '';
+          if (isTombstoned(deletedTeachers[tid], upd, crt)) continue;
+          if (readRawRecordEmailKey(r) === key) return true;
+        }
+      }
+    } catch {
+      // Offline fallback already checked local cache
+    }
+  }
+
+  return false;
+}
+
+async function isAuthUserIdTakenByOther(
+  authUserId: string,
+  options?: { excludeStudentId?: string; excludeTeacherId?: string },
+): Promise<boolean> {
+  const cleanId = authUserId.trim();
+  if (!cleanId) return false;
+
+  const students = await loadStudentAccounts({ forceRemote: true });
+  if (
+    students.some(
+      (s) => s.authUserId === cleanId && s.studentId !== options?.excludeStudentId,
+    )
+  ) {
+    return true;
+  }
+
+  try {
+    const rawTeachers = await AsyncStorage.getItem(TEACHER_ACCOUNTS_STORAGE_KEY);
+    if (rawTeachers) {
+      const parsed = JSON.parse(rawTeachers) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (!item || typeof item !== 'object') continue;
+          const r = item as Record<string, unknown>;
+          const tid = typeof r.teacherId === 'string' ? r.teacherId.trim() : '';
+          if (!tid || tid === options?.excludeTeacherId) continue;
+          if (readRawRecordAuthUserId(r) === cleanId) return true;
+        }
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  if (isSupabaseConfigured) {
+    try {
+      const remote = await fetchAuthRegistryRemote();
+      if (remote && Array.isArray(remote.teachers)) {
+        const deletedTeachers = remote.deletedTeacherIds ?? {};
+        for (const item of remote.teachers) {
+          if (!item || typeof item !== 'object') continue;
+          const r = item as Record<string, unknown>;
+          const tid = typeof r.teacherId === 'string' ? r.teacherId.trim() : '';
+          if (!tid || tid === options?.excludeTeacherId) continue;
+          const upd = typeof r.updatedAt === 'string' ? r.updatedAt : '';
+          const crt = typeof r.createdAt === 'string' ? r.createdAt : '';
+          if (isTombstoned(deletedTeachers[tid], upd, crt)) continue;
+          if (readRawRecordAuthUserId(r) === cleanId) return true;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  return false;
+}
+
 export async function findAccountByLoginId(loginId: string): Promise<StudentAccountRecord | null> {
   const key = normalizeLoginIdKey(loginId);
   if (!key) return null;
@@ -490,6 +750,56 @@ export async function findAccountByStudentId(
   if (!studentId) return null;
   const accounts = await loadStudentAccounts();
   return accounts.find((a) => a.studentId === studentId) ?? null;
+}
+
+/**
+ * Resolves a Student account by Supabase `authUserId` (priority 1) or linked `email` (priority 2),
+ * checking local + remote registry for instant cross-device 1-tap OAuth matching.
+ */
+export async function findStudentAccountByAuthIdentity(query: {
+  authUserId?: string | null;
+  email?: string | null;
+  forceRemote?: boolean;
+}): Promise<StudentAccountRecord | null> {
+  const cleanUid = query.authUserId?.trim() || null;
+  const cleanEmailKey = query.email?.trim() ? normalizeEmail(query.email) : null;
+  if (!cleanUid && !cleanEmailKey) return null;
+
+  const accounts = await loadStudentAccounts({ forceRemote: query.forceRemote });
+
+  if (cleanUid) {
+    const byUid = accounts.find((a) => a.authUserId === cleanUid);
+    if (byUid) return byUid;
+  }
+  if (cleanEmailKey) {
+    const byEmail = accounts.find(
+      (a) =>
+        a.emailKey === cleanEmailKey ||
+        (a.email ? normalizeEmail(a.email) === cleanEmailKey : false),
+    );
+    if (byEmail) return byEmail;
+  }
+
+  if (isSupabaseConfigured) {
+    try {
+      const remoteMatch = await findAuthRegistryAccountRemote({
+        authUserId: cleanUid,
+        email: cleanEmailKey,
+      });
+      if (remoteMatch && remoteMatch.kind === 'student') {
+        const parsed = parseStudentRecord(remoteMatch.record);
+        if (parsed) {
+          const merged = mergeStudentRecords(accounts, [parsed]);
+          await saveStudentAccounts(merged);
+          return merged.find((a) => a.studentId === parsed.studentId) ?? parsed;
+        }
+      }
+    } catch {
+      // Offline-safe fallback
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -541,14 +851,15 @@ export type VerifyLoginResult =
   | { ok: false; reason: 'invalid' | 'not_found' | 'wrong_password'; error: string };
 
 export async function verifyStudentLogin(
-  rawLoginId: string,
+  rawIdentifier: string,
   rawPassword: string,
 ): Promise<VerifyLoginResult> {
-  const loginId = normalizeLoginIdDisplay(rawLoginId);
+  const trimmedIdentifier = rawIdentifier.trim();
+  const isEmailInput = trimmedIdentifier.includes('@');
   const password = rawPassword.trim();
 
-  if (!loginId) {
-    return { ok: false, reason: 'invalid', error: 'Vui lòng nhập Số ID của bạn.' };
+  if (!trimmedIdentifier) {
+    return { ok: false, reason: 'invalid', error: 'Vui lòng nhập Gmail hoặc Số ID của bạn.' };
   }
   if (!password) {
     return { ok: false, reason: 'invalid', error: 'Vui lòng nhập mật khẩu cá nhân.' };
@@ -556,24 +867,51 @@ export async function verifyStudentLogin(
 
   // Live remote merge so students can sign in immediately from any device.
   const accounts = await loadStudentAccounts({ forceRemote: true });
-  const key = normalizeLoginIdKey(loginId);
-  const found = accounts.find((a) => a.loginIdKey === key);
+  let found: StudentAccountRecord | undefined;
 
-  if (!found) {
-    // Also check if ID exists in class roster without a password yet
-    const state = await readSafePersistedState();
-    const rosterMatch = state.students.find((s) => normalizeLoginIdKey(s.code) === key);
-    if (rosterMatch) {
+  if (isEmailInput) {
+    const emailKey = normalizeEmail(trimmedIdentifier);
+    found = accounts.find(
+      (a) =>
+        a.emailKey === emailKey ||
+        (a.email ? normalizeEmail(a.email) === emailKey : false),
+    );
+    if (!found) {
       return {
         ok: false,
-        reason: 'wrong_password',
-        error: `Số ID "${loginId}" đã tồn tại nhưng chưa đặt mật khẩu — hãy nhờ GVCN đặt mật khẩu trong mục Quản lý tài khoản.`,
+        reason: 'not_found',
+        error: `Không tìm thấy tài khoản học sinh với Gmail "${emailKey}". Hãy chuyển sang mục "Tạo tài khoản mới" để đăng ký!`,
       };
     }
+  } else {
+    const loginId = normalizeLoginIdDisplay(trimmedIdentifier);
+    const key = normalizeLoginIdKey(loginId);
+    found = accounts.find((a) => a.loginIdKey === key);
+
+    if (!found) {
+      // Also check if ID exists in class roster without a password yet
+      const state = await readSafePersistedState();
+      const rosterMatch = state.students.find((s) => normalizeLoginIdKey(s.code) === key);
+      if (rosterMatch) {
+        return {
+          ok: false,
+          reason: 'wrong_password',
+          error: `Số ID "${loginId}" đã tồn tại nhưng chưa đặt mật khẩu — hãy nhờ GVCN đặt mật khẩu trong mục Quản lý tài khoản.`,
+        };
+      }
+      return {
+        ok: false,
+        reason: 'not_found',
+        error: `Không tìm thấy tài khoản với Số ID "${loginId}". Hãy chuyển sang mục "Tạo tài khoản mới" để đăng ký!`,
+      };
+    }
+  }
+
+  if (!found.passwordHash.includes(':')) {
     return {
       ok: false,
-      reason: 'not_found',
-      error: `Không tìm thấy tài khoản với Số ID "${loginId}". Hãy chuyển sang mục "Tạo tài khoản mới" để đăng ký!`,
+      reason: 'wrong_password',
+      error: `Tài khoản "${found.email ?? found.loginId}" được tạo bằng Google/GitHub và chưa đặt mật khẩu. Hãy đăng nhập 1 chạm bằng Google/GitHub hoặc chọn "Quên mật khẩu?"!`,
     };
   }
 
@@ -581,7 +919,9 @@ export async function verifyStudentLogin(
     return {
       ok: false,
       reason: 'wrong_password',
-      error: `Mật khẩu không đúng cho Số ID "${found.loginId}"! Vui lòng kiểm tra lại.`,
+      error: isEmailInput
+        ? `Mật khẩu không đúng cho Gmail "${found.email ?? trimmedIdentifier}"! Vui lòng kiểm tra lại.`
+        : `Mật khẩu không đúng cho Số ID "${found.loginId}"! Vui lòng kiểm tra lại.`,
     };
   }
 
@@ -620,6 +960,12 @@ export type RegisterStudentParams = {
   birthDate?: string | null;
   group?: string | null;
   position?: string | null;
+  email?: string | null;
+  authUserId?: string | null;
+  authProviders?: AuthProviderKind[];
+  avatarUrl?: string | null;
+  /** True for OAuth-only onboarding where password is optional. */
+  allowEmptyPassword?: boolean;
   /** When true (e.g. from AuthGate before ClassStore mounts), also writes Student into STORAGE_KEY. */
   writeToClassState?: boolean;
   knownStudents?: Student[];
@@ -644,11 +990,19 @@ export async function registerStudentAccount(
   const loginIdKey = normalizeLoginIdKey(params.loginId);
   const password = params.password.trim();
 
-  if (password.length < MIN_STUDENT_PASSWORD_LENGTH) {
-    return {
-      ok: false,
-      error: `Mật khẩu riêng phải có ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`,
-    };
+  if (!params.allowEmptyPassword || password.length > 0) {
+    if (password.length < MIN_STUDENT_PASSWORD_LENGTH) {
+      return {
+        ok: false,
+        error: `Mật khẩu riêng phải có ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`,
+      };
+    }
+  }
+
+  const cleanEmail = params.email?.trim() ? normalizeEmail(params.email) : null;
+  if (cleanEmail) {
+    const emailErr = validateEmail(cleanEmail);
+    if (emailErr) return { ok: false, error: emailErr };
   }
 
   // Pull live accounts before checking duplicate IDs across devices.
@@ -657,10 +1011,31 @@ export async function registerStudentAccount(
     params.writeToClassState || !params.knownStudents ? await readSafePersistedState() : null;
   const roster = params.knownStudents ?? state?.students ?? [];
 
+  if (cleanEmail) {
+    const emailUsed = await isEmailTaken(cleanEmail, { forceRemote: true });
+    if (emailUsed) {
+      return {
+        ok: false,
+        error: `Gmail "${cleanEmail}" đã được đăng ký tài khoản khác! Hãy chuyển sang mục Đăng nhập hoặc dùng Quên mật khẩu.`,
+      };
+    }
+  }
+
+  const cleanAuthUserId = params.authUserId?.trim() || null;
+  if (cleanAuthUserId) {
+    const uidUsed = await isAuthUserIdTakenByOther(cleanAuthUserId);
+    if (uidUsed) {
+      return {
+        ok: false,
+        error: 'Tài khoản Google/GitHub này đã được liên kết với một hồ sơ khác trên lớp 10T4!',
+      };
+    }
+  }
+
   // Duplicate Login ID check — enforce exact rule: duplicate ID + wrong password => mật khẩu không đúng!
   const existingAccount = accounts.find((a) => a.loginIdKey === loginIdKey);
   if (existingAccount) {
-    const matched = verifyStudentPassword(password, existingAccount.passwordHash);
+    const matched = password.length > 0 && verifyStudentPassword(password, existingAccount.passwordHash);
     if (!matched) {
       return {
         ok: false,
@@ -689,6 +1064,7 @@ export async function registerStudentAccount(
 
   const now = new Date().toISOString();
   const studentId = params.studentId?.trim() || createId('stu');
+  // IMPORTANT: NEVER write email / authUserId / passwordHash into public `class_state` student object!
   const student = buildStudent(roster, state?.classInfo.name ?? '10T4', {
     id: studentId,
     name: cleanName,
@@ -699,12 +1075,22 @@ export async function registerStudentAccount(
     position: params.position ?? null,
   });
 
+  const providers = mergeAuthProviders(
+    params.authProviders,
+    password.length > 0 ? (cleanEmail ? ['email'] : ['local']) : [],
+  );
+  const avatarUrl = params.avatarUrl?.trim() || null;
+
   const account: StudentAccountRecord = {
     studentId: student.id,
     loginId,
     loginIdKey,
     name: student.name,
-    passwordHash: hashStudentPassword(password),
+    passwordHash: password.length > 0 ? hashStudentPassword(password) : '',
+    ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmail } : {}),
+    ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
+    ...(providers.length > 0 ? { authProviders: providers } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -759,6 +1145,176 @@ export async function registerStudentAccount(
   }
 
   return { ok: true, account, student };
+}
+
+export type RegisterOAuthStudentParams = {
+  name: string;
+  loginId?: string;
+  gender?: Gender;
+  group?: string | null;
+  authUserId: string;
+  email: string;
+  authProviders: AuthProviderKind[];
+  avatarUrl?: string | null;
+  optionalPassword?: string;
+  writeToClassState?: boolean;
+};
+
+/**
+ * Registers a brand-new student account directly from Google/GitHub/Email OAuth onboarding,
+ * auto-suggesting a unique `10T4-XX` Login ID if omitted and syncing live to the class roster.
+ */
+export async function registerOAuthStudentAccount(
+  params: RegisterOAuthStudentParams,
+): Promise<RegisterStudentResult> {
+  const resolvedLoginId =
+    params.loginId && params.loginId.trim().length > 0
+      ? params.loginId.trim()
+      : await suggestNextLoginId('10T4');
+
+  const cleanPass = params.optionalPassword?.trim() ?? '';
+  return registerStudentAccount({
+    name: params.name,
+    loginId: resolvedLoginId,
+    password: cleanPass,
+    allowEmptyPassword: cleanPass.length === 0,
+    gender: params.gender ?? 'male',
+    group: params.group ?? null,
+    email: params.email,
+    authUserId: params.authUserId,
+    authProviders: mergeAuthProviders(params.authProviders, cleanPass ? ['email'] : []),
+    avatarUrl: params.avatarUrl ?? null,
+    writeToClassState: params.writeToClassState ?? true,
+  });
+}
+
+/**
+ * Links a Google / GitHub / Email Supabase Auth identity (and avatar) to an existing student account.
+ */
+export async function linkAuthIdentityToStudent(params: {
+  studentId: string;
+  authUserId?: string | null;
+  email?: string | null;
+  authProviders?: AuthProviderKind[];
+  avatarUrl?: string | null;
+}): Promise<{ ok: boolean; error?: string; account?: StudentAccountRecord }> {
+  const accounts = await loadStudentAccounts({ forceRemote: true });
+  const idx = accounts.findIndex((a) => a.studentId === params.studentId);
+  if (idx < 0) {
+    return { ok: false, error: 'Không tìm thấy tài khoản học sinh để liên kết.' };
+  }
+
+  const existing = accounts[idx];
+  const cleanEmail = params.email?.trim() ? normalizeEmail(params.email) : existing.email ?? null;
+  if (cleanEmail && cleanEmail !== existing.emailKey) {
+    const emailErr = validateEmail(cleanEmail);
+    if (emailErr) return { ok: false, error: emailErr };
+    const taken = await isEmailTaken(cleanEmail, {
+      excludeStudentId: params.studentId,
+      forceRemote: true,
+    });
+    if (taken) {
+      return {
+        ok: false,
+        error: `Gmail "${cleanEmail}" đã được liên kết với một tài khoản khác trên lớp!`,
+      };
+    }
+  }
+
+  const cleanUid = params.authUserId?.trim() || existing.authUserId || null;
+  if (cleanUid && cleanUid !== existing.authUserId) {
+    const uidTaken = await isAuthUserIdTakenByOther(cleanUid, {
+      excludeStudentId: params.studentId,
+    });
+    if (uidTaken) {
+      return {
+        ok: false,
+        error: 'Tài khoản Google/GitHub này đã được liên kết với một tài khoản khác!',
+      };
+    }
+  }
+
+  const mergedProviders = mergeAuthProviders(existing.authProviders, params.authProviders);
+  const nextAvatar =
+    params.avatarUrl !== undefined
+      ? params.avatarUrl?.trim() || existing.avatarUrl || null
+      : existing.avatarUrl || null;
+
+  const updated: StudentAccountRecord = {
+    ...existing,
+    ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmail } : {}),
+    ...(cleanUid ? { authUserId: cleanUid } : {}),
+    ...(mergedProviders.length > 0 ? { authProviders: mergedProviders } : {}),
+    ...(nextAvatar ? { avatarUrl: nextAvatar } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+
+  await saveStudentAccounts(accounts.map((a, i) => (i === idx ? updated : a)));
+  emitStudentAccountsChanged({
+    type: 'updated',
+    studentId: params.studentId,
+    account: updated,
+  });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      upsertAuthRegistryRemote({ student: updated as unknown as Record<string, unknown> }),
+      2_000,
+    );
+  }
+
+  return { ok: true, account: updated };
+}
+
+/**
+ * Overwrites a student's local + cloud registry password hash (used after Supabase
+ * PASSWORD_RECOVERY reset or when setting a password on an OAuth-only account).
+ */
+export async function syncStudentPasswordHash(
+  studentId: string,
+  newPassword: string,
+): Promise<{ ok: boolean; error?: string; account?: StudentAccountRecord }> {
+  const cleanNew = newPassword.trim();
+  if (cleanNew.length < MIN_STUDENT_PASSWORD_LENGTH) {
+    return {
+      ok: false,
+      error: `Mật khẩu mới phải có ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`,
+    };
+  }
+
+  const accounts = await loadStudentAccounts({ forceRemote: true });
+  const idx = accounts.findIndex((a) => a.studentId === studentId);
+  if (idx < 0) {
+    return { ok: false, error: 'Không tìm thấy tài khoản học sinh cần cập nhật mật khẩu.' };
+  }
+
+  const current = accounts[idx];
+  const nextProviders = mergeAuthProviders(
+    current.authProviders,
+    current.emailKey ? ['email'] : ['local'],
+  );
+  const updated: StudentAccountRecord = {
+    ...current,
+    passwordHash: hashStudentPassword(cleanNew),
+    authProviders: nextProviders,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await saveStudentAccounts(accounts.map((a, i) => (i === idx ? updated : a)));
+  emitStudentAccountsChanged({
+    type: 'updated',
+    studentId,
+    account: updated,
+  });
+
+  if (isSupabaseConfigured) {
+    await awaitBriefly(
+      upsertAuthRegistryRemote({ student: updated as unknown as Record<string, unknown> }),
+      2_000,
+    );
+  }
+
+  return { ok: true, account: updated };
 }
 
 /**
@@ -922,6 +1478,7 @@ export async function updateStudentAccountCredentials(params: {
 
   const now = new Date().toISOString();
   const updated: StudentAccountRecord = {
+    ...(existing ?? {}),
     studentId: params.studentId,
     loginId: nextLoginId,
     loginIdKey: normalizeLoginIdKey(nextLoginId),
@@ -966,7 +1523,10 @@ export async function changeOwnStudentPassword(params: {
     return { ok: false, error: 'Không tìm thấy tài khoản học sinh để đổi mật khẩu.' };
   }
   const current = accounts[idx];
-  if (!verifyStudentPassword(params.currentPassword.trim(), current.passwordHash)) {
+  if (
+    current.passwordHash.includes(':') &&
+    !verifyStudentPassword(params.currentPassword.trim(), current.passwordHash)
+  ) {
     return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
   }
   const cleanNew = params.newPassword.trim();
@@ -979,6 +1539,10 @@ export async function changeOwnStudentPassword(params: {
   const next: StudentAccountRecord = {
     ...current,
     passwordHash: hashStudentPassword(cleanNew),
+    authProviders: mergeAuthProviders(
+      current.authProviders,
+      current.emailKey ? ['email'] : ['local'],
+    ),
     updatedAt: new Date().toISOString(),
   };
   await saveStudentAccounts(accounts.map((a, i) => (i === idx ? next : a)));
@@ -1055,6 +1619,7 @@ export async function ensureAccountsForBulkStudents(
       loginIdKey,
       name: s.name,
       passwordHash: hashStudentPassword(cleanPass),
+      authProviders: ['local'],
       createdAt: now,
       updatedAt: now,
     });

@@ -307,7 +307,7 @@ export default function DashboardScreen() {
               style={({ pressed }) => [styles.avatarWrap, pressed && styles.pressed]}>
               <Avatar
                 name={greeting}
-                imageUrl={auth.isCloudActive ? auth.profile?.avatarUrl : null}
+                imageUrl={auth.profile?.avatarUrl ?? null}
                 size={48}
                 ring
                 frame={decor.avatarFrame}

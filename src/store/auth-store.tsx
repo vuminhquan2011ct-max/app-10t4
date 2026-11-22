@@ -1,62 +1,117 @@
 /**
- * Role-aware & per-account password authentication store for Class 10T4.
+ * Role-aware, OAuth (Google / GitHub), Gmail + Password & per-account ID authentication store for Class 10T4.
  *
- * - Each Student has their own unique Login ID (Số ID) and self-chosen personal
- *   password. Duplicate IDs with wrong passwords are strictly rejected.
- * - Homeroom Teachers (`teacher`) & Subject Teachers (`subject_teacher`) can
- *   create & sign in with their own personal Teacher Account (unique Mã ID +
- *   personal password) OR authenticate via the class teacher access code (`K8T4`).
- * - Exposes `isCloudSyncEnabled` (`isSupabaseConfigured`) so live Realtime &
- *   Supabase `class_state` sync runs in password-auth mode while `isCloudActive`
- *   remains `false` for Google-OAuth UI distinction.
- * - Exposes `accountScopeKey` so personal usage (Decor, Coins, Stickers,
- *   Missions, Task checklists, Saved resources, Pomodoro stats) is 100%
- *   isolated per account.
+ * - Supports 1-tap Google & GitHub OAuth sign-in:
+ *   - Returning users match their linked Student/Teacher record and enter immediately.
+ *   - First-time users land on the Profile Completion / Account Linking flow (`needsProfileCompletion`).
+ * - Supports Gmail + Password sign-in, registration (handling both `mailer_autoconfirm: true` and `false`),
+ *   confirmation email resend, and private email password reset (`PASSWORD_RECOVERY` + `updateUser`).
+ * - Preserves 100% backward-compatible personal Login ID (`Số ID` / `Mã ID`) + password login
+ *   and teacher quick-access code (`K8T4`).
+ * - Keeps `isCloudActive: false` (unmigrated legacy RLS tables stay disabled) while enabling live
+ *   Realtime + Supabase `class_state` sync (`isCloudSyncEnabled`) and Google/GitHub avatars (`profile.avatarUrl`).
+ * - Preserves `NewAccountHologramWelcome` (`isNewAccountWelcomePending`) strictly for brand-new accounts.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { User } from '@supabase/supabase-js';
+import * as Linking from 'expo-linking';
 import {
   createContext,
   useCallback,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
+import { Platform } from 'react-native';
 
 import { subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import {
+  MIN_STUDENT_PASSWORD_LENGTH,
   changeOwnStudentPassword,
+  findAccountByStudentId,
+  findStudentAccountByAuthIdentity,
+  isEmailTaken,
+  isLoginIdTaken,
+  linkAuthIdentityToStudent,
   loadStudentAccounts,
+  mergeAuthProviders,
+  normalizeAuthProviders,
+  normalizeEmail,
+  registerOAuthStudentAccount,
   registerStudentAccount,
   subscribeStudentAccountsChanged,
+  suggestNextLoginId,
+  syncStudentPasswordHash,
   updateStudentAccountName,
+  validateEmail,
+  validateLoginId,
   verifyStudentLogin,
+  verifyStudentPassword,
+  type StudentAccountRecord,
 } from '@/lib/student-accounts';
-import { isSupabaseConfigured } from '@/lib/supabase';
+import { isSupabaseConfigured, supabase } from '@/lib/supabase';
+import {
+  clearWebAuthUrlParams,
+  completeSupabaseAuthFromUrl,
+  extractOAuthUserInfo,
+  fetchSupabaseAuthSettings,
+  isRecoveryUrl,
+  linkSupabaseOAuthIdentity,
+  resendSupabaseConfirmationEmail,
+  sendSupabasePasswordReset,
+  signInSupabaseEmail,
+  signUpSupabaseEmail,
+  startSupabaseOAuth,
+  updateSupabasePassword,
+} from '@/lib/supabase-auth';
 import {
   changeOwnTeacherPassword,
+  findTeacherAccountByAuthIdentity,
+  findTeacherAccountById,
+  isTeacherLoginIdTaken,
+  linkAuthIdentityToTeacher,
   loadTeacherAccounts,
+  registerOAuthTeacherAccount,
   registerTeacherAccount,
   removeTeacherAccount,
   subscribeTeacherAccountsChanged,
+  suggestNextTeacherLoginId,
+  syncTeacherPasswordHash,
   updateTeacherAccount,
+  validateTeacherLoginId,
   verifyTeacherLogin,
   type TeacherAccountRecord,
   type TeacherRole,
 } from '@/lib/teacher-accounts';
-import type { MemberRole, MemberUpdatePatch, Profile } from '@/types/auth';
+import { normalizeName } from '@/lib/utils';
+import type {
+  AuthProviderKind,
+  EmailRegisterInput,
+  MemberRole,
+  MemberUpdatePatch,
+  OAuthOnboardingInput,
+  OAuthProviderName,
+  PendingOAuthUser,
+  Profile,
+  SupabaseAuthSettings,
+} from '@/types/auth';
 import type { Gender } from '@/types/models';
 
 export const APP_ACCESS_PASSWORD = 'vuquan';
 export const TEACHER_ACCESS_PASSWORD = 'K8T4';
+const MIN_EMAIL_PASSWORD_LENGTH = 6;
 
 export type AccountRole = 'student' | 'subject_teacher' | 'teacher';
 
 const PASS_AUTH_KEY = 'class10t4:pass-auth:v1';
 const LEGACY_OFFLINE_KEY = 'class10t4:offline-demo:v1';
 const NEW_ACCOUNT_WELCOME_PENDING_KEY = 'class10t4:new-account-welcome-pending:v1';
+const PENDING_OAUTH_LINK_KEY = 'class10t4:pending-oauth-link:v1';
+const PENDING_OAUTH_LINK_TTL_MS = 10 * 60 * 1000;
 
 type StoredPassSession = {
   unlocked: boolean;
@@ -66,11 +121,51 @@ type StoredPassSession = {
   studentId?: string | null;
   teacherId?: string | null;
   loginId?: string | null;
+  email?: string | null;
+  avatarUrl?: string | null;
+  authProviders?: AuthProviderKind[];
+  authUserId?: string | null;
+  hasAccountPassword?: boolean;
   signedInAt: string;
+};
+
+type PendingOAuthLinkRecord = {
+  kind: 'student' | 'teacher';
+  accountId: string;
+  provider: OAuthProviderName;
+  createdAt: string;
+};
+
+type PendingRegistrationMetadata = {
+  kind?: 'student' | 'teacher' | 'subject_teacher';
+  name?: string;
+  loginId?: string;
+  gender?: Gender;
+  group?: string | null;
+  subject?: string | null;
 };
 
 function isAccountRole(value: unknown): value is AccountRole {
   return value === 'student' || value === 'subject_teacher' || value === 'teacher';
+}
+
+function hasAuthCallbackMarkers(url: string): boolean {
+  return (
+    isRecoveryUrl(url) ||
+    url.includes('code=') ||
+    url.includes('access_token=') ||
+    url.includes('refresh_token=') ||
+    url.includes('error_description=') ||
+    url.includes('error_code=') ||
+    /[?&#]error=/.test(url)
+  );
+}
+
+function clearStalePendingRegistrationMeta(user: User): void {
+  const meta = user.user_metadata as Record<string, unknown> | undefined;
+  if (meta && meta.pending_registration) {
+    void supabase.auth.updateUser({ data: { pending_registration: null } }).catch(() => {});
+  }
 }
 
 function makeLocalProfile(
@@ -80,7 +175,13 @@ function makeLocalProfile(
   studentId: string | null,
   teacherId: string | null,
   createdAt: string,
+  extra?: {
+    email?: string | null;
+    avatarUrl?: string | null;
+    authProviders?: AuthProviderKind[];
+  },
 ): Profile {
+  const providers = normalizeAuthProviders(extra?.authProviders);
   return {
     id:
       accountRole === 'teacher'
@@ -94,13 +195,14 @@ function makeLocalProfile(
           : studentId
             ? `stu_${studentId}`
             : 'local-student',
-    email: null,
+    email: extra?.email?.trim() ? normalizeEmail(extra.email) : null,
     displayName,
     role: accountRole as MemberRole,
     subject: subjectName,
     status: 'approved',
     studentId: accountRole === 'student' ? studentId : null,
-    avatarUrl: null,
+    avatarUrl: extra?.avatarUrl?.trim() || null,
+    authProviders: providers.length > 0 ? providers : undefined,
     canViewPrivate: accountRole === 'teacher',
     createdAt,
     updatedAt: createdAt,
@@ -157,6 +259,8 @@ export type UpdateTeacherAccountInput = {
 
 export type AuthStore = {
   configured: boolean;
+  /** Convenience flag matching `@/lib/supabase`'s `isSupabaseConfigured`. */
+  isSupabaseConfigured: boolean;
   loading: boolean;
   busy: boolean;
   error: string | null;
@@ -180,6 +284,10 @@ export type AuthStore = {
   studentAccountCount: number;
   /** Number of registered personal teacher accounts (local + synced). */
   teacherAccountCount: number;
+  /** Alias for `studentAccountCount`. */
+  registeredStudentCount: number;
+  /** Alias for `teacherAccountCount`. */
+  registeredTeacherCount: number;
   /** Monotonic version counter that increments whenever student accounts change. */
   studentAccountsVersion: number;
   /** Monotonic version counter that increments whenever teacher accounts change. */
@@ -188,21 +296,81 @@ export type AuthStore = {
   loginEventId: number;
   /** True when Supabase cloud sync + Realtime Broadcast is configured and enabled. */
   isCloudSyncEnabled: boolean;
-  /** Cloud Google OAuth is disabled in password-access mode. */
+  /** Remains `false` so legacy unmigrated RLS tables (`profiles`/`student_private`) stay disabled. */
   isCloudActive: boolean;
-  /** True only after valid authentication. */
+  /** Live Supabase `/auth/v1/settings` capability snapshot. */
+  supabaseAuthSettings: SupabaseAuthSettings | null;
+  /** True when the active account is linked to Supabase Auth (Google / GitHub / Email). */
+  hasSupabaseAuth: boolean;
+  /** True when the active personal account currently has a local/email password hash set. */
+  hasAccountPassword: boolean;
+  /** Connected authentication providers for the active account. */
+  authProviders: AuthProviderKind[];
+  /** True when a first-time Google/GitHub user needs to complete profile onboarding or link an existing ID. */
+  needsProfileCompletion: boolean;
+  /** Pending OAuth identity awaiting profile onboarding or existing-ID linking. */
+  pendingOAuthUser: PendingOAuthUser | null;
+  /** True when the user arrived via a password-reset email link and must set a new password. */
+  passwordRecoveryPending: boolean;
+  /** Email waiting for Gmail confirmation (when `mailer_autoconfirm` is OFF in Supabase). */
+  pendingEmailConfirmation: string | null;
+  /** OAuth / deep-link callback error surface for AuthGate. */
+  authCallbackError: string | null;
+  clearAuthCallbackError: () => void;
+  clearPendingEmailConfirmation: () => void;
+  /** True only after valid authentication AND not blocked by recovery or first-time OAuth onboarding. */
   canEnterApp: boolean;
   /** True ONLY right after creating a brand-new account until the welcome hologram is dismissed. */
   isNewAccountWelcomePending: boolean;
   /** Dismisses the first-boot hologram welcome overlay for newly created accounts. */
   dismissNewAccountWelcome: () => void;
   pendingMembersCount: number;
+  /* --- OAuth & Gmail + Password Auth APIs --- */
+  signInWithGoogle: () => Promise<{ ok: boolean; error?: string; providerNotEnabled?: boolean }>;
+  signInWithGithub: () => Promise<{ ok: boolean; error?: string; providerNotEnabled?: boolean }>;
+  linkGoogleAccount: () => Promise<{
+    ok: boolean;
+    redirected?: boolean;
+    error?: string;
+    providerNotEnabled?: boolean;
+  }>;
+  linkGithubAccount: () => Promise<{
+    ok: boolean;
+    redirected?: boolean;
+    error?: string;
+    providerNotEnabled?: boolean;
+  }>;
+  completeOAuthOnboarding: (input: OAuthOnboardingInput) => Promise<{ ok: boolean; error?: string }>;
+  linkOAuthToExistingAccount: (input: {
+    kind: 'student' | 'teacher';
+    loginId: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  signInWithEmailOrId: (input: {
+    kind: 'student' | 'teacher';
+    identifier: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string; emailNotConfirmed?: boolean }>;
+  registerWithEmailAndPassword: (
+    input: EmailRegisterInput,
+  ) => Promise<{ ok: boolean; error?: string; needsEmailConfirmation?: boolean }>;
+  requestPasswordReset: (email: string) => Promise<{ ok: boolean; error?: string }>;
+  completePasswordReset: (newPassword: string) => Promise<{ ok: boolean; error?: string }>;
+  cancelPasswordRecovery: () => Promise<void>;
+  resendConfirmationEmail: (email: string) => Promise<{ ok: boolean; error?: string }>;
+  setOrChangeAccountPassword: (input: {
+    currentPassword?: string;
+    newPassword: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  /* --- Legacy / Existing Local ID & Teacher Management APIs --- */
   signInWithPassword: (
     password: string,
     displayName?: string,
     options?: SignInOptions,
   ) => Promise<boolean>;
   signInAsStudent: (loginId: string, password: string) => Promise<boolean>;
+  /** Alias for `signInAsStudent`. */
+  signInStudent: (loginId: string, password: string) => Promise<boolean>;
   registerAndSignInStudent: (
     input: RegisterStudentInput,
   ) => Promise<{ ok: boolean; duplicateId?: boolean; passwordMatched?: boolean; error?: string }>;
@@ -211,6 +379,12 @@ export type AuthStore = {
     newPassword: string,
   ) => Promise<{ ok: boolean; error?: string }>;
   signInAsTeacher: (
+    loginId: string,
+    password: string,
+    expectedRole?: TeacherRole,
+  ) => Promise<boolean>;
+  /** Alias for `signInAsTeacher`. */
+  signInTeacher: (
     loginId: string,
     password: string,
     expectedRole?: TeacherRole,
@@ -263,6 +437,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [studentId, setStudentId] = useState<string | null>(null);
   const [teacherId, setTeacherId] = useState<string | null>(null);
   const [loginId, setLoginId] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(null);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [authProviders, setAuthProviders] = useState<AuthProviderKind[]>([]);
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
+  const [hasAccountPassword, setHasAccountPassword] = useState(false);
   const [studentAccountCount, setStudentAccountCount] = useState(0);
   const [teacherAccountCount, setTeacherAccountCount] = useState(0);
   const [studentAccountsVersion, setStudentAccountsVersion] = useState(0);
@@ -271,9 +450,70 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loginEventId, setLoginEventId] = useState(0);
   const [isNewAccountWelcomePending, setIsNewAccountWelcomePending] = useState(false);
 
+  // Supabase Auth states (OAuth onboarding, password recovery, email confirmation, settings)
+  const [supabaseAuthSettings, setSupabaseAuthSettings] = useState<SupabaseAuthSettings | null>(
+    null,
+  );
+  const [needsProfileCompletion, setNeedsProfileCompletion] = useState(false);
+  const [pendingOAuthUser, setPendingOAuthUser] = useState<PendingOAuthUser | null>(null);
+  const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(
+    () =>
+      Platform.OS === 'web' &&
+      typeof window !== 'undefined' &&
+      isSupabaseConfigured &&
+      isRecoveryUrl(window.location.href),
+  );
+  const [pendingEmailConfirmation, setPendingEmailConfirmation] = useState<string | null>(null);
+  const [authCallbackError, setAuthCallbackError] = useState<string | null>(null);
+
+  // Concurrency & lifecycle guards (read/written only in callbacks & effects — never during render!)
+  const suppressAutoResolveRef = useRef(false);
+  const passwordRecoveryRef = useRef(false);
+  const signingOutRef = useRef(false);
+  const lastHandledUrlRef = useRef<{ url: string; at: number } | null>(null);
+  const inFlightResolveRef = useRef<Promise<'entered' | 'onboarding' | 'linked' | 'error'> | null>(
+    null,
+  );
+  const unlockedRef = useRef(false);
+  const activeSessionRef = useRef<{
+    accountRole: AccountRole;
+    studentId: string | null;
+    teacherId: string | null;
+    loginId: string | null;
+    subjectName: string | null;
+    displayName: string;
+    email: string | null;
+    avatarUrl: string | null;
+    authProviders: AuthProviderKind[];
+    authUserId: string | null;
+    hasAccountPassword: boolean;
+    createdAt: string | undefined;
+  }>({
+    accountRole: 'student',
+    studentId: null,
+    teacherId: null,
+    loginId: null,
+    subjectName: null,
+    displayName: '',
+    email: null,
+    avatarUrl: null,
+    authProviders: [],
+    authUserId: null,
+    hasAccountPassword: false,
+    createdAt: undefined,
+  });
+
   const dismissNewAccountWelcome = useCallback(() => {
     setIsNewAccountWelcomePending(false);
     void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+  }, []);
+
+  const clearAuthCallbackError = useCallback(() => {
+    setAuthCallbackError(null);
+  }, []);
+
+  const clearPendingEmailConfirmation = useCallback(() => {
+    setPendingEmailConfirmation(null);
   }, []);
 
   const refreshStudentAccountCount = useCallback(async () => {
@@ -287,6 +527,485 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTeacherAccountCount(list.length);
     setTeacherAccountsVersion((v) => v + 1);
   }, []);
+
+  const persistSession = useCallback(
+    async (next: {
+      displayName: string;
+      accountRole: AccountRole;
+      subjectName: string | null;
+      studentId: string | null;
+      teacherId: string | null;
+      loginId: string | null;
+      email?: string | null;
+      avatarUrl?: string | null;
+      authProviders?: AuthProviderKind[];
+      authUserId?: string | null;
+      hasAccountPassword?: boolean;
+      signedInAt?: string;
+    }) => {
+      const ts = next.signedInAt ?? new Date().toISOString();
+      const cleanEmail = next.email?.trim() ? normalizeEmail(next.email) : null;
+      const cleanAvatar = next.avatarUrl?.trim() || null;
+      const cleanProviders = normalizeAuthProviders(next.authProviders);
+      const cleanAuthUserId = next.authUserId?.trim() || null;
+      const nextHasPass =
+        next.hasAccountPassword !== undefined
+          ? next.hasAccountPassword
+          : activeSessionRef.current.hasAccountPassword;
+
+      const session: StoredPassSession = {
+        unlocked: true,
+        displayName: next.displayName,
+        accountRole: next.accountRole,
+        subjectName: next.subjectName,
+        studentId: next.studentId,
+        teacherId: next.teacherId,
+        loginId: next.loginId,
+        email: cleanEmail,
+        avatarUrl: cleanAvatar,
+        authProviders: cleanProviders.length > 0 ? cleanProviders : undefined,
+        authUserId: cleanAuthUserId,
+        hasAccountPassword: nextHasPass,
+        signedInAt: ts,
+      };
+      await AsyncStorage.setItem(PASS_AUTH_KEY, JSON.stringify(session));
+
+      unlockedRef.current = true;
+      activeSessionRef.current = {
+        accountRole: next.accountRole,
+        studentId: next.studentId,
+        teacherId: next.teacherId,
+        loginId: next.loginId,
+        subjectName: next.subjectName,
+        displayName: next.displayName,
+        email: cleanEmail,
+        avatarUrl: cleanAvatar,
+        authProviders: cleanProviders,
+        authUserId: cleanAuthUserId,
+        hasAccountPassword: nextHasPass,
+        createdAt: ts,
+      };
+
+      setUnlocked(true);
+      setAccountRole(next.accountRole);
+      setSubjectName(next.subjectName);
+      setStudentId(next.studentId);
+      setTeacherId(next.teacherId);
+      setLoginId(next.loginId);
+      setEmail(cleanEmail);
+      setAvatarUrl(cleanAvatar);
+      setAuthProviders(cleanProviders);
+      setSupabaseUserId(cleanAuthUserId);
+      setHasAccountPassword(nextHasPass);
+      setProfile(
+        makeLocalProfile(
+          next.displayName,
+          next.accountRole,
+          next.subjectName,
+          next.studentId,
+          next.teacherId,
+          ts,
+          {
+            email: cleanEmail,
+            avatarUrl: cleanAvatar,
+            authProviders: cleanProviders,
+          },
+        ),
+      );
+    },
+    [],
+  );
+
+  const enterMatchedStudent = useCallback(
+    async (
+      account: StudentAccountRecord,
+      options?: {
+        oauthInfo?: PendingOAuthUser;
+        isFreshSignIn?: boolean;
+        forceNewAccountWelcome?: boolean;
+        signedInAt?: string;
+      },
+    ) => {
+      let activeAccount = account;
+      const info = options?.oauthInfo;
+
+      if (info) {
+        const mergedProviders = mergeAuthProviders(account.authProviders, info.authProviders);
+        const needsSync =
+          (info.authUserId && account.authUserId !== info.authUserId) ||
+          (info.email && account.emailKey !== normalizeEmail(info.email)) ||
+          (info.avatarUrl && account.avatarUrl !== info.avatarUrl) ||
+          mergedProviders.length !== (account.authProviders?.length ?? 0);
+        if (needsSync) {
+          const synced = await linkAuthIdentityToStudent({
+            studentId: account.studentId,
+            authUserId: info.authUserId,
+            email: info.email || account.email,
+            authProviders: mergedProviders,
+            avatarUrl: info.avatarUrl ?? account.avatarUrl ?? null,
+          }).catch(() => ({ ok: false, account: undefined }));
+          if (synced.ok && synced.account) {
+            activeAccount = synced.account;
+          }
+        }
+      }
+
+      const pendingWelcomeKey = await AsyncStorage.getItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(
+        () => null,
+      );
+      const shouldShowWelcome =
+        Boolean(options?.forceNewAccountWelcome) ||
+        pendingWelcomeKey === `student:${activeAccount.studentId}`;
+
+      if (shouldShowWelcome) {
+        await AsyncStorage.setItem(
+          NEW_ACCOUNT_WELCOME_PENDING_KEY,
+          `student:${activeAccount.studentId}`,
+        ).catch(() => {});
+        setIsNewAccountWelcomePending(true);
+      } else {
+        setIsNewAccountWelcomePending(false);
+        if (pendingWelcomeKey) {
+          void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+        }
+      }
+
+      setNeedsProfileCompletion(false);
+      setPendingOAuthUser(null);
+      setPendingEmailConfirmation(null);
+      setAuthCallbackError(null);
+
+      await persistSession({
+        displayName: activeAccount.name || info?.displayName || 'Học sinh',
+        accountRole: 'student',
+        subjectName: null,
+        studentId: activeAccount.studentId,
+        teacherId: null,
+        loginId: activeAccount.loginId,
+        email: activeAccount.email ?? info?.email ?? null,
+        avatarUrl: info?.avatarUrl ?? activeAccount.avatarUrl ?? null,
+        authProviders: mergeAuthProviders(
+          activeAccount.authProviders,
+          info?.authProviders,
+          activeAccount.passwordHash.includes(':')
+            ? activeAccount.emailKey
+              ? ['email']
+              : ['local']
+            : [],
+        ),
+        authUserId: info?.authUserId ?? activeAccount.authUserId ?? null,
+        hasAccountPassword: activeAccount.passwordHash.includes(':'),
+        signedInAt: options?.signedInAt,
+      });
+
+      if (options?.isFreshSignIn) {
+        setLoginEventId((n) => n + 1);
+      }
+      void refreshStudentAccountCount().catch(() => {});
+    },
+    [persistSession, refreshStudentAccountCount],
+  );
+
+  const enterMatchedTeacher = useCallback(
+    async (
+      account: TeacherAccountRecord,
+      options?: {
+        oauthInfo?: PendingOAuthUser;
+        isFreshSignIn?: boolean;
+        forceNewAccountWelcome?: boolean;
+        signedInAt?: string;
+      },
+    ) => {
+      let activeAccount = account;
+      const info = options?.oauthInfo;
+
+      if (info) {
+        const mergedProviders = mergeAuthProviders(account.authProviders, info.authProviders);
+        const needsSync =
+          (info.authUserId && account.authUserId !== info.authUserId) ||
+          (info.email && account.emailKey !== normalizeEmail(info.email)) ||
+          (info.avatarUrl && account.avatarUrl !== info.avatarUrl) ||
+          mergedProviders.length !== (account.authProviders?.length ?? 0);
+        if (needsSync) {
+          const synced = await linkAuthIdentityToTeacher({
+            teacherId: account.teacherId,
+            authUserId: info.authUserId,
+            email: info.email || account.email,
+            authProviders: mergedProviders,
+            avatarUrl: info.avatarUrl ?? account.avatarUrl ?? null,
+          }).catch(() => ({ ok: false, account: undefined }));
+          if (synced.ok && synced.account) {
+            activeAccount = synced.account;
+          }
+        }
+      }
+
+      const pendingWelcomeKey = await AsyncStorage.getItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(
+        () => null,
+      );
+      const shouldShowWelcome =
+        Boolean(options?.forceNewAccountWelcome) ||
+        pendingWelcomeKey === `teacher:${activeAccount.teacherId}`;
+
+      if (shouldShowWelcome) {
+        await AsyncStorage.setItem(
+          NEW_ACCOUNT_WELCOME_PENDING_KEY,
+          `teacher:${activeAccount.teacherId}`,
+        ).catch(() => {});
+        setIsNewAccountWelcomePending(true);
+      } else {
+        setIsNewAccountWelcomePending(false);
+        if (pendingWelcomeKey) {
+          void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+        }
+      }
+
+      setNeedsProfileCompletion(false);
+      setPendingOAuthUser(null);
+      setPendingEmailConfirmation(null);
+      setAuthCallbackError(null);
+
+      await persistSession({
+        displayName: activeAccount.name || info?.displayName || 'Giáo viên',
+        accountRole: activeAccount.role,
+        subjectName: activeAccount.subject,
+        studentId: null,
+        teacherId: activeAccount.teacherId,
+        loginId: activeAccount.loginId,
+        email: activeAccount.email ?? info?.email ?? null,
+        avatarUrl: info?.avatarUrl ?? activeAccount.avatarUrl ?? null,
+        authProviders: mergeAuthProviders(
+          activeAccount.authProviders,
+          info?.authProviders,
+          activeAccount.passwordHash.includes(':')
+            ? activeAccount.emailKey
+              ? ['email']
+              : ['local']
+            : [],
+        ),
+        authUserId: info?.authUserId ?? activeAccount.authUserId ?? null,
+        hasAccountPassword: activeAccount.passwordHash.includes(':'),
+        signedInAt: options?.signedInAt,
+      });
+
+      if (options?.isFreshSignIn) {
+        setLoginEventId((n) => n + 1);
+      }
+      void refreshTeacherAccountCount().catch(() => {});
+    },
+    [persistSession, refreshTeacherAccountCount],
+  );
+
+  /**
+   * Resolves an authenticated Supabase User to a linked class account (1-tap auto-enter),
+   * finalizes any pending email registration metadata, completes an in-progress Settings OAuth link,
+   * OR opens the First-Time OAuth Profile Completion onboarding flow.
+   */
+  const resolveSupabaseUser = useCallback(
+    async (
+      user: User,
+      options?: { isFreshSignIn?: boolean },
+    ): Promise<'entered' | 'onboarding' | 'linked' | 'error'> => {
+      if (passwordRecoveryRef.current) return 'entered';
+      if (inFlightResolveRef.current) {
+        return inFlightResolveRef.current;
+      }
+
+      const task = (async (): Promise<'entered' | 'onboarding' | 'linked' | 'error'> => {
+        const info = extractOAuthUserInfo(user);
+
+        // 1. Complete an explicit Settings "Liên kết Google / GitHub" redirect flow if pending (max 10 min TTL).
+        try {
+          const pendingLinkRaw = await AsyncStorage.getItem(PENDING_OAUTH_LINK_KEY);
+          if (pendingLinkRaw) {
+            await AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {});
+            const pendingLink = JSON.parse(pendingLinkRaw) as Partial<PendingOAuthLinkRecord> | null;
+            const createdMs = pendingLink?.createdAt ? Date.parse(pendingLink.createdAt) : NaN;
+            const isFresh =
+              Number.isFinite(createdMs) && Date.now() - createdMs <= PENDING_OAUTH_LINK_TTL_MS;
+
+            if (isFresh && pendingLink?.kind === 'student' && pendingLink.accountId) {
+              const linked = await linkAuthIdentityToStudent({
+                studentId: pendingLink.accountId,
+                authUserId: info.authUserId,
+                email: info.email || undefined,
+                authProviders: info.authProviders,
+                avatarUrl: info.avatarUrl,
+              });
+              if (linked.ok && linked.account) {
+                clearStalePendingRegistrationMeta(user);
+                await enterMatchedStudent(linked.account, {
+                  oauthInfo: info,
+                  isFreshSignIn: false,
+                  signedInAt: activeSessionRef.current.createdAt,
+                });
+                return 'linked';
+              }
+              setAuthCallbackError(
+                linked.error ?? 'Không thể liên kết tài khoản Google/GitHub này.',
+              );
+              if (
+                isSupabaseConfigured &&
+                info.authUserId !== activeSessionRef.current.authUserId
+              ) {
+                signingOutRef.current = true;
+                try {
+                  await supabase.auth.signOut().catch(() => {});
+                } finally {
+                  signingOutRef.current = false;
+                }
+              }
+              return 'error';
+            }
+            if (isFresh && pendingLink?.kind === 'teacher' && pendingLink.accountId) {
+              const linked = await linkAuthIdentityToTeacher({
+                teacherId: pendingLink.accountId,
+                authUserId: info.authUserId,
+                email: info.email || undefined,
+                authProviders: info.authProviders,
+                avatarUrl: info.avatarUrl,
+              });
+              if (linked.ok && linked.account) {
+                clearStalePendingRegistrationMeta(user);
+                await enterMatchedTeacher(linked.account, {
+                  oauthInfo: info,
+                  isFreshSignIn: false,
+                  signedInAt: activeSessionRef.current.createdAt,
+                });
+                return 'linked';
+              }
+              setAuthCallbackError(
+                linked.error ?? 'Không thể liên kết tài khoản Google/GitHub này.',
+              );
+              if (
+                isSupabaseConfigured &&
+                info.authUserId !== activeSessionRef.current.authUserId
+              ) {
+                signingOutRef.current = true;
+                try {
+                  await supabase.auth.signOut().catch(() => {});
+                } finally {
+                  signingOutRef.current = false;
+                }
+              }
+              return 'error';
+            }
+          }
+        } catch {
+          // Continue normal resolution if pending link record is malformed or expired.
+        }
+
+        // 2. Look up linked Student & Teacher accounts across local + cloud registry.
+        const [matchedStudent, matchedTeacher] = await Promise.all([
+          findStudentAccountByAuthIdentity({
+            authUserId: info.authUserId,
+            email: info.email,
+            forceRemote: true,
+          }),
+          findTeacherAccountByAuthIdentity({
+            authUserId: info.authUserId,
+            email: info.email,
+            forceRemote: true,
+          }),
+        ]);
+
+        if (matchedStudent) {
+          clearStalePendingRegistrationMeta(user);
+          await enterMatchedStudent(matchedStudent, {
+            oauthInfo: info,
+            isFreshSignIn: options?.isFreshSignIn,
+          });
+          return 'entered';
+        }
+
+        if (matchedTeacher) {
+          clearStalePendingRegistrationMeta(user);
+          await enterMatchedTeacher(matchedTeacher, {
+            oauthInfo: info,
+            isFreshSignIn: options?.isFreshSignIn,
+          });
+          return 'entered';
+        }
+
+        // 3. Auto-finalize pending email registration metadata (when registered on another device with autoconfirm OFF).
+        const metaRaw = (user.user_metadata as Record<string, unknown> | undefined)
+          ?.pending_registration;
+        if (metaRaw && typeof metaRaw === 'object') {
+          const meta = metaRaw as PendingRegistrationMetadata;
+          const cleanName = typeof meta.name === 'string' ? normalizeName(meta.name) : '';
+          if (cleanName.length >= 2 && info.email) {
+            if (meta.kind === 'teacher' || meta.kind === 'subject_teacher') {
+              const created = await registerOAuthTeacherAccount({
+                name: cleanName,
+                role: meta.kind,
+                subject: meta.kind === 'subject_teacher' ? (meta.subject ?? 'Toán học') : null,
+                loginId: meta.loginId,
+                authUserId: info.authUserId,
+                email: info.email,
+                authProviders: mergeAuthProviders(info.authProviders, ['email']),
+                avatarUrl: info.avatarUrl,
+                writeAuditLog: true,
+              });
+              if (created.ok) {
+                void supabase.auth
+                  .updateUser({ data: { pending_registration: null } })
+                  .catch(() => {});
+                await enterMatchedTeacher(created.account, {
+                  oauthInfo: info,
+                  isFreshSignIn: true,
+                  forceNewAccountWelcome: true,
+                });
+                return 'entered';
+              }
+            } else {
+              const created = await registerOAuthStudentAccount({
+                name: cleanName,
+                loginId: meta.loginId,
+                gender: meta.gender ?? 'male',
+                group: meta.group ?? null,
+                authUserId: info.authUserId,
+                email: info.email,
+                authProviders: mergeAuthProviders(info.authProviders, ['email']),
+                avatarUrl: info.avatarUrl,
+                writeToClassState: true,
+              });
+              if (created.ok) {
+                void supabase.auth
+                  .updateUser({ data: { pending_registration: null } })
+                  .catch(() => {});
+                await enterMatchedStudent(created.account, {
+                  oauthInfo: info,
+                  isFreshSignIn: true,
+                  forceNewAccountWelcome: true,
+                });
+                return 'entered';
+              }
+            }
+          }
+        }
+
+        // 4. First-time Google / GitHub / unlinked Email user -> open Profile Completion Onboarding!
+        unlockedRef.current = false;
+        setUnlocked(false);
+        setIsNewAccountWelcomePending(false);
+        setPendingEmailConfirmation(null);
+        setPendingOAuthUser(info);
+        setNeedsProfileCompletion(true);
+        setSupabaseUserId(info.authUserId);
+        return 'onboarding';
+      })();
+
+      inFlightResolveRef.current = task;
+      try {
+        return await task;
+      } finally {
+        if (inFlightResolveRef.current === task) {
+          inFlightResolveRef.current = null;
+        }
+      }
+    },
+    [enterMatchedStudent, enterMatchedTeacher],
+  );
 
   // Keep account counts & versions live on local changes, tab changes, and Supabase Realtime Broadcast.
   useEffect(() => {
@@ -331,9 +1050,91 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Restore saved session on startup.
+  // Restore saved session, process OAuth/Recovery callback URLs, and subscribe to Supabase Auth events.
   useEffect(() => {
     let active = true;
+
+    // Synchronously snapshot Web URL BEFORE any AsyncStorage await or GoTrueClient `_initialize()` URL strip,
+    // and lock `passwordRecoveryRef` immediately so `SIGNED_IN` can never slip past recovery mode.
+    const initialWebUrl =
+      Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.href : null;
+    if (isSupabaseConfigured && initialWebUrl && isRecoveryUrl(initialWebUrl)) {
+      passwordRecoveryRef.current = true;
+    }
+
+    // Fetch live Supabase Auth capability settings in background (60s cached, offline-safe).
+    if (isSupabaseConfigured) {
+      fetchSupabaseAuthSettings()
+        .then((settings) => {
+          if (active) setSupabaseAuthSettings(settings);
+        })
+        .catch(() => {});
+    }
+
+    const handleIncomingUrl = async (url: string): Promise<{
+      handled: boolean;
+      isRecovery: boolean;
+      user: User | null;
+    }> => {
+      if (!isSupabaseConfigured || !url || !hasAuthCallbackMarkers(url)) {
+        return { handled: false, isRecovery: false, user: null };
+      }
+      const nowMs = Date.now();
+      const prev = lastHandledUrlRef.current;
+      if (prev && prev.url === url && nowMs - prev.at < 3_000) {
+        return { handled: false, isRecovery: passwordRecoveryRef.current, user: null };
+      }
+      lastHandledUrlRef.current = { url, at: nowMs };
+
+      const urlMarkedRecovery = isRecoveryUrl(url);
+      if (urlMarkedRecovery) {
+        passwordRecoveryRef.current = true;
+        if (active) {
+          setPasswordRecoveryPending(true);
+          setNeedsProfileCompletion(false);
+          setPendingOAuthUser(null);
+        }
+      }
+
+      const res = await completeSupabaseAuthFromUrl(url);
+      if (Platform.OS === 'web' && (res.handled || res.error || urlMarkedRecovery)) {
+        clearWebAuthUrlParams();
+      }
+      if (res.error) {
+        void AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {});
+      }
+      if (!active) {
+        return {
+          handled: res.handled,
+          isRecovery: Boolean((res.isRecovery || urlMarkedRecovery) && res.ok && res.user),
+          user: res.user,
+        };
+      }
+
+      if (res.isRecovery || urlMarkedRecovery) {
+        if (!res.ok || !res.user) {
+          passwordRecoveryRef.current = false;
+          setPasswordRecoveryPending(false);
+          setAuthCallbackError(
+            res.error ??
+              'Liên kết đặt lại mật khẩu đã hết hạn hoặc không hợp lệ. Vui lòng yêu cầu gửi lại email mới.',
+          );
+          return { handled: true, isRecovery: false, user: null };
+        }
+        passwordRecoveryRef.current = true;
+        setPasswordRecoveryPending(true);
+        setNeedsProfileCompletion(false);
+        setPendingOAuthUser(null);
+        return { handled: true, isRecovery: true, user: res.user };
+      }
+
+      if (res.error) {
+        setAuthCallbackError(res.error);
+      }
+
+      return { handled: res.handled, isRecovery: false, user: res.user };
+    };
+
     const init = async () => {
       try {
         await AsyncStorage.removeItem(LEGACY_OFFLINE_KEY).catch(() => {});
@@ -364,6 +1165,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           })
           .catch(() => {});
 
+        // 1. Handle initial Web URL or Native deep-link BEFORE dropping loading splash.
+        let callbackUser: User | null = null;
+        let handledCallback = false;
+        if (isSupabaseConfigured) {
+          const initialUrl =
+            Platform.OS === 'web'
+              ? initialWebUrl
+              : await Linking.getInitialURL().catch(() => null);
+          if (initialUrl && hasAuthCallbackMarkers(initialUrl)) {
+            const cbRes = await handleIncomingUrl(initialUrl);
+            if (!active) return;
+            handledCallback = cbRes.handled;
+            callbackUser = cbRes.user;
+            if (cbRes.isRecovery) {
+              return;
+            }
+          }
+        }
+
+        // 2. Check active Supabase session (handles OAuth return, Settings OAuth link, or returning OAuth user).
+        if (isSupabaseConfigured) {
+          const pendingLinkRaw = await AsyncStorage.getItem(PENDING_OAUTH_LINK_KEY).catch(
+            () => null,
+          );
+          const supaUser =
+            callbackUser ??
+            (await supabase.auth.getSession().catch(() => null))?.data.session?.user ??
+            null;
+          if (!active) return;
+
+          if (supaUser && (handledCallback || pendingLinkRaw || !raw)) {
+            const outcome = await resolveSupabaseUser(supaUser, {
+              isFreshSignIn: handledCallback,
+            });
+            if (outcome !== 'error' || !raw) {
+              return;
+            }
+          }
+        }
+
+        // 3. Restore persisted class session from AsyncStorage (`PASS_AUTH_KEY`).
         if (!raw) return;
 
         const parsed = JSON.parse(raw) as Partial<StoredPassSession> | null;
@@ -377,7 +1219,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const savedTeacherId = parsed.teacherId?.trim() || null;
           const savedLoginId = parsed.loginId?.trim() || null;
 
-          // Enforce personal ID+password login for students: ignore legacy unlinked student sessions.
+          // Enforce personal account binding for students: ignore legacy unlinked student sessions.
           if (savedRole === 'student') {
             let linkedAccount = savedStudentId
               ? studentAccounts.find((a) => a.studentId === savedStudentId)
@@ -393,21 +1235,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
             const resolvedName = linkedAccount.name || parsed.displayName?.trim() || 'Học sinh';
             const resolvedLoginId = linkedAccount.loginId || savedLoginId;
+            const resolvedEmail = linkedAccount.email ?? parsed.email ?? null;
+            const resolvedAvatar = linkedAccount.avatarUrl ?? parsed.avatarUrl ?? null;
+            const resolvedProviders = mergeAuthProviders(
+              linkedAccount.authProviders,
+              parsed.authProviders,
+              linkedAccount.passwordHash.includes(':')
+                ? linkedAccount.emailKey
+                  ? ['email']
+                  : ['local']
+                : [],
+            );
+            const resolvedUid = linkedAccount.authUserId ?? parsed.authUserId ?? null;
             const isWelcomePending =
               pendingWelcomeAccount === `student:${linkedAccount.studentId}`;
-            setUnlocked(true);
-            setAccountRole('student');
-            setSubjectName(null);
-            setStudentId(linkedAccount.studentId);
-            setTeacherId(null);
-            setLoginId(resolvedLoginId);
+
             setIsNewAccountWelcomePending(isWelcomePending);
             if (!isWelcomePending && pendingWelcomeAccount) {
               void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
             }
-            setProfile(
-              makeLocalProfile(resolvedName, 'student', null, linkedAccount.studentId, null, ts),
-            );
+            await persistSession({
+              displayName: resolvedName,
+              accountRole: 'student',
+              subjectName: null,
+              studentId: linkedAccount.studentId,
+              teacherId: null,
+              loginId: resolvedLoginId,
+              email: resolvedEmail,
+              avatarUrl: resolvedAvatar,
+              authProviders: resolvedProviders,
+              authUserId: resolvedUid,
+              hasAccountPassword: linkedAccount.passwordHash.includes(':'),
+              signedInAt: ts,
+            });
             return;
           }
 
@@ -423,51 +1283,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               await AsyncStorage.removeItem(PASS_AUTH_KEY).catch(() => {});
               return;
             }
+            const resolvedEmail = linkedTeacher.email ?? parsed.email ?? null;
+            const resolvedAvatar = linkedTeacher.avatarUrl ?? parsed.avatarUrl ?? null;
+            const resolvedProviders = mergeAuthProviders(
+              linkedTeacher.authProviders,
+              parsed.authProviders,
+              linkedTeacher.passwordHash.includes(':')
+                ? linkedTeacher.emailKey
+                  ? ['email']
+                  : ['local']
+                : [],
+            );
+            const resolvedUid = linkedTeacher.authUserId ?? parsed.authUserId ?? null;
             const isWelcomePending =
               pendingWelcomeAccount === `teacher:${linkedTeacher.teacherId}`;
-            setUnlocked(true);
-            setAccountRole(linkedTeacher.role);
-            setSubjectName(linkedTeacher.subject);
-            setStudentId(null);
-            setTeacherId(linkedTeacher.teacherId);
-            setLoginId(linkedTeacher.loginId);
+
             setIsNewAccountWelcomePending(isWelcomePending);
             if (!isWelcomePending && pendingWelcomeAccount) {
               void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
             }
-            setProfile(
-              makeLocalProfile(
-                linkedTeacher.name,
-                linkedTeacher.role,
-                linkedTeacher.subject,
-                null,
-                linkedTeacher.teacherId,
-                ts,
-              ),
-            );
+            await persistSession({
+              displayName: linkedTeacher.name,
+              accountRole: linkedTeacher.role,
+              subjectName: linkedTeacher.subject,
+              studentId: null,
+              teacherId: linkedTeacher.teacherId,
+              loginId: linkedTeacher.loginId,
+              email: resolvedEmail,
+              avatarUrl: resolvedAvatar,
+              authProviders: resolvedProviders,
+              authUserId: resolvedUid,
+              hasAccountPassword: linkedTeacher.passwordHash.includes(':'),
+              signedInAt: ts,
+            });
             return;
           }
 
-          setUnlocked(true);
-          setAccountRole(savedRole);
-          setSubjectName(savedSubject);
-          setStudentId(null);
-          setTeacherId(null);
-          setLoginId(null);
+          // Teacher quick-access session (K8T4 without personal teacherId).
           setIsNewAccountWelcomePending(false);
           if (pendingWelcomeAccount) {
             void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
           }
-          setProfile(
-            makeLocalProfile(
-              parsed.displayName?.trim() ?? '',
-              savedRole,
-              savedSubject,
-              null,
-              null,
-              ts,
-            ),
-          );
+          await persistSession({
+            displayName: parsed.displayName?.trim() ?? '',
+            accountRole: savedRole,
+            subjectName: savedSubject,
+            studentId: null,
+            teacherId: null,
+            loginId: null,
+            email: parsed.email ?? null,
+            avatarUrl: parsed.avatarUrl ?? null,
+            authProviders: parsed.authProviders ?? ['local'],
+            authUserId: parsed.authUserId ?? null,
+            hasAccountPassword: false,
+            signedInAt: ts,
+          });
         }
       } catch {
         // Ignore corrupt storage and ask for authentication.
@@ -475,53 +1345,1174 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (active) setLoading(false);
       }
     };
-    init();
+
+    void init();
+
+    // Subscribe to live Supabase Auth events (PASSWORD_RECOVERY, OAuth SIGNED_IN, USER_UPDATED).
+    const authSub = isSupabaseConfigured
+      ? supabase.auth.onAuthStateChange((event, session) => {
+          if (!active) return;
+
+          if (event === 'PASSWORD_RECOVERY') {
+            passwordRecoveryRef.current = true;
+            setPasswordRecoveryPending(true);
+            setNeedsProfileCompletion(false);
+            setPendingOAuthUser(null);
+            setLoading(false);
+            return;
+          }
+
+          if (signingOutRef.current || suppressAutoResolveRef.current) {
+            return;
+          }
+
+          if ((event === 'SIGNED_IN' || event === 'USER_UPDATED') && session?.user) {
+            if (passwordRecoveryRef.current) return;
+            // Avoid re-running full resolution if user is already unlocked with this exact authUserId
+            // unless it's USER_UPDATED (which might carry a newly linked OAuth identity / avatar).
+            if (
+              event === 'SIGNED_IN' &&
+              unlockedRef.current &&
+              activeSessionRef.current.authUserId === session.user.id
+            ) {
+              return;
+            }
+            void resolveSupabaseUser(session.user, { isFreshSignIn: event === 'SIGNED_IN' });
+            return;
+          }
+
+          if (event === 'SIGNED_OUT') {
+            setNeedsProfileCompletion(false);
+            setPendingOAuthUser(null);
+            if (!passwordRecoveryRef.current) {
+              setPasswordRecoveryPending(false);
+            }
+          }
+        })
+      : null;
+
+    // Subscribe to Native deep-links (e.g. `app10t4://auth-callback?code=...&auth_action=recovery`).
+    const linkingSub =
+      Platform.OS !== 'web' && isSupabaseConfigured
+        ? Linking.addEventListener('url', ({ url }) => {
+            if (!active || !url) return;
+            void handleIncomingUrl(url).then((res) => {
+              if (!active || res.isRecovery) return;
+              if (res.handled && res.user && !suppressAutoResolveRef.current) {
+                void resolveSupabaseUser(res.user, { isFreshSignIn: true });
+              }
+            });
+          })
+        : null;
+
     return () => {
       active = false;
+      authSub?.data.subscription.unsubscribe();
+      linkingSub?.remove();
     };
-  }, []);
+  }, [persistSession, resolveSupabaseUser]);
 
-  const persistSession = useCallback(
-    async (next: {
-      displayName: string;
-      accountRole: AccountRole;
-      subjectName: string | null;
-      studentId: string | null;
-      teacherId: string | null;
-      loginId: string | null;
-      signedInAt?: string;
-    }) => {
-      const ts = next.signedInAt ?? new Date().toISOString();
-      const session: StoredPassSession = {
-        unlocked: true,
-        displayName: next.displayName,
-        accountRole: next.accountRole,
-        subjectName: next.subjectName,
-        studentId: next.studentId,
-        teacherId: next.teacherId,
-        loginId: next.loginId,
-        signedInAt: ts,
+  /* ---------- OAuth (Google & GitHub) ---------- */
+
+  const runOAuthSignIn = useCallback(
+    async (
+      provider: OAuthProviderName,
+    ): Promise<{ ok: boolean; error?: string; providerNotEnabled?: boolean }> => {
+      setBusy(true);
+      setError(null);
+      setAuthCallbackError(null);
+      try {
+        const res = await startSupabaseOAuth(provider);
+        if (!res.ok) {
+          if (res.cancelled) {
+            return { ok: false };
+          }
+          if (res.providerNotEnabled) {
+            return { ok: false, providerNotEnabled: true, error: res.error };
+          }
+          if (res.error) setError(res.error);
+          return { ok: false, error: res.error };
+        }
+        if (res.redirected) {
+          return { ok: true };
+        }
+        if (res.user) {
+          await resolveSupabaseUser(res.user, { isFreshSignIn: true });
+          return { ok: true };
+        }
+        return { ok: true };
+      } catch {
+        const msg = `Không thể đăng nhập bằng ${provider === 'google' ? 'Google' : 'GitHub'} lúc này. Vui lòng thử lại.`;
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [resolveSupabaseUser],
+  );
+
+  const signInWithGoogle = useCallback(() => runOAuthSignIn('google'), [runOAuthSignIn]);
+  const signInWithGithub = useCallback(() => runOAuthSignIn('github'), [runOAuthSignIn]);
+
+  const runLinkOAuthProvider = useCallback(
+    async (
+      provider: OAuthProviderName,
+    ): Promise<{ ok: boolean; redirected?: boolean; error?: string; providerNotEnabled?: boolean }> => {
+      if (!isSupabaseConfigured) {
+        return {
+          ok: false,
+          error: 'Chưa cấu hình máy chủ đồng bộ Supabase trên thiết bị này.',
+        };
+      }
+      const targetKind: 'student' | 'teacher' | null =
+        accountRole === 'student' && studentId
+          ? 'student'
+          : teacherId
+            ? 'teacher'
+            : null;
+      const targetId = targetKind === 'student' ? studentId : teacherId;
+      if (!targetKind || !targetId) {
+        return {
+          ok: false,
+          error: 'Tính năng liên kết chỉ áp dụng cho tài khoản Học sinh hoặc Giáo viên cá nhân.',
+        };
+      }
+
+      setBusy(true);
+      setError(null);
+      const pendingLink: PendingOAuthLinkRecord = {
+        kind: targetKind,
+        accountId: targetId,
+        provider,
+        createdAt: new Date().toISOString(),
       };
-      await AsyncStorage.setItem(PASS_AUTH_KEY, JSON.stringify(session));
-      setUnlocked(true);
-      setAccountRole(next.accountRole);
-      setSubjectName(next.subjectName);
-      setStudentId(next.studentId);
-      setTeacherId(next.teacherId);
-      setLoginId(next.loginId);
-      setProfile(
-        makeLocalProfile(
-          next.displayName,
-          next.accountRole,
-          next.subjectName,
-          next.studentId,
-          next.teacherId,
-          ts,
-        ),
-      );
+      suppressAutoResolveRef.current = true;
+      try {
+        await AsyncStorage.setItem(PENDING_OAUTH_LINK_KEY, JSON.stringify(pendingLink));
+
+        const sessionRes = await supabase.auth.getSession().catch(() => null);
+        const hasLiveSupaSession = Boolean(sessionRes?.data.session?.user);
+
+        if (hasLiveSupaSession) {
+          const linkRes = await linkSupabaseOAuthIdentity(provider);
+          if (!linkRes.ok) {
+            await AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {});
+            if (linkRes.cancelled) return { ok: false };
+            return {
+              ok: false,
+              providerNotEnabled: linkRes.providerNotEnabled,
+              error: linkRes.error,
+            };
+          }
+          if (linkRes.redirected) {
+            return { ok: true, redirected: true };
+          }
+          const refreshed = await supabase.auth.getUser().catch(() => null);
+          if (refreshed?.data.user) {
+            const outcome = await resolveSupabaseUser(refreshed.data.user, {
+              isFreshSignIn: false,
+            });
+            if (outcome === 'error') {
+              return {
+                ok: false,
+                error:
+                  'Không thể liên kết tài khoản này — Gmail hoặc tài khoản Google/GitHub đã được dùng cho thành viên khác.',
+              };
+            }
+          } else {
+            await AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {});
+          }
+          return { ok: true };
+        }
+
+        // Local-only account without a Supabase Auth session yet: start OAuth sign-in and auto-bind on return!
+        const oauthRes = await startSupabaseOAuth(provider);
+        if (!oauthRes.ok) {
+          await AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {});
+          if (oauthRes.cancelled) return { ok: false };
+          return {
+            ok: false,
+            providerNotEnabled: oauthRes.providerNotEnabled,
+            error: oauthRes.error,
+          };
+        }
+        if (oauthRes.redirected) {
+          return { ok: true, redirected: true };
+        }
+        if (oauthRes.user) {
+          const outcome = await resolveSupabaseUser(oauthRes.user, { isFreshSignIn: false });
+          if (outcome === 'error') {
+            return {
+              ok: false,
+              error:
+                'Không thể liên kết tài khoản này — Gmail hoặc tài khoản Google/GitHub đã được dùng cho thành viên khác.',
+            };
+          }
+        } else {
+          await AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {});
+        }
+        return { ok: true };
+      } catch {
+        await AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {});
+        return {
+          ok: false,
+          error: `Không thể liên kết ${provider === 'google' ? 'Google' : 'GitHub'} lúc này. Vui lòng thử lại.`,
+        };
+      } finally {
+        suppressAutoResolveRef.current = false;
+        setBusy(false);
+      }
+    },
+    [accountRole, studentId, teacherId, resolveSupabaseUser],
+  );
+
+  const linkGoogleAccount = useCallback(
+    () => runLinkOAuthProvider('google'),
+    [runLinkOAuthProvider],
+  );
+  const linkGithubAccount = useCallback(
+    () => runLinkOAuthProvider('github'),
+    [runLinkOAuthProvider],
+  );
+
+  /* ---------- First-Time OAuth Onboarding & Linking Existing ID ---------- */
+
+  const completeOAuthOnboarding = useCallback(
+    async (input: OAuthOnboardingInput): Promise<{ ok: boolean; error?: string }> => {
+      if (!pendingOAuthUser) {
+        return {
+          ok: false,
+          error: 'Phiên Google/GitHub đã hết hạn. Vui lòng đăng nhập lại bằng Google hoặc GitHub.',
+        };
+      }
+
+      const cleanName = normalizeName(input.name);
+      if (cleanName.length < 2) {
+        return { ok: false, error: 'Vui lòng nhập họ và tên đầy đủ (tối thiểu 2 ký tự).' };
+      }
+
+      if (input.kind === 'teacher' || input.kind === 'subject_teacher') {
+        const code = input.accessCode?.trim() ?? '';
+        if (!code) {
+          return {
+            ok: false,
+            error: 'Vui lòng nhập Mã xác thực giáo viên (K8T4) để tạo tài khoản giáo viên.',
+          };
+        }
+        if (code !== TEACHER_ACCESS_PASSWORD) {
+          return {
+            ok: false,
+            error: 'Mã xác thực giáo viên không chính xác! Chỉ giáo viên được cấp mã mới tạo được tài khoản giáo viên.',
+          };
+        }
+        if (input.kind === 'subject_teacher' && !input.subject?.trim()) {
+          return { ok: false, error: 'Vui lòng chọn hoặc nhập bộ môn giảng dạy.' };
+        }
+      }
+
+      const cleanOptionalPass = input.optionalPassword?.trim() ?? '';
+      if (cleanOptionalPass.length > 0 && cleanOptionalPass.length < MIN_EMAIL_PASSWORD_LENGTH) {
+        return {
+          ok: false,
+          error: `Mật khẩu Gmail cần tối thiểu ${MIN_EMAIL_PASSWORD_LENGTH} ký tự.`,
+        };
+      }
+
+      setBusy(true);
+      setError(null);
+      suppressAutoResolveRef.current = true;
+      try {
+        if (cleanOptionalPass.length > 0 && isSupabaseConfigured) {
+          const passRes = await updateSupabasePassword(cleanOptionalPass);
+          if (!passRes.ok) {
+            const msg = passRes.error ?? 'Không thể đặt mật khẩu cho tài khoản Gmail.';
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+        }
+
+        const oauthEmail = pendingOAuthUser.email;
+        const providers = mergeAuthProviders(
+          pendingOAuthUser.authProviders,
+          cleanOptionalPass ? ['email'] : [],
+        );
+
+        if (input.kind === 'student') {
+          const res = await registerOAuthStudentAccount({
+            name: cleanName,
+            loginId: input.loginId,
+            gender: input.gender ?? 'male',
+            group: input.group ?? null,
+            authUserId: pendingOAuthUser.authUserId,
+            email: oauthEmail,
+            authProviders: providers,
+            avatarUrl: pendingOAuthUser.avatarUrl,
+            optionalPassword: cleanOptionalPass || undefined,
+            writeToClassState: true,
+          });
+          if (!res.ok) {
+            setError(res.error);
+            return { ok: false, error: res.error };
+          }
+
+          await enterMatchedStudent(res.account, {
+            oauthInfo: { ...pendingOAuthUser, authProviders: providers },
+            isFreshSignIn: true,
+            forceNewAccountWelcome: true,
+          });
+          return { ok: true };
+        }
+
+        const res = await registerOAuthTeacherAccount({
+          name: cleanName,
+          role: input.kind,
+          subject: input.kind === 'subject_teacher' ? (input.subject?.trim() || null) : null,
+          loginId: input.loginId,
+          authUserId: pendingOAuthUser.authUserId,
+          email: oauthEmail,
+          authProviders: providers,
+          avatarUrl: pendingOAuthUser.avatarUrl,
+          optionalPassword: cleanOptionalPass || undefined,
+          writeAuditLog: true,
+        });
+        if (!res.ok) {
+          setError(res.error);
+          return { ok: false, error: res.error };
+        }
+
+        await enterMatchedTeacher(res.account, {
+          oauthInfo: { ...pendingOAuthUser, authProviders: providers },
+          isFreshSignIn: true,
+          forceNewAccountWelcome: true,
+        });
+        return { ok: true };
+      } catch {
+        const msg = 'Không thể hoàn tất hồ sơ lúc này. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        suppressAutoResolveRef.current = false;
+        setBusy(false);
+      }
+    },
+    [pendingOAuthUser, enterMatchedStudent, enterMatchedTeacher],
+  );
+
+  const linkOAuthToExistingAccount = useCallback(
+    async (input: {
+      kind: 'student' | 'teacher';
+      loginId: string;
+      password: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      if (!pendingOAuthUser) {
+        return {
+          ok: false,
+          error: 'Phiên Google/GitHub đã hết hạn. Vui lòng đăng nhập lại bằng Google hoặc GitHub.',
+        };
+      }
+
+      setBusy(true);
+      setError(null);
+      suppressAutoResolveRef.current = true;
+      try {
+        if (input.kind === 'student') {
+          const verified = await verifyStudentLogin(input.loginId, input.password);
+          if (!verified.ok) {
+            setError(verified.error);
+            return { ok: false, error: verified.error };
+          }
+          const linked = await linkAuthIdentityToStudent({
+            studentId: verified.account.studentId,
+            authUserId: pendingOAuthUser.authUserId,
+            email: pendingOAuthUser.email || undefined,
+            authProviders: pendingOAuthUser.authProviders,
+            avatarUrl: pendingOAuthUser.avatarUrl,
+          });
+          if (!linked.ok || !linked.account) {
+            const msg = linked.error ?? 'Không thể liên kết tài khoản học sinh.';
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+          await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+          setIsNewAccountWelcomePending(false);
+          await enterMatchedStudent(linked.account, {
+            oauthInfo: pendingOAuthUser,
+            isFreshSignIn: true,
+            forceNewAccountWelcome: false,
+          });
+          return { ok: true };
+        }
+
+        const verified = await verifyTeacherLogin(input.loginId, input.password);
+        if (!verified.ok) {
+          setError(verified.error);
+          return { ok: false, error: verified.error };
+        }
+        const linked = await linkAuthIdentityToTeacher({
+          teacherId: verified.account.teacherId,
+          authUserId: pendingOAuthUser.authUserId,
+          email: pendingOAuthUser.email || undefined,
+          authProviders: pendingOAuthUser.authProviders,
+          avatarUrl: pendingOAuthUser.avatarUrl,
+        });
+        if (!linked.ok || !linked.account) {
+          const msg = linked.error ?? 'Không thể liên kết tài khoản giáo viên.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+        await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+        setIsNewAccountWelcomePending(false);
+        await enterMatchedTeacher(linked.account, {
+          oauthInfo: pendingOAuthUser,
+          isFreshSignIn: true,
+          forceNewAccountWelcome: false,
+        });
+        return { ok: true };
+      } catch {
+        const msg = 'Không thể liên kết tài khoản lúc này. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        suppressAutoResolveRef.current = false;
+        setBusy(false);
+      }
+    },
+    [pendingOAuthUser, enterMatchedStudent, enterMatchedTeacher],
+  );
+
+  /* ---------- Unified Gmail / Login ID + Password Sign-In & Registration ---------- */
+
+  const signInWithEmailOrId = useCallback(
+    async (input: {
+      kind: 'student' | 'teacher';
+      identifier: string;
+      password: string;
+    }): Promise<{ ok: boolean; error?: string; emailNotConfirmed?: boolean }> => {
+      const cleanIdentifier = input.identifier.trim();
+      const cleanPass = input.password.trim();
+
+      if (input.kind === 'student' && !cleanIdentifier) {
+        const msg = 'Vui lòng nhập Gmail hoặc Số ID lớp.';
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+      if (!cleanPass) {
+        const msg = 'Vui lòng nhập mật khẩu.';
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+
+      setBusy(true);
+      setError(null);
+      setAuthCallbackError(null);
+      suppressAutoResolveRef.current = true;
+      try {
+        // Teacher quick-access via class master code `K8T4` when Mã ID is intentionally left blank
+        if (input.kind === 'teacher' && !cleanIdentifier) {
+          if (cleanPass === TEACHER_ACCESS_PASSWORD) {
+            await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+            setIsNewAccountWelcomePending(false);
+            await persistSession({
+              displayName: '',
+              accountRole: 'teacher',
+              subjectName: null,
+              studentId: null,
+              teacherId: null,
+              loginId: null,
+              authProviders: ['local'],
+              hasAccountPassword: false,
+            });
+            setLoginEventId((n) => n + 1);
+            return { ok: true };
+          }
+          const msg =
+            'Mật khẩu xác thực Giáo viên không chính xác! Hãy nhập Mã ID / Gmail giáo viên hoặc đúng mã GV lớp.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+        // Branch A: Gmail / Email login
+        if (cleanIdentifier.includes('@')) {
+          const emailErr = validateEmail(cleanIdentifier);
+          if (emailErr) {
+            setError(emailErr);
+            return { ok: false, error: emailErr };
+          }
+          const cleanEmail = normalizeEmail(cleanIdentifier);
+
+          if (isSupabaseConfigured) {
+            const supaRes = await signInSupabaseEmail(cleanEmail, cleanPass);
+            if (supaRes.emailNotConfirmed) {
+              const msg =
+                supaRes.error ??
+                'Email của bạn chưa được xác nhận. Hãy mở Gmail bấm link xác nhận hoặc bấm "Gửi lại email xác nhận".';
+              setError(msg);
+              return { ok: false, emailNotConfirmed: true, error: msg };
+            }
+            if (supaRes.ok && supaRes.user) {
+              const outcome = await resolveSupabaseUser(supaRes.user, { isFreshSignIn: true });
+              if (outcome === 'entered' || outcome === 'onboarding' || outcome === 'linked') {
+                return { ok: true };
+              }
+            }
+
+            // Fallback: check local/cloud account registry in case account exists locally without Supabase Auth password yet.
+            const primaryCheck =
+              input.kind === 'student'
+                ? await verifyStudentLogin(cleanEmail, cleanPass)
+                : await verifyTeacherLogin(cleanEmail, cleanPass);
+            if (primaryCheck.ok) {
+              if (input.kind === 'student') {
+                await enterMatchedStudent(primaryCheck.account as StudentAccountRecord, {
+                  isFreshSignIn: true,
+                });
+              } else {
+                await enterMatchedTeacher(primaryCheck.account as TeacherAccountRecord, {
+                  isFreshSignIn: true,
+                });
+              }
+              return { ok: true };
+            }
+
+            const secondaryCheck =
+              input.kind === 'student'
+                ? await verifyTeacherLogin(cleanEmail, cleanPass)
+                : await verifyStudentLogin(cleanEmail, cleanPass);
+            if (secondaryCheck.ok) {
+              if (input.kind === 'student') {
+                await enterMatchedTeacher(secondaryCheck.account as TeacherAccountRecord, {
+                  isFreshSignIn: true,
+                });
+              } else {
+                await enterMatchedStudent(secondaryCheck.account as StudentAccountRecord, {
+                  isFreshSignIn: true,
+                });
+              }
+              return { ok: true };
+            }
+
+            const errMsg =
+              supaRes.error ?? 'Gmail hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại!';
+            setError(errMsg);
+            return { ok: false, error: errMsg };
+          }
+
+          // Offline mode email login
+          const offlinePrimary =
+            input.kind === 'student'
+              ? await verifyStudentLogin(cleanEmail, cleanPass)
+              : await verifyTeacherLogin(cleanEmail, cleanPass);
+          if (offlinePrimary.ok) {
+            if (input.kind === 'student') {
+              await enterMatchedStudent(offlinePrimary.account as StudentAccountRecord, {
+                isFreshSignIn: true,
+              });
+            } else {
+              await enterMatchedTeacher(offlinePrimary.account as TeacherAccountRecord, {
+                isFreshSignIn: true,
+              });
+            }
+            return { ok: true };
+          }
+          setError(offlinePrimary.error);
+          return { ok: false, error: offlinePrimary.error };
+        }
+
+        // Branch B: Login ID (`Số ID` / `Mã ID`) + Password
+        if (input.kind === 'student') {
+          const res = await verifyStudentLogin(cleanIdentifier, cleanPass);
+          if (!res.ok) {
+            setError(res.error);
+            return { ok: false, error: res.error };
+          }
+          await enterMatchedStudent(res.account, { isFreshSignIn: true });
+          return { ok: true };
+        }
+
+        // Teacher Mã ID + Password (with K8T4 quick-access fallback if identifier is GVCN / K8T4)
+        const teacherRes = await verifyTeacherLogin(cleanIdentifier, cleanPass);
+        if (teacherRes.ok) {
+          await enterMatchedTeacher(teacherRes.account, { isFreshSignIn: true });
+          return { ok: true };
+        }
+
+        const upperId = cleanIdentifier.toUpperCase();
+        if (
+          cleanPass === TEACHER_ACCESS_PASSWORD &&
+          (upperId === 'GVCN' || upperId === TEACHER_ACCESS_PASSWORD)
+        ) {
+          await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+          setIsNewAccountWelcomePending(false);
+          await persistSession({
+            displayName: '',
+            accountRole: 'teacher',
+            subjectName: null,
+            studentId: null,
+            teacherId: null,
+            loginId: null,
+            authProviders: ['local'],
+          });
+          setLoginEventId((n) => n + 1);
+          return { ok: true };
+        }
+
+        setError(teacherRes.error);
+        return { ok: false, error: teacherRes.error };
+      } catch {
+        const msg = 'Không thể đăng nhập lúc này. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        suppressAutoResolveRef.current = false;
+        setBusy(false);
+      }
+    },
+    [resolveSupabaseUser, enterMatchedStudent, enterMatchedTeacher, persistSession],
+  );
+
+  const registerWithEmailAndPassword = useCallback(
+    async (
+      input: EmailRegisterInput,
+    ): Promise<{ ok: boolean; error?: string; needsEmailConfirmation?: boolean }> => {
+      const emailErr = validateEmail(input.email);
+      if (emailErr) {
+        setError(emailErr);
+        return { ok: false, error: emailErr };
+      }
+      const cleanEmail = normalizeEmail(input.email);
+      const cleanPass = input.password.trim();
+      if (cleanPass.length < MIN_EMAIL_PASSWORD_LENGTH) {
+        const msg = `Mật khẩu cần tối thiểu ${MIN_EMAIL_PASSWORD_LENGTH} ký tự để bảo mật tài khoản Gmail.`;
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+      const cleanName = normalizeName(input.name);
+      if (cleanName.length < 2) {
+        const msg = 'Vui lòng nhập họ và tên đầy đủ (tối thiểu 2 ký tự).';
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+
+      if (input.kind === 'teacher' || input.kind === 'subject_teacher') {
+        const code = input.accessCode?.trim() ?? '';
+        if (!code) {
+          const msg = 'Vui lòng nhập Mã xác thực giáo viên để cấp quyền tạo tài khoản.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+        if (code !== TEACHER_ACCESS_PASSWORD) {
+          const msg =
+            'Mã xác thực giáo viên không chính xác! Chỉ giáo viên được cấp mã bảo mật lớp mới tạo được tài khoản giáo viên.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+        if (input.kind === 'subject_teacher' && !input.subject?.trim()) {
+          const msg = 'Vui lòng chọn hoặc nhập bộ môn giảng dạy.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+      }
+
+      setBusy(true);
+      setError(null);
+      setAuthCallbackError(null);
+      suppressAutoResolveRef.current = true;
+      try {
+        // Check email & Login ID availability BEFORE calling Supabase Auth signUp to avoid orphan users.
+        const emailAlreadyUsed = await isEmailTaken(cleanEmail, { forceRemote: true });
+        if (emailAlreadyUsed) {
+          const msg = `Gmail "${cleanEmail}" đã được đăng ký tài khoản khác! Hãy chuyển sang Đăng nhập hoặc dùng "Quên mật khẩu?".`;
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+
+        let resolvedLoginId = input.loginId?.trim() ?? '';
+        if (input.kind === 'student') {
+          await loadStudentAccounts({ forceRemote: true });
+          if (resolvedLoginId) {
+            const idErr = validateLoginId(resolvedLoginId);
+            if (idErr) {
+              setError(idErr);
+              return { ok: false, error: idErr };
+            }
+            if (await isLoginIdTaken(resolvedLoginId)) {
+              const msg = `Số ID "${resolvedLoginId.toUpperCase()}" đã tồn tại trên lớp! Vui lòng chọn Số ID khác.`;
+              setError(msg);
+              return { ok: false, error: msg };
+            }
+          } else {
+            resolvedLoginId = await suggestNextLoginId('10T4');
+          }
+        } else {
+          await loadTeacherAccounts({ forceRemote: true });
+          if (resolvedLoginId) {
+            const idErr = validateTeacherLoginId(resolvedLoginId);
+            if (idErr) {
+              setError(idErr);
+              return { ok: false, error: idErr };
+            }
+            if (await isTeacherLoginIdTaken(resolvedLoginId)) {
+              const msg = `Mã ID "${resolvedLoginId.toUpperCase()}" đã tồn tại! Vui lòng chọn Mã ID giáo viên khác.`;
+              setError(msg);
+              return { ok: false, error: msg };
+            }
+          } else {
+            resolvedLoginId = await suggestNextTeacherLoginId(input.kind);
+          }
+        }
+
+        // 1. Register on Supabase Auth (sends confirmation email when `mailer_autoconfirm: false`, or signs in immediately when true).
+        let supaUserId: string | null = null;
+        let sessionActive = !isSupabaseConfigured;
+        let needsConfirmation = false;
+
+        if (isSupabaseConfigured) {
+          const supaRes = await signUpSupabaseEmail({
+            email: cleanEmail,
+            password: cleanPass,
+            metadata: {
+              display_name: cleanName,
+              pending_registration: {
+                kind: input.kind,
+                name: cleanName,
+                loginId: resolvedLoginId,
+                gender: input.gender ?? 'male',
+                group: input.group ?? null,
+                subject: input.kind === 'subject_teacher' ? (input.subject?.trim() || null) : null,
+              },
+            },
+          });
+
+          if (!supaRes.ok) {
+            const msg = supaRes.alreadyRegistered
+              ? `Gmail "${cleanEmail}" đã có tài khoản trên hệ thống! Hãy chuyển sang tab Đăng nhập hoặc bấm "Quên mật khẩu?".`
+              : (supaRes.error ?? 'Không thể đăng ký tài khoản Gmail lúc này.');
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+
+          supaUserId = supaRes.user?.id ?? null;
+          sessionActive = Boolean(supaRes.sessionActive);
+          needsConfirmation = Boolean(supaRes.needsEmailConfirmation) && !sessionActive;
+        }
+
+        // 2. IMMEDIATELY create & sync the Student or Teacher account so their name appears live on the app right away!
+        if (input.kind === 'student') {
+          const created = await registerStudentAccount({
+            name: cleanName,
+            loginId: resolvedLoginId,
+            password: cleanPass,
+            gender: input.gender ?? 'male',
+            group: input.group ?? null,
+            email: cleanEmail,
+            authUserId: supaUserId,
+            authProviders: ['email'],
+            writeToClassState: true,
+          });
+          if (!created.ok) {
+            setError(created.error);
+            return { ok: false, error: created.error };
+          }
+
+          await AsyncStorage.setItem(
+            NEW_ACCOUNT_WELCOME_PENDING_KEY,
+            `student:${created.account.studentId}`,
+          ).catch(() => {});
+
+          if (sessionActive) {
+            if (isSupabaseConfigured) {
+              void supabase.auth
+                .updateUser({ data: { pending_registration: null } })
+                .catch(() => {});
+            }
+            await enterMatchedStudent(created.account, {
+              isFreshSignIn: true,
+              forceNewAccountWelcome: true,
+            });
+            return { ok: true, needsEmailConfirmation: false };
+          }
+
+          setPendingEmailConfirmation(cleanEmail);
+          await refreshStudentAccountCount();
+          return { ok: true, needsEmailConfirmation: needsConfirmation || true };
+        }
+
+        const createdTeacher = await registerTeacherAccount({
+          name: cleanName,
+          loginId: resolvedLoginId,
+          password: cleanPass,
+          role: input.kind,
+          subject: input.kind === 'subject_teacher' ? (input.subject?.trim() || null) : null,
+          email: cleanEmail,
+          authUserId: supaUserId,
+          authProviders: ['email'],
+          writeAuditLog: true,
+        });
+        if (!createdTeacher.ok) {
+          setError(createdTeacher.error);
+          return { ok: false, error: createdTeacher.error };
+        }
+
+        await AsyncStorage.setItem(
+          NEW_ACCOUNT_WELCOME_PENDING_KEY,
+          `teacher:${createdTeacher.account.teacherId}`,
+        ).catch(() => {});
+
+        if (sessionActive) {
+          if (isSupabaseConfigured) {
+            void supabase.auth
+              .updateUser({ data: { pending_registration: null } })
+              .catch(() => {});
+          }
+          await enterMatchedTeacher(createdTeacher.account, {
+            isFreshSignIn: true,
+            forceNewAccountWelcome: true,
+          });
+          return { ok: true, needsEmailConfirmation: false };
+        }
+
+        setPendingEmailConfirmation(cleanEmail);
+        await refreshTeacherAccountCount();
+        return { ok: true, needsEmailConfirmation: needsConfirmation || true };
+      } catch {
+        const msg = 'Không thể đăng ký tài khoản lúc này. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        suppressAutoResolveRef.current = false;
+        setBusy(false);
+      }
+    },
+    [
+      enterMatchedStudent,
+      enterMatchedTeacher,
+      refreshStudentAccountCount,
+      refreshTeacherAccountCount,
+    ],
+  );
+
+  /* ---------- Password Reset (Quên mật khẩu) & Confirmation Resend ---------- */
+
+  const requestPasswordReset = useCallback(
+    async (rawEmail: string): Promise<{ ok: boolean; error?: string }> => {
+      const emailErr = validateEmail(rawEmail);
+      if (emailErr) {
+        return { ok: false, error: emailErr };
+      }
+      if (!isSupabaseConfigured) {
+        return {
+          ok: false,
+          error: 'Tính năng gửi email đặt lại mật khẩu cần kết nối máy chủ Supabase.',
+        };
+      }
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await sendSupabasePasswordReset(normalizeEmail(rawEmail));
+        if (!res.ok) {
+          const msg = res.error ?? 'Không thể gửi email đặt lại mật khẩu lúc này.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+        return { ok: true };
+      } catch {
+        const msg = 'Không thể gửi email đặt lại mật khẩu. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        setBusy(false);
+      }
     },
     [],
   );
+
+  const completePasswordReset = useCallback(
+    async (newPassword: string): Promise<{ ok: boolean; error?: string }> => {
+      const cleanNew = newPassword.trim();
+      if (cleanNew.length < MIN_EMAIL_PASSWORD_LENGTH) {
+        return {
+          ok: false,
+          error: `Mật khẩu mới phải có ít nhất ${MIN_EMAIL_PASSWORD_LENGTH} ký tự.`,
+        };
+      }
+      if (!isSupabaseConfigured) {
+        return { ok: false, error: 'Chưa cấu hình máy chủ Supabase.' };
+      }
+
+      setBusy(true);
+      setError(null);
+      suppressAutoResolveRef.current = true;
+      try {
+        const updated = await updateSupabasePassword(cleanNew);
+        if (!updated.ok) {
+          const msg = updated.error ?? 'Không thể đặt lại mật khẩu. Liên kết có thể đã hết hạn.';
+          setError(msg);
+          return { ok: false, error: msg };
+        }
+
+        const user =
+          updated.user ?? (await supabase.auth.getUser().catch(() => null))?.data.user ?? null;
+
+        // Sync local + cloud registry passwordHash so BOTH Gmail+Password AND Mã ID+Password use the new password!
+        if (user) {
+          const info = extractOAuthUserInfo(user);
+          const [matchedStudent, matchedTeacher] = await Promise.all([
+            findStudentAccountByAuthIdentity({
+              authUserId: info.authUserId,
+              email: info.email,
+              forceRemote: true,
+            }),
+            findTeacherAccountByAuthIdentity({
+              authUserId: info.authUserId,
+              email: info.email,
+              forceRemote: true,
+            }),
+          ]);
+
+          passwordRecoveryRef.current = false;
+          setPasswordRecoveryPending(false);
+          clearWebAuthUrlParams();
+
+          if (matchedStudent) {
+            const synced = await syncStudentPasswordHash(matchedStudent.studentId, cleanNew);
+            await enterMatchedStudent(synced.account ?? matchedStudent, {
+              oauthInfo: {
+                ...info,
+                authProviders: mergeAuthProviders(info.authProviders, ['email']),
+              },
+              isFreshSignIn: true,
+            });
+            return { ok: true };
+          }
+
+          if (matchedTeacher) {
+            const synced = await syncTeacherPasswordHash(matchedTeacher.teacherId, cleanNew);
+            await enterMatchedTeacher(synced.account ?? matchedTeacher, {
+              oauthInfo: {
+                ...info,
+                authProviders: mergeAuthProviders(info.authProviders, ['email']),
+              },
+              isFreshSignIn: true,
+            });
+            return { ok: true };
+          }
+
+          // Supabase user exists without a linked class profile yet -> open onboarding cleanly!
+          setPendingOAuthUser(info);
+          setNeedsProfileCompletion(true);
+          return { ok: true };
+        }
+
+        passwordRecoveryRef.current = false;
+        setPasswordRecoveryPending(false);
+        clearWebAuthUrlParams();
+        return { ok: true };
+      } catch {
+        const msg = 'Không thể cập nhật mật khẩu mới. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      } finally {
+        suppressAutoResolveRef.current = false;
+        setBusy(false);
+      }
+    },
+    [enterMatchedStudent, enterMatchedTeacher],
+  );
+
+  const cancelPasswordRecovery = useCallback(async () => {
+    passwordRecoveryRef.current = false;
+    setPasswordRecoveryPending(false);
+    setAuthCallbackError(null);
+    clearWebAuthUrlParams();
+    if (isSupabaseConfigured) {
+      const sess = await supabase.auth.getSession().catch(() => null);
+      const supaUid = sess?.data.session?.user?.id ?? null;
+      if (!unlockedRef.current || (supaUid && supaUid !== activeSessionRef.current.authUserId)) {
+        signingOutRef.current = true;
+        try {
+          await supabase.auth.signOut().catch(() => {});
+        } finally {
+          signingOutRef.current = false;
+        }
+      }
+    }
+  }, []);
+
+  const resendConfirmationEmail = useCallback(
+    async (rawEmail: string): Promise<{ ok: boolean; error?: string }> => {
+      const emailErr = validateEmail(rawEmail);
+      if (emailErr) return { ok: false, error: emailErr };
+      if (!isSupabaseConfigured) {
+        return { ok: false, error: 'Chưa cấu hình máy chủ Supabase.' };
+      }
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await resendSupabaseConfirmationEmail(normalizeEmail(rawEmail));
+        if (!res.ok) {
+          return { ok: false, error: res.error ?? 'Không thể gửi lại email xác nhận lúc này.' };
+        }
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Không thể gửi lại email xác nhận. Vui lòng thử lại.' };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  /* ---------- Set or Change Password (Settings: supports both OAuth-only and password accounts) ---------- */
+
+  const setOrChangeAccountPassword = useCallback(
+    async (input: {
+      currentPassword?: string;
+      newPassword: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      const cleanNew = input.newPassword.trim();
+      const minLen =
+        Boolean(email || supabaseUserId) ? MIN_EMAIL_PASSWORD_LENGTH : MIN_STUDENT_PASSWORD_LENGTH;
+      if (cleanNew.length < minLen) {
+        return {
+          ok: false,
+          error: `Mật khẩu mới cần tối thiểu ${minLen} ký tự.`,
+        };
+      }
+
+      suppressAutoResolveRef.current = true;
+      try {
+        if (accountRole === 'student' && studentId) {
+          await loadStudentAccounts({ forceRemote: true });
+          const acc = await findAccountByStudentId(studentId);
+          if (!acc) {
+            return { ok: false, error: 'Không tìm thấy tài khoản học sinh để cập nhật mật khẩu.' };
+          }
+          const alreadyHasPass = acc.passwordHash.includes(':');
+          if (alreadyHasPass) {
+            const cur = input.currentPassword?.trim() ?? '';
+            if (!cur) {
+              return { ok: false, error: 'Vui lòng nhập mật khẩu hiện tại.' };
+            }
+            if (!verifyStudentPassword(cur, acc.passwordHash)) {
+              return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
+            }
+          }
+
+          if (isSupabaseConfigured && acc.authUserId) {
+            const sess = await supabase.auth.getSession().catch(() => null);
+            if (sess?.data.session?.user?.id === acc.authUserId) {
+              const supaUpd = await updateSupabasePassword(cleanNew);
+              if (!supaUpd.ok) {
+                return {
+                  ok: false,
+                  error: supaUpd.error ?? 'Không thể đồng bộ mật khẩu lên Supabase Auth.',
+                };
+              }
+            }
+          }
+
+          const synced = await syncStudentPasswordHash(studentId, cleanNew);
+          if (!synced.ok) return { ok: false, error: synced.error };
+
+          const nextProviders = mergeAuthProviders(
+            authProviders,
+            synced.account?.authProviders,
+            email ? ['email'] : ['local'],
+          );
+          await persistSession({
+            displayName: profile?.displayName ?? acc.name,
+            accountRole: 'student',
+            subjectName: null,
+            studentId,
+            teacherId: null,
+            loginId: acc.loginId,
+            email: acc.email ?? email,
+            avatarUrl: acc.avatarUrl ?? avatarUrl,
+            authProviders: nextProviders,
+            authUserId: acc.authUserId ?? supabaseUserId,
+            hasAccountPassword: true,
+            signedInAt: profile?.createdAt,
+          });
+          return { ok: true };
+        }
+
+        if ((accountRole === 'teacher' || accountRole === 'subject_teacher') && teacherId) {
+          await loadTeacherAccounts({ forceRemote: true });
+          const acc = await findTeacherAccountById(teacherId);
+          if (!acc) {
+            return { ok: false, error: 'Không tìm thấy tài khoản giáo viên để cập nhật mật khẩu.' };
+          }
+          const alreadyHasPass = acc.passwordHash.includes(':');
+          if (alreadyHasPass) {
+            const cur = input.currentPassword?.trim() ?? '';
+            if (!cur) {
+              return { ok: false, error: 'Vui lòng nhập mật khẩu hiện tại.' };
+            }
+            if (!verifyStudentPassword(cur, acc.passwordHash)) {
+              return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
+            }
+          }
+
+          if (isSupabaseConfigured && acc.authUserId) {
+            const sess = await supabase.auth.getSession().catch(() => null);
+            if (sess?.data.session?.user?.id === acc.authUserId) {
+              const supaUpd = await updateSupabasePassword(cleanNew);
+              if (!supaUpd.ok) {
+                return {
+                  ok: false,
+                  error: supaUpd.error ?? 'Không thể đồng bộ mật khẩu lên Supabase Auth.',
+                };
+              }
+            }
+          }
+
+          const synced = await syncTeacherPasswordHash(teacherId, cleanNew);
+          if (!synced.ok) return { ok: false, error: synced.error };
+
+          const nextProviders = mergeAuthProviders(
+            authProviders,
+            synced.account?.authProviders,
+            email ? ['email'] : ['local'],
+          );
+          await persistSession({
+            displayName: profile?.displayName ?? acc.name,
+            accountRole: acc.role,
+            subjectName: acc.subject,
+            studentId: null,
+            teacherId,
+            loginId: acc.loginId,
+            email: acc.email ?? email,
+            avatarUrl: acc.avatarUrl ?? avatarUrl,
+            authProviders: nextProviders,
+            authUserId: acc.authUserId ?? supabaseUserId,
+            hasAccountPassword: true,
+            signedInAt: profile?.createdAt,
+          });
+          return { ok: true };
+        }
+
+        return {
+          ok: false,
+          error: 'Chỉ áp dụng cho tài khoản Học sinh hoặc Giáo viên cá nhân.',
+        };
+      } finally {
+        suppressAutoResolveRef.current = false;
+      }
+    },
+    [
+      accountRole,
+      studentId,
+      teacherId,
+      email,
+      avatarUrl,
+      authProviders,
+      supabaseUserId,
+      profile,
+      persistSession,
+    ],
+  );
+
+  /* ---------- Existing Local ID & Teacher Management Flows (100% Preserved) ---------- */
 
   const verifyTeacherPassword = useCallback((rawPassword: string): boolean => {
     return rawPassword.trim() === TEACHER_ACCESS_PASSWORD;
@@ -566,12 +2557,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             studentId: null,
             teacherId: null,
             loginId: null,
+            authProviders: ['local'],
           });
           setLoginEventId((n) => n + 1);
           return true;
         }
 
-        setError('Tài khoản học sinh cần đăng nhập bằng Số ID và mật khẩu riêng.');
+        setError('Tài khoản học sinh cần đăng nhập bằng Gmail, Google/GitHub hoặc Số ID.');
         return false;
       } catch {
         setError('Không thể lưu phiên đăng nhập. Vui lòng thử lại.');
@@ -593,18 +2585,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError(res.error);
           return false;
         }
-        await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
-        setIsNewAccountWelcomePending(false);
-        await persistSession({
-          displayName: res.account.name,
-          accountRole: 'student',
-          subjectName: null,
-          studentId: res.account.studentId,
-          teacherId: null,
-          loginId: res.account.loginId,
-        });
-        await refreshStudentAccountCount();
-        setLoginEventId((n) => n + 1);
+        await enterMatchedStudent(res.account, { isFreshSignIn: true });
         return true;
       } catch {
         setError('Không thể đăng nhập lúc này. Vui lòng thử lại.');
@@ -613,7 +2594,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [persistSession, refreshStudentAccountCount],
+    [enterMatchedStudent],
   );
 
   const registerAndSignInStudent = useCallback(
@@ -640,21 +2621,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             error: res.error,
           };
         }
-        await AsyncStorage.setItem(
-          NEW_ACCOUNT_WELCOME_PENDING_KEY,
-          `student:${res.account.studentId}`,
-        ).catch(() => {});
-        setIsNewAccountWelcomePending(true);
-        await persistSession({
-          displayName: res.account.name,
-          accountRole: 'student',
-          subjectName: null,
-          studentId: res.account.studentId,
-          teacherId: null,
-          loginId: res.account.loginId,
+        await enterMatchedStudent(res.account, {
+          isFreshSignIn: true,
+          forceNewAccountWelcome: true,
         });
-        await refreshStudentAccountCount();
-        setLoginEventId((n) => n + 1);
         return { ok: true };
       } catch {
         const msg = 'Không thể tạo tài khoản học sinh. Vui lòng thử lại.';
@@ -664,7 +2634,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [persistSession, refreshStudentAccountCount],
+    [enterMatchedStudent],
   );
 
   const changeStudentPassword = useCallback(
@@ -681,8 +2651,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [accountRole, studentId],
   );
 
-  /* ---------- Personal Teacher Accounts ---------- */
-
   const signInAsTeacher = useCallback(
     async (
       rawLoginId: string,
@@ -697,18 +2665,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError(res.error);
           return false;
         }
-        await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
-        setIsNewAccountWelcomePending(false);
-        await persistSession({
-          displayName: res.account.name,
-          accountRole: res.account.role,
-          subjectName: res.account.subject,
-          studentId: null,
-          teacherId: res.account.teacherId,
-          loginId: res.account.loginId,
-        });
-        await refreshTeacherAccountCount();
-        setLoginEventId((n) => n + 1);
+        await enterMatchedTeacher(res.account, { isFreshSignIn: true });
         return true;
       } catch {
         setError('Không thể đăng nhập tài khoản giáo viên lúc này. Vui lòng thử lại.');
@@ -717,7 +2674,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [persistSession, refreshTeacherAccountCount],
+    [enterMatchedTeacher],
   );
 
   const registerAndSignInTeacher = useCallback(
@@ -758,21 +2715,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           };
         }
 
-        await AsyncStorage.setItem(
-          NEW_ACCOUNT_WELCOME_PENDING_KEY,
-          `teacher:${res.account.teacherId}`,
-        ).catch(() => {});
-        setIsNewAccountWelcomePending(true);
-        await persistSession({
-          displayName: res.account.name,
-          accountRole: res.account.role,
-          subjectName: res.account.subject,
-          studentId: null,
-          teacherId: res.account.teacherId,
-          loginId: res.account.loginId,
+        await enterMatchedTeacher(res.account, {
+          isFreshSignIn: true,
+          forceNewAccountWelcome: true,
         });
-        await refreshTeacherAccountCount();
-        setLoginEventId((n) => n + 1);
         return { ok: true };
       } catch {
         const msg = 'Không thể tạo tài khoản giáo viên. Vui lòng thử lại.';
@@ -782,7 +2728,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [persistSession, refreshTeacherAccountCount],
+    [enterMatchedTeacher],
   );
 
   const createTeacherAccount = useCallback(
@@ -801,7 +2747,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           error: 'Chỉ tài khoản giáo viên mới có quyền tạo tài khoản giáo viên mới.',
         };
       }
-      // Subject Teacher creating a Homeroom Teacher (GVCN) account must verify master teacher code.
       if (accountRole === 'subject_teacher' && input.role === 'teacher') {
         const cleanCode = input.teacherAccessCode?.trim() ?? '';
         if (!cleanCode) {
@@ -857,7 +2802,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: res.error ?? 'Không thể cập nhật tài khoản giáo viên.' };
       }
 
-      // Sync active session immediately if editing the currently logged-in teacher account.
       if (teacherId && teacherId === res.account.teacherId) {
         await persistSession({
           displayName: res.account.name,
@@ -866,6 +2810,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           studentId: null,
           teacherId: res.account.teacherId,
           loginId: res.account.loginId,
+          email: res.account.email ?? email,
+          avatarUrl: res.account.avatarUrl ?? avatarUrl,
+          authProviders: res.account.authProviders ?? authProviders,
+          authUserId: res.account.authUserId ?? supabaseUserId,
           signedInAt: profile?.createdAt,
         });
       }
@@ -873,7 +2821,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await refreshTeacherAccountCount();
       return { ok: true, account: res.account };
     },
-    [accountRole, teacherId, profile?.createdAt, persistSession, refreshTeacherAccountCount],
+    [
+      accountRole,
+      teacherId,
+      email,
+      avatarUrl,
+      authProviders,
+      supabaseUserId,
+      profile?.createdAt,
+      persistSession,
+      refreshTeacherAccountCount,
+    ],
   );
 
   const deleteTeacherAccount = useCallback(
@@ -911,21 +2869,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     setBusy(true);
     setError(null);
+    signingOutRef.current = true;
     try {
       await Promise.all([
         AsyncStorage.removeItem(PASS_AUTH_KEY),
         AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {}),
+        AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {}),
+        isSupabaseConfigured ? supabase.auth.signOut().catch(() => {}) : Promise.resolve(),
       ]);
+      passwordRecoveryRef.current = false;
+      unlockedRef.current = false;
+      activeSessionRef.current = {
+        accountRole: 'student',
+        studentId: null,
+        teacherId: null,
+        loginId: null,
+        subjectName: null,
+        displayName: '',
+        email: null,
+        avatarUrl: null,
+        authProviders: [],
+        authUserId: null,
+        hasAccountPassword: false,
+        createdAt: undefined,
+      };
       setIsNewAccountWelcomePending(false);
+      setNeedsProfileCompletion(false);
+      setPendingOAuthUser(null);
+      setPasswordRecoveryPending(false);
+      setPendingEmailConfirmation(null);
+      setAuthCallbackError(null);
       setUnlocked(false);
       setAccountRole('student');
       setSubjectName(null);
       setStudentId(null);
       setTeacherId(null);
       setLoginId(null);
+      setEmail(null);
+      setAvatarUrl(null);
+      setAuthProviders([]);
+      setSupabaseUserId(null);
+      setHasAccountPassword(false);
       setProfile(null);
       await Promise.all([refreshStudentAccountCount(), refreshTeacherAccountCount()]);
     } finally {
+      signingOutRef.current = false;
       setBusy(false);
     }
   }, [refreshStudentAccountCount, refreshTeacherAccountCount]);
@@ -935,7 +2923,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       targetRole: AccountRole,
       options?: SwitchRoleOptions,
     ): Promise<{ ok: boolean; account?: TeacherAccountRecord; error?: string }> => {
-      // Switching to Student ALWAYS requires signing in with a personal Số ID + password.
       if (targetRole === 'student') {
         await signOut();
         return { ok: true };
@@ -966,16 +2953,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return { ok: false, error: res.error };
         }
         try {
-          await AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
-          setIsNewAccountWelcomePending(false);
-          await persistSession({
-            displayName: res.account.name,
-            accountRole: res.account.role,
-            subjectName: res.account.subject,
-            studentId: null,
-            teacherId: res.account.teacherId,
-            loginId: res.account.loginId,
-          });
+          await enterMatchedTeacher(res.account, { isFreshSignIn: true });
           return { ok: true, account: res.account };
         } catch {
           return { ok: false, error: 'Không thể chuyển tài khoản giáo viên. Vui lòng thử lại.' };
@@ -1002,6 +2980,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           studentId: null,
           teacherId: targetRole === accountRole ? teacherId : null,
           loginId: targetRole === accountRole ? loginId : null,
+          email: targetRole === accountRole ? email : null,
+          avatarUrl: targetRole === accountRole ? avatarUrl : null,
+          authProviders: targetRole === accountRole ? authProviders : ['local'],
+          authUserId: targetRole === accountRole ? supabaseUserId : null,
           signedInAt: profile?.createdAt,
         });
         return { ok: true };
@@ -1009,7 +2991,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: 'Không thể cập nhật vai trò. Vui lòng thử lại.' };
       }
     },
-    [accountRole, subjectName, teacherId, loginId, profile, persistSession, signOut],
+    [
+      accountRole,
+      subjectName,
+      teacherId,
+      loginId,
+      email,
+      avatarUrl,
+      authProviders,
+      supabaseUserId,
+      profile,
+      persistSession,
+      enterMatchedTeacher,
+      signOut,
+    ],
   );
 
   const updateSubjectProfile = useCallback(
@@ -1032,10 +3027,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         studentId: null,
         teacherId: accountRole === 'subject_teacher' ? teacherId : null,
         loginId: accountRole === 'subject_teacher' ? loginId : null,
+        email,
+        avatarUrl,
+        authProviders,
+        authUserId: supabaseUserId,
         signedInAt: profile?.createdAt,
       });
     },
-    [accountRole, teacherId, loginId, profile, persistSession, refreshTeacherAccountCount],
+    [
+      accountRole,
+      teacherId,
+      loginId,
+      email,
+      avatarUrl,
+      authProviders,
+      supabaseUserId,
+      profile,
+      persistSession,
+      refreshTeacherAccountCount,
+    ],
   );
 
   const renameMe = useCallback(
@@ -1054,6 +3064,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             studentId,
             teacherId,
             loginId,
+            email: res.account?.email ?? email,
+            avatarUrl: res.account?.avatarUrl ?? avatarUrl,
+            authProviders: res.account?.authProviders ?? authProviders,
+            authUserId: res.account?.authUserId ?? supabaseUserId,
             signedInAt: profile?.createdAt,
           });
           await refreshStudentAccountCount();
@@ -1075,6 +3089,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             studentId,
             teacherId,
             loginId,
+            email: res.account?.email ?? email,
+            avatarUrl: res.account?.avatarUrl ?? avatarUrl,
+            authProviders: res.account?.authProviders ?? authProviders,
+            authUserId: res.account?.authUserId ?? supabaseUserId,
             signedInAt: profile?.createdAt,
           });
           return true;
@@ -1087,6 +3105,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           studentId,
           teacherId,
           loginId,
+          email,
+          avatarUrl,
+          authProviders,
+          authUserId: supabaseUserId,
           signedInAt: profile?.createdAt,
         });
         return true;
@@ -1100,6 +3122,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       studentId,
       teacherId,
       loginId,
+      email,
+      avatarUrl,
+      authProviders,
+      supabaseUserId,
       profile,
       persistSession,
       refreshStudentAccountCount,
@@ -1125,15 +3151,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const updateMember = useCallback(async () => {}, []);
   const clearError = useCallback(() => setError(null), []);
 
+  const canEnterApp = unlocked && !passwordRecoveryPending && !needsProfileCompletion;
+  const hasSupabaseAuth = Boolean(supabaseUserId || email);
+
   const value = useMemo<AuthStore>(
     () => ({
       configured: true,
+      isSupabaseConfigured,
       loading,
       busy,
       error,
       offlineDemo: false,
       userId: unlocked ? (profile?.id ?? 'local-member') : null,
-      email: null,
+      email,
       profile,
       accountRole,
       subjectName,
@@ -1143,20 +3173,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       accountScopeKey,
       studentAccountCount,
       teacherAccountCount,
+      registeredStudentCount: studentAccountCount,
+      registeredTeacherCount: teacherAccountCount,
       studentAccountsVersion,
       teacherAccountsVersion,
       loginEventId,
       isCloudSyncEnabled: isSupabaseConfigured,
       isCloudActive: false,
-      canEnterApp: unlocked,
+      supabaseAuthSettings,
+      hasSupabaseAuth,
+      hasAccountPassword,
+      authProviders,
+      needsProfileCompletion,
+      pendingOAuthUser,
+      passwordRecoveryPending,
+      pendingEmailConfirmation,
+      authCallbackError,
+      clearAuthCallbackError,
+      clearPendingEmailConfirmation,
+      canEnterApp,
       isNewAccountWelcomePending,
       dismissNewAccountWelcome,
       pendingMembersCount: 0,
+      signInWithGoogle,
+      signInWithGithub,
+      linkGoogleAccount,
+      linkGithubAccount,
+      completeOAuthOnboarding,
+      linkOAuthToExistingAccount,
+      signInWithEmailOrId,
+      registerWithEmailAndPassword,
+      requestPasswordReset,
+      completePasswordReset,
+      cancelPasswordRecovery,
+      resendConfirmationEmail,
+      setOrChangeAccountPassword,
       signInWithPassword,
       signInAsStudent,
+      signInStudent: signInAsStudent,
       registerAndSignInStudent,
       changeStudentPassword,
       signInAsTeacher,
+      signInTeacher: signInAsTeacher,
       registerAndSignInTeacher,
       createTeacherAccount,
       editTeacherAccount,
@@ -1179,6 +3237,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       busy,
       error,
       unlocked,
+      email,
       profile,
       accountRole,
       subjectName,
@@ -1191,8 +3250,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       studentAccountsVersion,
       teacherAccountsVersion,
       loginEventId,
+      supabaseAuthSettings,
+      hasSupabaseAuth,
+      hasAccountPassword,
+      authProviders,
+      needsProfileCompletion,
+      pendingOAuthUser,
+      passwordRecoveryPending,
+      pendingEmailConfirmation,
+      authCallbackError,
+      clearAuthCallbackError,
+      clearPendingEmailConfirmation,
+      canEnterApp,
       isNewAccountWelcomePending,
       dismissNewAccountWelcome,
+      signInWithGoogle,
+      signInWithGithub,
+      linkGoogleAccount,
+      linkGithubAccount,
+      completeOAuthOnboarding,
+      linkOAuthToExistingAccount,
+      signInWithEmailOrId,
+      registerWithEmailAndPassword,
+      requestPasswordReset,
+      completePasswordReset,
+      cancelPasswordRecovery,
+      resendConfirmationEmail,
+      setOrChangeAccountPassword,
       signInWithPassword,
       signInAsStudent,
       registerAndSignInStudent,

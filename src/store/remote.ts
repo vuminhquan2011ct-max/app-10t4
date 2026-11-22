@@ -1059,6 +1059,107 @@ function recordUpdatedAtOf(rec: Record<string, unknown>): number {
   return Math.max(u, c);
 }
 
+function nonEmptyStr(val: unknown): string | null {
+  return typeof val === 'string' && val.trim() ? val.trim() : null;
+}
+
+function unionAuthProviders(prevVal: unknown, incomingVal: unknown): string[] | undefined {
+  const set = new Set<string>();
+  const addList = (list: unknown) => {
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      if (item === 'google' || item === 'github' || item === 'email' || item === 'local') {
+        set.add(item);
+      }
+    }
+  };
+  addList(prevVal);
+  addList(incomingVal);
+  return set.size > 0 ? Array.from(set) : undefined;
+}
+
+/**
+ * Merge an incoming account registry record with an existing cloud record:
+ * - Unions `authProviders` arrays so concurrent Google/GitHub/Email links never drop each other.
+ * - Preserves non-empty `passwordHash`, `email`, `emailKey`, `authUserId`, `avatarUrl`
+ *   when partial/OAuth updates merge concurrently.
+ */
+function mergeAuthAccountRecord(
+  prev: Record<string, unknown> | undefined,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!prev) return incoming;
+
+  const incomingNewer = recordUpdatedAtOf(incoming) >= recordUpdatedAtOf(prev);
+  const primary = incomingNewer ? incoming : prev;
+  const secondary = incomingNewer ? prev : incoming;
+
+  const mergedProviders = unionAuthProviders(prev.authProviders, incoming.authProviders);
+  const passwordHash =
+    nonEmptyStr(primary.passwordHash) ?? nonEmptyStr(secondary.passwordHash) ?? '';
+  const email = nonEmptyStr(primary.email) ?? nonEmptyStr(secondary.email);
+  const emailKey =
+    nonEmptyStr(primary.emailKey) ??
+    nonEmptyStr(secondary.emailKey) ??
+    (email ? email.toLowerCase() : null);
+  const authUserId = nonEmptyStr(primary.authUserId) ?? nonEmptyStr(secondary.authUserId);
+  const avatarUrl = nonEmptyStr(primary.avatarUrl) ?? nonEmptyStr(secondary.avatarUrl);
+
+  const merged: Record<string, unknown> = {
+    ...secondary,
+    ...primary,
+    passwordHash,
+  };
+
+  if (email !== null) merged.email = email;
+  if (emailKey !== null) merged.emailKey = emailKey;
+  if (authUserId !== null) merged.authUserId = authUserId;
+  if (avatarUrl !== null) merged.avatarUrl = avatarUrl;
+  if (mergedProviders) merged.authProviders = mergedProviders;
+
+  return merged;
+}
+
+/** Fast remote lookup for 1-tap returning Google/GitHub/Email users in `class10t4_accounts_v1`. */
+export async function findAuthRegistryAccountRemote(query: {
+  authUserId?: string | null;
+  email?: string | null;
+}): Promise<{ kind: 'student' | 'teacher'; record: Record<string, unknown> } | null> {
+  const cleanAuthId = query.authUserId?.trim() ?? '';
+  const cleanEmailKey = query.email?.trim().toLowerCase() ?? '';
+  if (!cleanAuthId && !cleanEmailKey) return null;
+
+  const registry = await fetchAuthRegistryRemote();
+  if (!registry) return null;
+
+  const matchesAuthId = (rec: Record<string, unknown>) =>
+    Boolean(cleanAuthId) && nonEmptyStr(rec.authUserId) === cleanAuthId;
+
+  const matchesEmail = (rec: Record<string, unknown>) => {
+    if (!cleanEmailKey) return false;
+    const key = nonEmptyStr(rec.emailKey)?.toLowerCase() ?? nonEmptyStr(rec.email)?.toLowerCase();
+    return key === cleanEmailKey;
+  };
+
+  // Priority 1: Exact Supabase authUserId match across teachers & students.
+  if (cleanAuthId) {
+    const teacherByUid = registry.teachers.find(matchesAuthId);
+    if (teacherByUid) return { kind: 'teacher', record: teacherByUid };
+    const studentByUid = registry.students.find(matchesAuthId);
+    if (studentByUid) return { kind: 'student', record: studentByUid };
+  }
+
+  // Priority 2: Exact normalized email match across teachers & students.
+  if (cleanEmailKey) {
+    const teacherByEmail = registry.teachers.find(matchesEmail);
+    if (teacherByEmail) return { kind: 'teacher', record: teacherByEmail };
+    const studentByEmail = registry.students.find(matchesEmail);
+    if (studentByEmail) return { kind: 'student', record: studentByEmail };
+  }
+
+  return null;
+}
+
 /** Read cross-device account registry from `public.class_state` (`id = 'class10t4_accounts_v1'`). */
 export async function fetchAuthRegistryRemote(): Promise<{
   students: Record<string, unknown>[];
@@ -1170,9 +1271,7 @@ export async function upsertAuthRegistryRemote(patch: {
         if (!id) return;
         delete delStudents[id];
         const prev = studentMap.get(id);
-        if (!prev || recordUpdatedAtOf(incoming) >= recordUpdatedAtOf(prev)) {
-          studentMap.set(id, incoming);
-        }
+        studentMap.set(id, mergeAuthAccountRecord(prev, incoming));
       };
 
       if (patch.student) {
@@ -1194,9 +1293,7 @@ export async function upsertAuthRegistryRemote(patch: {
         if (id) {
           delete delTeachers[id];
           const prev = teacherMap.get(id);
-          if (!prev || recordUpdatedAtOf(patch.teacher) >= recordUpdatedAtOf(prev)) {
-            teacherMap.set(id, patch.teacher);
-          }
+          teacherMap.set(id, mergeAuthAccountRecord(prev, patch.teacher));
         }
       }
 

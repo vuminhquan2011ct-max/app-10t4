@@ -2,6 +2,7 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
 import { Stack } from 'expo-router/stack';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
+import * as WebBrowser from 'expo-web-browser';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -14,6 +15,12 @@ import { AuthProvider, useAuth } from '@/store/auth-store';
 import { ClassStoreProvider, useClassStore } from '@/store/class-store';
 import { DecorProvider } from '@/store/decor-store';
 import { ThemePreferenceProvider, useThemePreference } from '@/store/theme-store';
+
+try {
+  WebBrowser.maybeCompleteAuthSession();
+} catch {
+  // Safe no-op during static rendering.
+}
 
 SplashScreen.preventAutoHideAsync();
 
@@ -48,6 +55,7 @@ function WorkspaceStack() {
         <Stack.Screen name={'feedback'} />
         <Stack.Screen name={'members'} />
         <Stack.Screen name={'gallery'} />
+        <Stack.Screen name={'auth-callback'} options={{ headerShown: false }} />
         <Stack.Screen name={'student-form'} options={{ presentation: 'modal' }} />
         <Stack.Screen name={'teacher-form'} options={{ presentation: 'modal' }} />
         <Stack.Screen name={'entry-form'} options={{ presentation: 'modal' }} />
