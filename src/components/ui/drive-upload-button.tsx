@@ -84,6 +84,11 @@ function toPreviewKind(fileName: string, mimeType?: string | null): 'image' | 'v
   return detected === 'photo' ? 'image' : detected;
 }
 
+function isImageOnlyAccept(acceptStr: string): boolean {
+  const lower = acceptStr.trim().toLowerCase();
+  return lower.startsWith('image/') && !lower.includes('video');
+}
+
 function guessNameFromUri(uri: string, fallbackPrefix: string, mimeType?: string | null): string {
   const segment = uri.split('/').pop()?.split('?')[0];
   if (segment && segment.includes('.')) return segment;
@@ -123,7 +128,8 @@ export function DriveUploadButton({
   const [statusKind, setStatusKind] = useState<'idle' | 'info' | 'success' | 'error'>('idle');
   const [progressRatio, setProgressRatio] = useState(0);
 
-  const processBatch = async (jobs: PendingUploadJob[]) => {
+  const processBatch = async (rawJobs: PendingUploadJob[]) => {
+    const jobs = multiple ? rawJobs : rawJobs.slice(0, 1);
     if (jobs.length === 0) return;
 
     // Fire optimistic previews IMMEDIATELY (<50ms) before any compression/network starts.
@@ -266,9 +272,21 @@ export function DriveUploadButton({
     };
 
     input.onchange = () => {
-      const selectedFiles = Array.from(input.files || []);
+      const rawFiles = Array.from(input.files || []);
       cleanup();
+      const selectedFiles = multiple ? rawFiles : rawFiles.slice(0, 1);
       if (selectedFiles.length === 0) return;
+
+      if (isImageOnlyAccept(pickerAccept)) {
+        const hasNonImage = selectedFiles.some((f) => toPreviewKind(f.name, f.type) !== 'image');
+        if (hasNonImage) {
+          const msg = 'Vui lòng chỉ chọn tệp hình ảnh (PNG, JPG, WEBP...).';
+          setStatusKind('error');
+          setStatus(msg);
+          onError?.(msg);
+          return;
+        }
+      }
 
       const jobs: PendingUploadJob[] = selectedFiles.map((file, idx) => {
         const kind = toPreviewKind(file.name, file.type);
@@ -339,8 +357,9 @@ export function DriveUploadButton({
 
       // `base64: false` returns immediately with `asset.uri` for <50ms optimistic preview,
       // while `quality: 0.78` trims raw mobile photo size cleanly before reading concurrently.
+      const imageOnly = isImageOnlyAccept(accept);
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: accept === 'image/*' ? ['images'] : ['images', 'videos'],
+        mediaTypes: imageOnly ? ['images'] : ['images', 'videos'],
         allowsMultipleSelection: multiple,
         quality: 0.78,
         base64: false,
@@ -348,7 +367,8 @@ export function DriveUploadButton({
 
       if (result.canceled || !result.assets?.length) return;
 
-      const jobs: PendingUploadJob[] = result.assets.map((asset, idx) => {
+      const selectedAssets = multiple ? result.assets : result.assets.slice(0, 1);
+      const jobs: PendingUploadJob[] = selectedAssets.map((asset, idx) => {
         const mime =
           asset.mimeType || (asset.type === 'video' ? 'video/mp4' : 'image/jpeg');
         const name =
@@ -405,7 +425,8 @@ export function DriveUploadButton({
 
       if (result.canceled || !result.assets?.length) return;
 
-      const jobs: PendingUploadJob[] = result.assets.map((asset, idx) => {
+      const selectedAssets = multiple ? result.assets : result.assets.slice(0, 1);
+      const jobs: PendingUploadJob[] = selectedAssets.map((asset, idx) => {
         const name = asset.name || guessNameFromUri(asset.uri, 'file', asset.mimeType);
         const mime = asset.mimeType || 'application/octet-stream';
         const kind = toPreviewKind(name, mime);

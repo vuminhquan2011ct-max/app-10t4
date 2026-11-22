@@ -8,7 +8,6 @@ import {
   Modal,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -26,18 +25,12 @@ import {
 import { useToast } from '@/components/ui/toast';
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useBrandGradient, useIsDark, useTheme } from '@/hooks/use-theme';
-import {
-  DRIVE_CONFIG,
-  formatBytes,
-  formatUploaderRoleLabel,
-  getFileVisualMeta,
-} from '@/lib/drive';
+import { DRIVE_CONFIG, formatUploaderRoleLabel } from '@/lib/drive';
 import {
   buildOptimisticDriveMediaItem,
   isSessionUploadedDriveFile,
   saveUploadedFilesToGallery,
   useDriveGallery,
-  type DriveMediaCategory,
   type DriveMediaItem,
   type SaveDriveMediaMeta,
 } from '@/lib/drive-gallery';
@@ -45,6 +38,8 @@ import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 
 const CONFIRM_RESET_MS = 3_500;
+const TIMETABLE_TAG = '[TKB]';
+const TIMETABLE_CAPTION = '[TKB] Thời khóa biểu lớp 10T4';
 
 function formatShortTime(iso: string): string {
   const ts = Date.parse(iso);
@@ -63,22 +58,26 @@ function isVeryRecent(iso: string): boolean {
   return Date.now() - ts < 15 * 60_000;
 }
 
-function categoryForKind(kind: 'image' | 'photo' | 'video' | 'document'): DriveMediaCategory {
-  if (kind === 'image' || kind === 'photo') return 'class_photo';
-  if (kind === 'video') return 'media';
-  return 'lecture';
-}
-
 function normalizeOwnerName(name?: string | null): string {
   return (name ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function isTimetablePhoto(item: DriveMediaItem): boolean {
+  if (item.itemType !== 'photo') return false;
+  const caption = item.caption?.trim() ?? '';
+  return caption.includes(TIMETABLE_TAG) || String(item.category) === 'timetable';
+}
+
 /**
- * Prominent Photo & File Upload Hub mounted exclusively on the Overview (Tổng quan) tab.
+ * Single Large Timetable Photo Board ("Bảng Thời Khóa Biểu Lớp 10T4") mounted on
+ * the Overview (Tổng quan) tab.
  *
- * Direct 1-tap buttons to upload photos, videos, PDFs, Word/PowerPoint/ZIP documents
- * to Google Drive `K8T4_app` with <50ms optimistic previews, parallel compression,
- * live Realtime updates, and 2-tap universal deletion (App + Drive + Excel/Sheets).
+ * - Strictly 1 timetable image allowed at a time (`multiple={false}`, `accept="image/*"`).
+ * - Displays the active timetable photo in a large, uncropped (`contentFit="contain"`,
+ *   `w1600`) framed board for effortless reading, plus fullscreen zoom, Drive link,
+ *   and 2-tap universal cascade delete (App + Supabase + Drive Trash + Excel/Sheets).
+ * - Automatically removes any duplicate older `[TKB]` timetable photos if concurrent
+ *   uploads ever happen so only 1 timetable photo exists across devices & Excel.
  */
 export function LiveRecentPhotosStrip(): ReactElement | null {
   const auth = useAuth();
@@ -106,11 +105,16 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
     failOptimistic,
   } = useDriveGallery();
 
-  const [previewItem, setPreviewItem] = useState<DriveMediaItem | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const metaSnapshotsRef = useRef<Map<string, SaveDriveMediaMeta>>(new Map());
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const itemsRef = useRef<DriveMediaItem[]>(items);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   useEffect(() => {
     return () => {
@@ -137,19 +141,41 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
     currentStudent?.name,
   ]);
 
+  const timetableItems = useMemo(() => items.filter(isTimetablePhoto), [items]);
+  const activeTimetablePhoto = timetableItems[0] ?? null;
+
   const canDeleteItem = useCallback(
     (item: DriveMediaItem): boolean => {
       if (item.pending) return false;
       if (canEditClass) return true;
       if (isSessionUploadedDriveFile(item.driveFileId)) return true;
       const myNorm = normalizeOwnerName(uploaderName);
-      if (myNorm && normalizeOwnerName(item.uploaderName) === myNorm) return true;
-      return false;
+      return Boolean(myNorm) && normalizeOwnerName(item.uploaderName) === myNorm;
     },
     [canEditClass, uploaderName],
   );
 
-  const handleDeleteItem = useCallback(
+  const cleanupDuplicateTimetablePhotos = useCallback(
+    (keepDriveFileId: string, keepRowId?: string) => {
+      const olderDuplicates = itemsRef.current.filter((it) => {
+        if (it.pending || !isTimetablePhoto(it)) return false;
+        if (keepDriveFileId && it.driveFileId === keepDriveFileId) return false;
+        if (keepRowId && it.id === keepRowId) return false;
+        return true;
+      });
+      for (const dup of olderDuplicates) {
+        void deleteUploadedFileEverywhere({
+          id: dup.id,
+          driveFileId: dup.driveFileId,
+          fileUrl: dup.driveUrl || dup.imageUrl,
+          fileName: dup.fileName,
+        }).catch(() => {});
+      }
+    },
+    [deleteUploadedFileEverywhere],
+  );
+
+  const handleDeleteTimetablePhoto = useCallback(
     async (item: DriveMediaItem) => {
       if (deletingId) return;
       if (confirmDeleteId !== item.id) {
@@ -159,7 +185,7 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
           confirmTimerRef.current = null;
           setConfirmDeleteId(null);
         }, CONFIRM_RESET_MS);
-        showToast('Bấm lại lần nữa để xoá khỏi App, Drive & Excel', 'warning');
+        showToast('Bấm lại lần nữa để xoá ảnh TKB khỏi App, Drive & Excel', 'warning');
         return;
       }
 
@@ -176,60 +202,46 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
           fileUrl: item.driveUrl || item.imageUrl,
           fileName: item.fileName,
         });
-        if (previewItem?.id === item.id) {
-          setPreviewItem(null);
-        }
+        setPreviewOpen(false);
         showToast(
           res.trashedDrive || res.removedSheetRows > 0
-            ? 'Đã xoá tệp khỏi App, Google Drive & Excel!'
-            : 'Đã xoá tệp khỏi App & đồng bộ toàn lớp!',
+            ? 'Đã xoá ảnh Thời khóa biểu khỏi App, Google Drive & Excel!'
+            : 'Đã xoá ảnh Thời khóa biểu — bạn có thể đăng ảnh mới!',
           'info',
         );
       } finally {
         setDeletingId(null);
       }
     },
-    [confirmDeleteId, deletingId, deleteUploadedFileEverywhere, previewItem?.id, showToast],
+    [confirmDeleteId, deletingId, deleteUploadedFileEverywhere, showToast],
   );
-
-  const recentItems = useMemo(() => items.slice(0, 12), [items]);
-
-  const counts = useMemo(() => {
-    let photos = 0;
-    let files = 0;
-    for (const item of items) {
-      if (item.itemType === 'photo') photos += 1;
-      else files += 1;
-    }
-    return { photos, files, total: items.length };
-  }, [items]);
 
   const handleSelectionStart = useCallback(
     (pending: PendingUploadPreview[]) => {
-      const optItems = pending.map((p) => {
-        const meta: SaveDriveMediaMeta = {
-          uploaderName,
-          uploaderRole: memberRole,
-          uploaderSubject: isSubjectTeacher ? subjectName : null,
-          caption: '',
-          category: categoryForKind(p.kind),
-        };
-        metaSnapshotsRef.current.set(p.tempId, meta);
-        return buildOptimisticDriveMediaItem({
-          tempId: p.tempId,
-          fileName: p.fileName,
-          mimeType: p.mimeType,
-          sizeBytes: p.sizeBytes,
-          localUri: p.localUri,
-          kind: p.kind,
-          uploaderName: meta.uploaderName,
-          uploaderRole: meta.uploaderRole,
-          uploaderSubject: meta.uploaderSubject,
-          caption: meta.caption,
-          category: meta.category,
-        });
+      const first = pending[0];
+      if (!first) return;
+      const meta: SaveDriveMediaMeta = {
+        uploaderName,
+        uploaderRole: memberRole,
+        uploaderSubject: isSubjectTeacher ? subjectName : null,
+        caption: TIMETABLE_CAPTION,
+        category: 'class_photo',
+      };
+      metaSnapshotsRef.current.set(first.tempId, meta);
+      const optItem = buildOptimisticDriveMediaItem({
+        tempId: first.tempId,
+        fileName: first.fileName,
+        mimeType: first.mimeType,
+        sizeBytes: first.sizeBytes,
+        localUri: first.localUri,
+        kind: 'image',
+        uploaderName: meta.uploaderName,
+        uploaderRole: meta.uploaderRole,
+        uploaderSubject: meta.uploaderSubject,
+        caption: meta.caption,
+        category: meta.category,
       });
-      prependOptimistic(optItems);
+      prependOptimistic([optItem]);
     },
     [uploaderName, memberRole, isSubjectTeacher, subjectName, prependOptimistic],
   );
@@ -241,8 +253,8 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
         uploaderName,
         uploaderRole: memberRole,
         uploaderSubject: isSubjectTeacher ? subjectName : null,
-        caption: '',
-        category: categoryForKind(file.kind),
+        caption: TIMETABLE_CAPTION,
+        category: 'class_photo' as const,
       };
       metaSnapshotsRef.current.delete(tempId);
 
@@ -251,6 +263,7 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
         const saved = res.items[0];
         if (saved) {
           resolveOptimistic(tempId, saved);
+          cleanupDuplicateTimetablePhotos(file.id, saved.id);
         } else {
           failOptimistic(tempId);
         }
@@ -266,6 +279,7 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
       subjectName,
       resolveOptimistic,
       failOptimistic,
+      cleanupDuplicateTimetablePhotos,
     ],
   );
 
@@ -280,26 +294,33 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
 
   const handleBatchDone = useCallback(
     (files: UploadedDriveFile[]) => {
-      if (files.length === 0) return;
-      const allPhotos = files.every((f) => f.kind === 'photo');
-      showToast(
-        allPhotos
-          ? `Đã đăng ${files.length} ảnh mới lên lớp tức thì! ⚡`
-          : `Đã đăng ${files.length} ảnh / tệp lên Drive ${DRIVE_CONFIG.folderName} tức thì! ⚡`,
-        'success',
-      );
+      const latest = files[0];
+      if (!latest) return;
+      cleanupDuplicateTimetablePhotos(latest.id);
+      showToast('Đã đăng ảnh Thời khóa biểu mới lên bảng Tổng quan! 📅⚡', 'success');
     },
-    [showToast],
+    [cleanupDuplicateTimetablePhotos, showToast],
   );
 
   const openLink = (url: string) => {
     if (!url) return;
-    Linking.openURL(url).catch(() => showToast('Không thể mở liên kết tệp', 'warning'));
+    Linking.openURL(url).catch(() => showToast('Không thể mở liên kết ảnh trên Drive', 'warning'));
   };
+
+  const canDeleteActive = activeTimetablePhoto ? canDeleteItem(activeTimetablePhoto) : false;
+  const isDeletingActive = Boolean(
+    activeTimetablePhoto && deletingId === activeTimetablePhoto.id,
+  );
+  const isConfirmingActive = Boolean(
+    activeTimetablePhoto && confirmDeleteId === activeTimetablePhoto.id,
+  );
+  const modalVisible =
+    previewOpen && Boolean(activeTimetablePhoto && !activeTimetablePhoto.pending);
+  const boardCanvasBg = isDark ? '#0B1120' : '#F8FAFC';
 
   return (
     <Card style={styles.card}>
-      {/* Prominent Quick-Upload Hero Banner */}
+      {/* Single Timetable Board Hero Header */}
       <LinearGradient
         colors={gradient}
         start={{ x: 0, y: 0 }}
@@ -312,12 +333,14 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
           <View style={styles.livePill}>
             <View style={styles.liveDot} />
             <Text style={styles.livePillText}>
-              {`ĐĂNG NHANH · DRIVE ${DRIVE_CONFIG.folderName}`}
+              {`BẢNG THỜI KHÓA BIỂU · ${activeTimetablePhoto ? '1/1 ẢNH' : '0/1 ẢNH'}`}
             </Text>
           </View>
           <Pressable
             onPress={() => router.push('/gallery' as never)}
             hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Mở Kho ảnh và tài liệu lớp"
             style={({ pressed }) => [styles.seeAllPill, pressed && styles.pressed]}>
             <Text style={styles.seeAllPillText}>Kho lớp →</Text>
           </Pressable>
@@ -325,348 +348,268 @@ export function LiveRecentPhotosStrip(): ReactElement | null {
 
         <View style={styles.bannerBody}>
           <View style={styles.bannerIconWell}>
-            <Ionicons name="cloud-upload" size={22} color="#FFFFFF" />
+            <Ionicons name="calendar" size={22} color="#FFFFFF" />
           </View>
           <View style={styles.flex}>
             <Text style={styles.bannerTitle} numberOfLines={1}>
-              Đăng Ảnh, Video & Tài liệu lên lớp
+              {`Bảng Thời Khóa Biểu Lớp ${classInfo.name}`}
             </Text>
             <Text style={styles.bannerSub} numberOfLines={2}>
-              Chọn ảnh, video, PDF, Word, PowerPoint, ZIP... — tự nén siêu nhanh & hiện ngay cho cả lớp!
+              {activeTimetablePhoto
+                ? 'Hiển thị trọn vẹn 1 ảnh TKB rõ nét — chạm vào bảng ảnh để phóng to xem chi tiết.'
+                : 'Chỉ đăng duy nhất 1 bức ảnh Thời khóa biểu để cả lớp xem nhanh ngay tại Tổng quan.'}
             </Text>
-          </View>
-        </View>
-
-        <View style={styles.bannerStats}>
-          <View style={styles.statChip}>
-            <Ionicons name="images-outline" size={12} color="#FFFFFF" />
-            <Text style={styles.statChipText}>{`${counts.photos} ảnh`}</Text>
-          </View>
-          <View style={styles.statChip}>
-            <Ionicons name="document-text-outline" size={12} color="#FFFFFF" />
-            <Text style={styles.statChipText}>{`${counts.files} file & video`}</Text>
-          </View>
-          <View style={styles.statChip}>
-            <Ionicons name="flash" size={12} color="#FDE047" />
-            <Text style={styles.statChipText}>Đồng bộ tức thì</Text>
           </View>
         </View>
       </LinearGradient>
 
-      {/* Dual 1-Tap Upload Buttons: Photos/Videos AND Files/Documents */}
-      <DriveUploadButton
-        mode="both"
-        multiple
-        accept="*/*"
-        mediaLabel="Đăng Ảnh / Video"
-        fileLabel="Đăng File / Tài liệu"
-        uploaderName={uploaderName}
-        uploaderRole={memberRole}
-        category="class_photo"
-        onSelectionStart={handleSelectionStart}
-        onItemUploaded={handleItemUploaded}
-        onItemFailed={handleItemFailed}
-        onUploaded={handleBatchDone}
-      />
-
-      {/* Live Feed Header */}
-      <View style={styles.feedHead}>
-        <Text style={[styles.feedTitle, { color: theme.text }]}>
-          {counts.total > 0 ? `Ảnh & File mới nhất (${counts.total})` : 'Ảnh & File mới nhất'}
-        </Text>
-        <Pressable
-          onPress={() => router.push('/gallery' as never)}
-          hitSlop={8}
-          style={({ pressed }) => [pressed && styles.pressed]}>
-          <Text style={[styles.seeAllLink, { color: theme.accentText }]}>Xem tất cả →</Text>
-        </Pressable>
-      </View>
-
-      {/* Horizontal Recent Photos & Files Strip */}
-      {loading && recentItems.length === 0 ? (
-        <View style={styles.emptyBox}>
-          <ActivityIndicator size="small" color={theme.accent} />
-          <Text style={{ color: theme.textMuted, fontSize: 12, fontWeight: '600' }}>
-            Đang tải ảnh & tài liệu mới nhất...
-          </Text>
-        </View>
-      ) : recentItems.length === 0 ? (
-        <Pressable
-          onPress={() => router.push('/gallery' as never)}
+      {/* Main Big Single-Photo Board Frame */}
+      {loading && !activeTimetablePhoto ? (
+        <View
           style={[
-            styles.emptyBox,
+            styles.emptyBoard,
             { backgroundColor: theme.backgroundElement, borderColor: theme.border },
           ]}>
-          <Ionicons name="cloud-upload-outline" size={20} color={theme.textMuted} />
-          <Text style={{ color: theme.textSecondary, fontSize: 12, fontWeight: '700', flex: 1 }}>
-            {'Chưa có ảnh hoặc tệp nào — bấm “Đăng Ảnh / Video” hoặc “Đăng File / Tài liệu” ở trên để chia sẻ ngay!'}
+          <ActivityIndicator size="large" color={theme.accent} />
+          <Text style={[styles.emptyTitle, { color: theme.text }]}>
+            Đang tải bảng Thời khóa biểu...
           </Text>
-        </Pressable>
+          <Text style={[styles.emptySub, { color: theme.textMuted }]}>
+            {`Đồng bộ ảnh mới nhất từ Google Drive ${DRIVE_CONFIG.folderName}`}
+          </Text>
+        </View>
+      ) : !activeTimetablePhoto ? (
+        <View
+          style={[
+            styles.emptyBoard,
+            {
+              backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : theme.backgroundElement,
+              borderColor: `${theme.accent}55`,
+            },
+          ]}>
+          <View style={[styles.emptyIconCircle, { backgroundColor: theme.accentSoft }]}>
+            <Ionicons name="calendar-outline" size={34} color={theme.accent} />
+          </View>
+          <Text style={[styles.emptyTitle, { color: theme.text }]}>
+            Chưa có ảnh Thời khóa biểu (0/1)
+          </Text>
+          <Text style={[styles.emptySub, { color: theme.textSecondary }]}>
+            Chỉ đăng duy nhất 1 bức ảnh Thời khóa biểu để cả lớp xem nhanh, rõ nét ngay tại Tổng quan.
+          </Text>
+          <View style={styles.uploadBtnWrap}>
+            <DriveUploadButton
+              mode="media"
+              multiple={false}
+              accept="image/*"
+              label="Đăng 1 ảnh Thời khóa biểu lên bảng"
+              uploaderName={uploaderName}
+              uploaderRole={memberRole}
+              category="timetable"
+              onSelectionStart={handleSelectionStart}
+              onItemUploaded={handleItemUploaded}
+              onItemFailed={handleItemFailed}
+              onUploaded={handleBatchDone}
+            />
+          </View>
+        </View>
       ) : (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.strip}>
-          {recentItems.map((item) => {
-            const fresh = !item.pending && isVeryRecent(item.createdAt);
-            const deletable = canDeleteItem(item);
-            const isConfirming = confirmDeleteId === item.id;
-            const isDeleting = deletingId === item.id;
-
-            if (item.itemType === 'photo') {
-              return (
-                <View
-                  key={item.id}
-                  style={[
-                    styles.thumbCard,
-                    { backgroundColor: theme.backgroundElement, borderColor: theme.border },
-                  ]}>
-                  <Pressable
-                    disabled={Boolean(item.pending) || isDeleting}
-                    onPress={() => setPreviewItem(item)}
-                    style={({ pressed }) => [StyleSheet.absoluteFill, pressed && styles.pressed]}>
-                    <DriveImage
-                      driveFileId={item.driveFileId}
-                      primaryUri={item.imageUrl}
-                      localUri={item.localPreviewUri}
-                      width={480}
-                      contentFit="cover"
-                      style={styles.thumbImg}
-                    />
-                  </Pressable>
-
-                  {item.pending ? (
-                    <View pointerEvents="none" style={styles.pendingPill}>
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                      <Text style={styles.pendingText}>Đang tải...</Text>
-                    </View>
-                  ) : fresh ? (
-                    <View pointerEvents="none" style={styles.newPill}>
-                      <Text style={styles.newPillText}>MỚI</Text>
-                    </View>
-                  ) : null}
-
-                  {deletable ? (
-                    <Pressable
-                      disabled={isDeleting}
-                      onPress={(e) => {
-                        e.stopPropagation?.();
-                        void handleDeleteItem(item);
-                      }}
-                      hitSlop={6}
-                      accessibilityRole="button"
-                      accessibilityLabel={isConfirming ? `Xác nhận xoá ${item.fileName}` : `Xoá ${item.fileName}`}
-                      style={({ pressed }) => [
-                        isConfirming ? styles.tileDeleteConfirm : styles.tileDeleteBtn,
-                        pressed && styles.pressed,
-                      ]}>
-                      {isDeleting ? (
-                        <ActivityIndicator size="small" color="#FFFFFF" />
-                      ) : isConfirming ? (
-                        <Text style={styles.tileDeleteConfirmText}>Xoá?</Text>
-                      ) : (
-                        <Ionicons name="trash-outline" size={12} color="#FFFFFF" />
-                      )}
-                    </Pressable>
-                  ) : null}
-
-                  <View pointerEvents="none" style={styles.thumbScrim}>
-                    <Text style={styles.thumbAuthor} numberOfLines={1}>
-                      {item.uploaderName}
-                    </Text>
-                    <Text style={styles.thumbTime} numberOfLines={1}>
-                      {item.pending ? 'Đang đồng bộ' : formatShortTime(item.createdAt)}
-                    </Text>
-                  </View>
-                </View>
-              );
-            }
-
-            const fileVisual = getFileVisualMeta(item.fileName, item.mimeType);
-            const fileSoftKey = `${fileVisual.tone}Soft` as
-              | 'accentSoft'
-              | 'dangerSoft'
-              | 'successSoft'
-              | 'warningSoft'
-              | 'purpleSoft';
-
-            return (
-              <View
-                key={item.id}
-                style={[
-                  styles.fileCard,
-                  { backgroundColor: theme.backgroundElement, borderColor: theme.border },
-                ]}>
-                <View style={styles.fileCardTop}>
-                  <Pressable
-                    disabled={Boolean(item.pending) || isDeleting}
-                    onPress={() => openLink(item.driveUrl)}
-                    style={[styles.fileIconBox, { backgroundColor: theme[fileSoftKey] }]}>
-                    {item.pending ? (
-                      <ActivityIndicator size="small" color={theme[fileVisual.tone]} />
-                    ) : (
-                      <Ionicons name={fileVisual.icon} size={20} color={theme[fileVisual.tone]} />
-                    )}
-                  </Pressable>
-                  <View style={styles.fileCardTopRight}>
-                    {item.pending ? (
-                      <View style={[styles.fileBadge, { backgroundColor: theme.accentSoft }]}>
-                        <Text style={[styles.fileBadgeText, { color: theme.accentText }]}>
-                          Đang tải
-                        </Text>
-                      </View>
-                    ) : deletable ? (
-                      <Pressable
-                        disabled={isDeleting}
-                        onPress={(e) => {
-                          e.stopPropagation?.();
-                          void handleDeleteItem(item);
-                        }}
-                        hitSlop={6}
-                        accessibilityRole="button"
-                        accessibilityLabel={isConfirming ? `Xác nhận xoá ${item.fileName}` : `Xoá ${item.fileName}`}
-                        style={({ pressed }) => [
-                          isConfirming
-                            ? [styles.fileDeleteConfirm, { backgroundColor: theme.danger }]
-                            : [styles.fileDeleteBtn, { backgroundColor: theme.dangerSoft }],
-                          pressed && styles.pressed,
-                        ]}>
-                        {isDeleting ? (
-                          <ActivityIndicator size="small" color={isConfirming ? '#FFFFFF' : theme.danger} />
-                        ) : isConfirming ? (
-                          <Text style={styles.tileDeleteConfirmText}>Xoá?</Text>
-                        ) : (
-                          <Ionicons name="trash-outline" size={13} color={theme.danger} />
-                        )}
-                      </Pressable>
-                    ) : fresh ? (
-                      <View style={styles.newPillInline}>
-                        <Text style={styles.newPillText}>MỚI</Text>
-                      </View>
-                    ) : (
-                      <View style={[styles.fileBadge, { backgroundColor: theme[fileSoftKey] }]}>
-                        <Text style={[styles.fileBadgeText, { color: theme[fileVisual.tone] }]}>
-                          {fileVisual.badge}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                </View>
-
-                <Pressable
-                  disabled={Boolean(item.pending) || isDeleting}
-                  onPress={() => openLink(item.driveUrl)}
-                  style={({ pressed }) => [styles.fileCardBody, pressed && styles.pressed]}>
-                  <Text style={[styles.fileCardName, { color: theme.text }]} numberOfLines={2}>
-                    {item.fileName}
-                  </Text>
-
-                  <Text style={[styles.fileCardMeta, { color: theme.textMuted }]} numberOfLines={1}>
-                    {item.pending
-                      ? 'Đang đồng bộ...'
-                      : [
-                          item.uploaderName,
-                          item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : formatShortTime(item.createdAt),
-                        ]
-                          .filter(Boolean)
-                          .join(' · ')}
-                  </Text>
-                </Pressable>
-              </View>
-            );
-          })}
-
+        <View style={styles.activeBoardWrap}>
+          {/* Big Uncropped Timetable Photo Frame */}
           <Pressable
-            onPress={() => router.push('/gallery' as never)}
+            disabled={Boolean(activeTimetablePhoto.pending) || isDeletingActive}
+            onPress={() => setPreviewOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Phóng to xem rõ ảnh Thời khóa biểu"
             style={({ pressed }) => [
-              styles.moreTile,
-              { backgroundColor: theme.accentSoft, borderColor: `${theme.accent}44` },
+              styles.boardFrame,
+              {
+                backgroundColor: boardCanvasBg,
+                borderColor: activeTimetablePhoto.pending ? theme.accent : theme.border,
+              },
               pressed && styles.pressed,
             ]}>
-            <Ionicons name="arrow-forward-circle" size={26} color={theme.accent} />
-            <Text style={[styles.moreTileText, { color: theme.accentText }]}>Kho lớp</Text>
+            <DriveImage
+              driveFileId={activeTimetablePhoto.driveFileId}
+              primaryUri={activeTimetablePhoto.imageUrl}
+              localUri={activeTimetablePhoto.localPreviewUri}
+              width={1600}
+              contentFit="contain"
+              style={styles.boardImage}
+            />
+
+            {activeTimetablePhoto.pending ? (
+              <View pointerEvents="none" style={styles.pendingPill}>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                <Text style={styles.pendingText}>Đang đồng bộ ảnh Thời khóa biểu...</Text>
+              </View>
+            ) : (
+              <>
+                <View pointerEvents="none" style={styles.topLeftBadge}>
+                  {isVeryRecent(activeTimetablePhoto.createdAt) ? (
+                    <View style={styles.newPill}>
+                      <Text style={styles.newPillText}>MỚI CẬP NHẬT</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.slotPill}>
+                      <Ionicons name="checkmark-circle" size={12} color="#34D399" />
+                      <Text style={styles.slotPillText}>1/1 ẢNH TKB</Text>
+                    </View>
+                  )}
+                </View>
+
+                <View pointerEvents="none" style={styles.zoomHintPill}>
+                  <Ionicons name="expand-outline" size={13} color="#FFFFFF" />
+                  <Text style={styles.zoomHintText}>Chạm để phóng to</Text>
+                </View>
+              </>
+            )}
           </Pressable>
-        </ScrollView>
+
+          {/* Uploader Metadata Row */}
+          <View style={styles.metaRow}>
+            <View style={styles.metaLeft}>
+              <Ionicons name="person-circle-outline" size={16} color={theme.accent} />
+              <Text style={[styles.metaAuthor, { color: theme.text }]} numberOfLines={1}>
+                {activeTimetablePhoto.uploaderName}
+              </Text>
+              <Text style={[styles.metaRole, { color: theme.textMuted }]} numberOfLines={1}>
+                {`· ${formatUploaderRoleLabel(activeTimetablePhoto.uploaderRole, activeTimetablePhoto.uploaderSubject)}`}
+              </Text>
+            </View>
+            <Badge
+              label={
+                activeTimetablePhoto.pending
+                  ? 'Đang tải...'
+                  : formatShortTime(activeTimetablePhoto.createdAt) || 'Đã lưu'
+              }
+              color={'accentText'}
+              soft={'accentSoft'}
+            />
+          </View>
+
+          {/* Strictly 1-Photo Lock Notice */}
+          <View
+            style={[
+              styles.lockNotice,
+              { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+            ]}>
+            <Ionicons name="lock-closed-outline" size={14} color={theme.accentText} />
+            <Text style={[styles.lockNoticeText, { color: theme.textSecondary }]}>
+              {canDeleteActive
+                ? 'Đang hiển thị 1/1 ảnh Thời khóa biểu — muốn đổi ảnh mới hãy bấm “Xoá ảnh TKB” bên dưới.'
+                : 'Đang hiển thị 1/1 ảnh Thời khóa biểu của lớp — liên hệ GVCN hoặc người đăng nếu cần thay ảnh mới.'}
+            </Text>
+          </View>
+
+          {/* Action Bar: Zoom Fullscreen, Open Drive, Delete Timetable Photo */}
+          {!activeTimetablePhoto.pending ? (
+            <View style={styles.actionRow}>
+              <Button
+                label={'Phóng to xem rõ'}
+                icon={'expand-outline'}
+                size={'sm'}
+                style={styles.flex}
+                disabled={isDeletingActive}
+                onPress={() => setPreviewOpen(true)}
+              />
+              <Button
+                label={'Mở trên Drive'}
+                variant={'soft'}
+                icon={'open-outline'}
+                size={'sm'}
+                disabled={isDeletingActive}
+                onPress={() => openLink(activeTimetablePhoto.driveUrl)}
+              />
+              {canDeleteActive ? (
+                <Button
+                  label={
+                    isDeletingActive
+                      ? 'Đang xoá...'
+                      : isConfirmingActive
+                        ? 'Xác nhận xoá?'
+                        : 'Xoá ảnh TKB'
+                  }
+                  variant={'danger'}
+                  icon={'trash-outline'}
+                  size={'sm'}
+                  disabled={isDeletingActive}
+                  onPress={() => void handleDeleteTimetablePhoto(activeTimetablePhoto)}
+                />
+              ) : null}
+            </View>
+          ) : null}
+        </View>
       )}
 
-      {/* Fullscreen Photo Preview Modal */}
+      {/* Fullscreen High-Clarity Timetable Viewer Modal */}
       <Modal
-        visible={Boolean(previewItem)}
+        visible={modalVisible}
         transparent
         animationType="fade"
-        onRequestClose={() => setPreviewItem(null)}>
+        onRequestClose={() => setPreviewOpen(false)}>
         <View
           style={[
             styles.modalBackdrop,
-            { backgroundColor: isDark ? 'rgba(2, 6, 23, 0.92)' : 'rgba(15, 23, 42, 0.86)' },
+            { backgroundColor: isDark ? 'rgba(2, 6, 23, 0.94)' : 'rgba(15, 23, 42, 0.88)' },
           ]}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreviewItem(null)} />
-          {previewItem ? (
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreviewOpen(false)} />
+          {activeTimetablePhoto ? (
             <View style={[styles.modalCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
               <View style={styles.modalHead}>
                 <View style={styles.flex}>
                   <Text style={[styles.modalTitle, { color: theme.text }]} numberOfLines={1}>
-                    {previewItem.caption || previewItem.fileName}
+                    {`Thời khóa biểu lớp ${classInfo.name}`}
                   </Text>
                   <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
-                    {`${previewItem.uploaderName} · ${formatUploaderRoleLabel(previewItem.uploaderRole, previewItem.uploaderSubject)}`}
+                    {`${activeTimetablePhoto.uploaderName} · ${formatUploaderRoleLabel(activeTimetablePhoto.uploaderRole, activeTimetablePhoto.uploaderSubject)}`}
                   </Text>
                 </View>
                 <Badge
-                  label={formatShortTime(previewItem.createdAt)}
+                  label={formatShortTime(activeTimetablePhoto.createdAt) || '1/1 TKB'}
                   color={'accentText'}
                   soft={'accentSoft'}
                 />
                 <Pressable
-                  onPress={() => setPreviewItem(null)}
+                  onPress={() => setPreviewOpen(false)}
                   accessibilityRole="button"
-                  accessibilityLabel="Đóng xem trước"
+                  accessibilityLabel="Đóng chế độ toàn màn hình"
                   style={[styles.closeCircle, { backgroundColor: theme.backgroundElement }]}>
                   <Ionicons name="close" size={18} color={theme.text} />
                 </Pressable>
               </View>
 
               <DriveImage
-                driveFileId={previewItem.driveFileId}
-                primaryUri={previewItem.imageUrl}
-                localUri={previewItem.localPreviewUri}
+                driveFileId={activeTimetablePhoto.driveFileId}
+                primaryUri={activeTimetablePhoto.imageUrl}
+                localUri={activeTimetablePhoto.localPreviewUri}
                 width={1600}
                 contentFit="contain"
-                style={styles.modalImage}
+                style={[styles.modalImage, { backgroundColor: boardCanvasBg }]}
               />
 
               <View style={styles.modalActions}>
                 <Button
-                  label={'Mở Drive'}
+                  label={'Mở trên Drive'}
                   icon={'open-outline'}
                   size={'sm'}
                   style={styles.flex}
-                  onPress={() => openLink(previewItem.driveUrl)}
+                  disabled={isDeletingActive}
+                  onPress={() => openLink(activeTimetablePhoto.driveUrl)}
                 />
-                <Button
-                  label={'Kho lớp'}
-                  variant={'soft'}
-                  icon={'folder-open-outline'}
-                  size={'sm'}
-                  onPress={() => {
-                    setPreviewItem(null);
-                    router.push('/gallery' as never);
-                  }}
-                />
-                {canDeleteItem(previewItem) ? (
+                {canDeleteActive ? (
                   <Button
                     label={
-                      deletingId === previewItem.id
+                      isDeletingActive
                         ? 'Đang xoá...'
-                        : confirmDeleteId === previewItem.id
+                        : isConfirmingActive
                           ? 'Xác nhận xoá?'
-                          : 'Xoá'
+                          : 'Xoá ảnh TKB'
                     }
                     variant={'danger'}
                     icon={'trash-outline'}
                     size={'sm'}
-                    disabled={deletingId === previewItem.id}
-                    onPress={() => void handleDeleteItem(previewItem)}
+                    disabled={isDeletingActive}
+                    onPress={() => void handleDeleteTimetablePhoto(activeTimetablePhoto)}
                   />
                 ) : null}
               </View>
@@ -772,230 +715,162 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     marginTop: 2,
   },
-  bannerStats: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  statChip: {
-    flexDirection: 'row',
+  emptyBoard: {
+    minHeight: 340,
+    borderRadius: Radius.xl,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    padding: Spacing.four,
     alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(0,0,0,0.18)',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: Radius.pill,
+    justifyContent: 'center',
+    gap: Spacing.two + 2,
   },
-  statChipText: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  feedHead: {
-    flexDirection: 'row',
+  emptyIconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
+    justifyContent: 'center',
+    marginBottom: 4,
   },
-  feedTitle: {
-    fontSize: 13.5,
+  emptyTitle: {
+    fontSize: 16.5,
     fontWeight: '900',
+    textAlign: 'center',
   },
-  seeAllLink: {
-    fontSize: 12,
-    fontWeight: '800',
+  emptySub: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    maxWidth: 360,
   },
-  emptyBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    padding: Spacing.three,
-    borderRadius: Radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+  uploadBtnWrap: {
+    width: '100%',
+    maxWidth: 340,
+    marginTop: Spacing.two,
   },
-  strip: {
-    gap: Spacing.two,
-    paddingRight: Spacing.one,
+  activeBoardWrap: {
+    gap: Spacing.two + 2,
   },
-  thumbCard: {
-    width: 124,
-    height: 132,
-    borderRadius: Radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
+  boardFrame: {
+    width: '100%',
+    height: Platform.OS === 'web' ? 420 : 360,
+    borderRadius: Radius.xl,
+    borderWidth: 1.5,
     overflow: 'hidden',
   },
-  thumbImg: {
+  boardImage: {
     width: '100%',
     height: '100%',
   },
   pendingPill: {
     position: 'absolute',
-    top: 6,
-    left: 6,
-    right: 6,
+    top: 12,
+    left: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-    backgroundColor: 'rgba(15, 23, 42, 0.8)',
-    paddingHorizontal: 7,
-    paddingVertical: 4,
+    gap: 7,
+    backgroundColor: 'rgba(15, 23, 42, 0.84)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: Radius.pill,
   },
   pendingText: {
     color: '#FFFFFF',
-    fontSize: 10,
+    fontSize: 11.5,
     fontWeight: '800',
   },
-  newPill: {
+  topLeftBadge: {
     position: 'absolute',
-    top: 7,
-    left: 7,
-    backgroundColor: '#10B981',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: Radius.pill,
+    top: 10,
+    left: 10,
   },
-  newPillInline: {
+  newPill: {
     backgroundColor: '#10B981',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
     borderRadius: Radius.pill,
   },
   newPillText: {
     color: '#FFFFFF',
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '900',
     letterSpacing: 0.4,
   },
-  tileDeleteBtn: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: 'rgba(220, 38, 38, 0.9)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.35)',
+  slotPill: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tileDeleteConfirm: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    paddingHorizontal: 8,
+    gap: 4,
+    backgroundColor: 'rgba(15, 23, 42, 0.76)',
+    paddingHorizontal: 9,
     paddingVertical: 4,
     borderRadius: Radius.pill,
-    backgroundColor: '#DC2626',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.45)',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  tileDeleteConfirmText: {
+  slotPillText: {
     color: '#FFFFFF',
     fontSize: 10,
-    fontWeight: '900',
+    fontWeight: '800',
+    letterSpacing: 0.4,
   },
-  thumbScrim: {
+  zoomHintPill: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    right: 10,
+    bottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(15, 23, 42, 0.78)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: Radius.pill,
   },
-  thumbAuthor: {
+  zoomHintText: {
     color: '#FFFFFF',
     fontSize: 11,
     fontWeight: '800',
   },
-  thumbTime: {
-    color: 'rgba(255,255,255,0.82)',
-    fontSize: 9.5,
-    fontWeight: '600',
-  },
-  fileCard: {
-    width: 146,
-    height: 132,
-    borderRadius: Radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: Spacing.two + 2,
-    justifyContent: 'space-between',
-    gap: 6,
-  },
-  fileCardTop: {
+  metaRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 6,
+    gap: 8,
+    paddingHorizontal: 2,
   },
-  fileCardTopRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  fileCardBody: {
+  metaLeft: {
     flex: 1,
-    justifyContent: 'space-between',
-    gap: 4,
-  },
-  fileIconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: Radius.sm,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 5,
   },
-  fileDeleteBtn: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  fileDeleteConfirm: {
-    paddingHorizontal: 8,
-    height: 24,
-    borderRadius: Radius.pill,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  fileBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2.5,
-    borderRadius: Radius.pill,
-  },
-  fileBadgeText: {
-    fontSize: 9.5,
-    fontWeight: '900',
-  },
-  fileCardName: {
-    fontSize: 12.5,
+  metaAuthor: {
+    fontSize: 13,
     fontWeight: '800',
-    lineHeight: 16.5,
+    flexShrink: 1,
   },
-  fileCardMeta: {
-    fontSize: 10,
+  metaRole: {
+    fontSize: 12,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
+  lockNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  lockNoticeText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
     fontWeight: '600',
   },
-  moreTile: {
-    width: 82,
-    height: 132,
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingHorizontal: 8,
-  },
-  moreTileText: {
-    fontSize: 11.5,
-    fontWeight: '800',
-    textAlign: 'center',
+  actionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
   },
   modalBackdrop: {
     flex: 1,
@@ -1005,12 +880,12 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     width: '100%',
-    maxWidth: 680,
+    maxWidth: 820,
     borderRadius: Radius.xl,
     borderWidth: 1,
     padding: Spacing.three,
     gap: Spacing.three,
-    maxHeight: '90%',
+    maxHeight: '92%',
   },
   modalHead: {
     flexDirection: 'row',
@@ -1030,13 +905,13 @@ const styles = StyleSheet.create({
   },
   modalImage: {
     width: '100%',
-    height: Platform.OS === 'web' ? 420 : 340,
+    height: Platform.OS === 'web' ? 540 : 440,
     borderRadius: Radius.lg,
-    backgroundColor: '#0f172a',
   },
   modalActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: Spacing.two,
   },
-  pressed: { opacity: 0.85, transform: [{ scale: 0.985 }] },
+  pressed: { opacity: 0.88, transform: [{ scale: 0.99 }] },
 });
