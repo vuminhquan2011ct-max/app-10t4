@@ -6,6 +6,7 @@ import {
   EMPTY_STATS,
   type AttendanceDay,
   type AttendanceStats,
+  type DutyDayLog,
   type Entry,
   type EntryCategory,
   type RankingRow,
@@ -13,18 +14,24 @@ import {
   type StudentStats,
 } from '@/types/models';
 
-/** Tổng điểm của các hoạt động đã được duyệt. */
-export function statsFor(entries: Entry[]): StudentStats {
+/** Tổng điểm (có dấu: cộng thành tích/hoạt động và trừ vi phạm) của các mục đã được duyệt. */
+export function statsFor(entries: Entry[], studentId?: string): StudentStats {
   let points = 0;
   let approved = 0;
   let pending = 0;
   let rejected = 0;
   let achievements = 0;
   let activities = 0;
+  let violations = 0;
+  let total = 0;
   let lastActivity: string | null = null;
 
   for (const entry of entries) {
+    if (studentId !== undefined && entry.studentId !== studentId) continue;
+    total += 1;
+
     if (entry.kind === 'achievement') achievements += 1;
+    else if (entry.kind === 'violation') violations += 1;
     else activities += 1;
 
     if (entry.status === 'approved') {
@@ -45,7 +52,8 @@ export function statsFor(entries: Entry[]): StudentStats {
     rejected,
     achievements,
     activities,
-    total: entries.length,
+    violations,
+    total,
     lastActivity,
   };
 }
@@ -78,10 +86,12 @@ export function buildRanking(students: Student[], entries: Entry[]): RankingRow[
   return rows.map((row, index) => ({ student: row.student, points: row.points, rank: index + 1 }));
 }
 
-/** Số ngày liên tiếp có hoạt động được duyệt, tính tới hôm nay. */
+/** Số ngày liên tiếp có hoạt động tích cực được duyệt, tính tới hôm nay. */
 export function computeStreak(entries: Entry[]): number {
   const days = new Set(
-    entries.filter((entry) => entry.status === 'approved').map((entry) => entry.date),
+    entries
+      .filter((entry) => entry.status === 'approved' && entry.kind !== 'violation' && entry.points >= 0)
+      .map((entry) => entry.date),
   );
   let streak = 0;
   const cursor = new Date();
@@ -125,6 +135,7 @@ export function emptyStats(): StudentStats {
 export function attendanceStatsFor(
   attendance: Record<string, AttendanceDay>,
   studentId: string,
+  dutyLogs?: Record<string, DutyDayLog>,
 ): AttendanceStats {
   let present = 0;
   let late = 0;
@@ -142,7 +153,38 @@ export function attendanceStatsFor(
 
   const total = present + late + excused + absent;
   const rate = total === 0 ? null : Math.round(((present + late * 0.75) / total) * 100);
-  return { present, late, excused, absent, total, rate };
+
+  let dutyCompleted = 0;
+  let dutyMissed = 0;
+  if (dutyLogs) {
+    for (const day of Object.values(dutyLogs)) {
+      const rec = day?.records?.[studentId];
+      if (!rec) continue;
+      if (rec.status === 'completed') dutyCompleted += 1;
+      else if (rec.status === 'missed') dutyMissed += 1;
+    }
+  }
+
+  const dutyTotal = dutyCompleted + dutyMissed;
+  const diligenceDeltaFromDuty = dutyCompleted * 3 - dutyMissed * 8;
+  const diligenceScore =
+    total === 0 && dutyTotal === 0
+      ? null
+      : Math.max(0, Math.min(100, Math.round((rate ?? 100) + diligenceDeltaFromDuty)));
+
+  return {
+    present,
+    late,
+    excused,
+    absent,
+    total,
+    rate,
+    dutyCompleted,
+    dutyMissed,
+    dutyTotal,
+    diligenceScore,
+    diligenceDeltaFromDuty,
+  };
 }
 
 export type GroupStat = {
@@ -194,8 +236,9 @@ export function buildCategoryStats(entries: Entry[]): CategoryStat[] {
   };
   for (const entry of entries) {
     if (entry.status !== 'approved') continue;
-    map[entry.category].count += 1;
-    map[entry.category].points += entry.points;
+    const bucket = map[entry.category] ?? map.other;
+    bucket.count += 1;
+    bucket.points += entry.points;
   }
   return ENTRY_CATEGORY_LIST.map((category) => ({
     category,
@@ -228,7 +271,7 @@ export function buildWeeklyActivity(entries: Entry[]): DailyBar[] {
   }
   const index = new Map(days.map((d) => [d.date, d]));
   for (const entry of entries) {
-    if (entry.status === 'rejected') continue;
+    if (entry.status === 'rejected' || entry.kind === 'violation' || entry.points < 0) continue;
     const slot = index.get(entry.date);
     if (!slot) continue;
     slot.count += 1;

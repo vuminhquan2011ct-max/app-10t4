@@ -21,7 +21,10 @@ import type {
   AttendanceDay,
   ClassResource,
   ClassTask,
+  DutyCompletionStatus,
+  DutyDayLog,
   DutyRoster,
+  DutyStudentRecord,
   Entry,
   FeedbackItem,
   FundTransaction,
@@ -59,6 +62,7 @@ export function freshState(): PersistedState {
     fundCycleAmount: DEFAULT_FUND_CYCLE_AMOUNT,
     schedule: buildInitialSchedule(),
     dutyRoster: { ...DEFAULT_DUTY_ROSTER },
+    dutyLogs: {},
     polls: buildInitialPolls(DEFAULT_CLASS.teacherName),
     tasks: buildInitialTasks(DEFAULT_CLASS.teacherName),
     feedback: buildInitialFeedback(),
@@ -109,6 +113,72 @@ function sanitizeTombstones(raw: unknown): Record<string, string> {
       out[key] = value;
     }
   }
+  return out;
+}
+
+function isDutyCompletionStatus(value: unknown): value is DutyCompletionStatus {
+  return value === 'pending' || value === 'completed' || value === 'missed';
+}
+
+function sanitizeDutyLogs(raw: unknown): Record<string, DutyDayLog> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, DutyDayLog> = {};
+
+  for (const [dateKey, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!dateKey || !value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const item = value as Partial<DutyDayLog>;
+    const date = typeof item.date === 'string' && item.date.trim() ? item.date.trim() : dateKey;
+
+    const assignedSet = new Set<string>();
+    if (Array.isArray(item.assignedStudentIds)) {
+      for (const sid of item.assignedStudentIds) {
+        if (typeof sid === 'string' && sid.trim()) assignedSet.add(sid.trim());
+      }
+    }
+
+    const records: Record<string, DutyStudentRecord> = {};
+    if (item.records && typeof item.records === 'object' && !Array.isArray(item.records)) {
+      for (const [recKey, recVal] of Object.entries(item.records as Record<string, unknown>)) {
+        if (!recVal || typeof recVal !== 'object' || Array.isArray(recVal)) continue;
+        const r = recVal as Partial<DutyStudentRecord>;
+        const sid =
+          typeof r.studentId === 'string' && r.studentId.trim() ? r.studentId.trim() : recKey;
+        if (!sid) continue;
+        assignedSet.add(sid);
+        records[sid] = {
+          studentId: sid,
+          status: isDutyCompletionStatus(r.status) ? r.status : 'pending',
+          note: typeof r.note === 'string' && r.note.trim() ? r.note.trim() : null,
+          evaluatedBy:
+            typeof r.evaluatedBy === 'string' && r.evaluatedBy.trim() ? r.evaluatedBy.trim() : null,
+          evaluatedByPosition:
+            typeof r.evaluatedByPosition === 'string' && r.evaluatedByPosition.trim()
+              ? r.evaluatedByPosition.trim()
+              : null,
+          evaluatedAt:
+            typeof r.evaluatedAt === 'string' && r.evaluatedAt.trim() ? r.evaluatedAt.trim() : null,
+          entryId: typeof r.entryId === 'string' && r.entryId.trim() ? r.entryId.trim() : null,
+        };
+      }
+    }
+
+    out[date] = {
+      date,
+      assignedGroup:
+        typeof item.assignedGroup === 'string' && item.assignedGroup.trim()
+          ? item.assignedGroup.trim()
+          : null,
+      assignedStudentIds: Array.from(assignedSet),
+      records,
+      note: typeof item.note === 'string' && item.note.trim() ? item.note.trim() : null,
+      assignedBy:
+        typeof item.assignedBy === 'string' && item.assignedBy.trim()
+          ? item.assignedBy.trim()
+          : null,
+      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : '',
+    };
+  }
+
   return out;
 }
 
@@ -166,6 +236,7 @@ export function hydrateState(parsed: Partial<PersistedState> | null | undefined)
       parsed.dutyRoster && typeof parsed.dutyRoster === 'object'
         ? ({ ...DEFAULT_DUTY_ROSTER, ...parsed.dutyRoster } as DutyRoster)
         : { ...DEFAULT_DUTY_ROSTER },
+    dutyLogs: sanitizeDutyLogs(parsed.dutyLogs),
     polls: Array.isArray(parsed.polls)
       ? (parsed.polls as Poll[])
       : buildInitialPolls(classInfo.teacherName),

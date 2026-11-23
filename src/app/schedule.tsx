@@ -1,12 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { PageHeader } from '@/components/page-header';
+import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Chip } from '@/components/ui/chip';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -18,19 +20,43 @@ import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { Radius, Spacing } from '@/constants/theme';
 import { SCHOOL_WEEKDAYS } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
-import { currentSchoolWeekday } from '@/lib/date';
+import {
+  currentSchoolWeekday,
+  formatDateLong,
+  formatDayMonth,
+  formatWeekdayShort,
+  parseIsoDate,
+  shiftIsoDate,
+  todayIso,
+} from '@/lib/date';
 import { useClassStore } from '@/store/class-store';
-import type { ScheduleSession, Weekday } from '@/types/models';
+import type { DutyCompletionStatus, ScheduleSession, Weekday } from '@/types/models';
+
+function weekdayOfIso(iso: string): Weekday {
+  const d = parseIsoDate(iso);
+  if (!d) return currentSchoolWeekday();
+  const jsDay = d.getDay();
+  if (jsDay === 0) return 2;
+  return (jsDay + 1) as Weekday;
+}
 
 export default function ScheduleScreen() {
   const {
     classInfo,
-    role,
+    isTeacher,
+    canManageDuty,
+    officerPositionLabel,
     schedule,
     dutyRoster,
+    classRosterPublic,
+    dutyTargetStudents,
+    dutyLogOfDate,
+    attendanceStatsOfStudent,
     addScheduleSlot,
     removeScheduleSlot,
     updateDutyRoster,
+    assignDutyForDate,
+    markDutyCompletion,
   } = useClassStore();
   const theme = useTheme();
   const gradient = useBrandGradient();
@@ -39,6 +65,11 @@ export default function ScheduleScreen() {
   const todayDay = currentSchoolWeekday();
   const [selectedDay, setSelectedDay] = useState<Weekday>(todayDay);
   const [addOpen, setAddOpen] = useState(false);
+
+  // Duty assignment & evaluation state (for Lớp phó lao động, Lớp trưởng, GVCN)
+  const [dutyDate, setDutyDate] = useState<string>(todayIso());
+  const [studentPickerOpen, setStudentPickerOpen] = useState(false);
+  const [savingDuty, setSavingDuty] = useState(false);
 
   // Add lesson form
   const [subject, setSubject] = useState('');
@@ -59,13 +90,119 @@ export default function ScheduleScreen() {
   const afternoon = daySlots.filter((s) => s.session === 'afternoon');
   const dutyGroup = dutyRoster[String(selectedDay) as `${Weekday}`] ?? 'Tổ 1';
 
+  const rosterList = useMemo(
+    () => (dutyTargetStudents.length > 0 ? dutyTargetStudents : classRosterPublic),
+    [dutyTargetStudents, classRosterPublic],
+  );
+  const rosterById = useMemo(() => new Map(rosterList.map((s) => [s.id, s])), [rosterList]);
+
+  const dutyDateStrip = useMemo(() => {
+    const base = todayIso();
+    return [-2, -1, 0, 1, 2, 3, 4].map((offset) => shiftIsoDate(base, offset));
+  }, []);
+
+  const dutyWeekday = weekdayOfIso(dutyDate);
+  const dutyDateGroup = dutyRoster[String(dutyWeekday) as `${Weekday}`] ?? 'Tổ 1';
+  const dutyLog = dutyLogOfDate(dutyDate);
+  const assignedIds = useMemo(() => dutyLog?.assignedStudentIds ?? [], [dutyLog]);
+
+  const dutyCounts = useMemo(() => {
+    let completed = 0;
+    let missed = 0;
+    let pending = 0;
+    for (const sid of assignedIds) {
+      const st = dutyLog?.records?.[sid]?.status ?? 'pending';
+      if (st === 'completed') completed += 1;
+      else if (st === 'missed') missed += 1;
+      else pending += 1;
+    }
+    return { total: assignedIds.length, completed, missed, pending };
+  }, [assignedIds, dutyLog]);
+
   const cycleDuty = (day: Weekday) => {
-    if (role !== 'teacher') return;
+    if (!canManageDuty) return;
     const current = dutyRoster[String(day) as `${Weekday}`] ?? GROUP_PRESETS[0];
     const idx = GROUP_PRESETS.indexOf(current);
     const next = GROUP_PRESETS[(idx + 1) % GROUP_PRESETS.length];
     updateDutyRoster(day, next);
     showToast(`Thứ ${day}: đổi trực nhật sang ${next}`, 'info');
+  };
+
+  const handleAssignByGroup = async () => {
+    if (!canManageDuty || savingDuty) return;
+    const groupMembers = rosterList.filter((s) => (s.group?.trim() ?? '') === dutyDateGroup);
+    if (groupMembers.length === 0) {
+      showToast(`Chưa có học sinh nào thuộc ${dutyDateGroup} — hãy chọn thủ công bên dưới`, 'warning');
+      setStudentPickerOpen(true);
+      return;
+    }
+    setSavingDuty(true);
+    try {
+      await assignDutyForDate({
+        date: dutyDate,
+        assignedGroup: dutyDateGroup,
+        assignedStudentIds: groupMembers.map((s) => s.id),
+      });
+      showToast(`Đã phân công ${groupMembers.length} bạn thuộc ${dutyDateGroup} trực nhật ngày ${formatDayMonth(dutyDate)}!`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể phân công trực nhật', 'danger');
+    } finally {
+      setSavingDuty(false);
+    }
+  };
+
+  const handleToggleAssignedStudent = async (studentId: string) => {
+    if (!canManageDuty || savingDuty) return;
+    const exists = assignedIds.includes(studentId);
+    const nextIds = exists
+      ? assignedIds.filter((id) => id !== studentId)
+      : [...assignedIds, studentId];
+    setSavingDuty(true);
+    try {
+      await assignDutyForDate({
+        date: dutyDate,
+        assignedGroup: dutyLog?.assignedGroup ?? dutyDateGroup,
+        assignedStudentIds: nextIds,
+      });
+      const stu = rosterById.get(studentId);
+      showToast(
+        exists
+          ? `Đã bỏ ${stu?.name ?? 'học sinh'} khỏi lịch trực ngày ${formatDayMonth(dutyDate)}`
+          : `Đã thêm ${stu?.name ?? 'học sinh'} vào lịch trực ngày ${formatDayMonth(dutyDate)}`,
+        'info',
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể cập nhật danh sách trực nhật', 'danger');
+    } finally {
+      setSavingDuty(false);
+    }
+  };
+
+  const handleGradeDuty = async (
+    studentId: string,
+    studentName: string,
+    status: DutyCompletionStatus,
+  ) => {
+    if (!canManageDuty || savingDuty) return;
+    setSavingDuty(true);
+    try {
+      await markDutyCompletion({
+        date: dutyDate,
+        studentId,
+        status,
+      });
+      if (status === 'completed') {
+        showToast(`${studentName}: Hoàn thành trực nhật (+5đ Chuyên cần)! ✅`);
+      } else if (status === 'missed') {
+        showToast(`${studentName}: Chưa hoàn thành trực nhật (-5đ Chuyên cần)`, 'warning');
+      } else {
+        showToast(`Đã đặt lại trạng thái Chờ chấm cho ${studentName}`, 'info');
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể chấm trực nhật', 'danger');
+    } finally {
+      setSavingDuty(false);
+    }
   };
 
   const handleAddLesson = () => {
@@ -113,13 +250,15 @@ export default function ScheduleScreen() {
                   {[slot.room, slot.teacher].filter(Boolean).join(' · ') || 'Phòng học lớp ' + classInfo.name}
                 </Text>
               </View>
-              {role === 'teacher' ? (
+              {isTeacher ? (
                 <Pressable
                   onPress={() => {
                     removeScheduleSlot(slot.id);
                     showToast('Đã xóa tiết học', 'warning');
                   }}
-                  hitSlop={8}>
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Xóa tiết học">
                   <Ionicons name="trash-outline" size={16} color={theme.textMuted} />
                 </Pressable>
               ) : null}
@@ -130,14 +269,16 @@ export default function ScheduleScreen() {
     );
   };
 
+  const isDutyToday = dutyDate === todayIso();
+
   return (
     <Screen withTabBar={false}>
       <PageHeader
-        title={'Thời khóa biểu'}
-        subtitle={'Lớp ' + classInfo.name + ' · Lịch học & Trực nhật tuần'}
-        rightIcon={role === 'teacher' ? (addOpen ? 'close' : 'add') : undefined}
-        rightLabel={role === 'teacher' ? (addOpen ? 'Đóng' : 'Thêm tiết') : undefined}
-        onRightPress={role === 'teacher' ? () => setAddOpen((v) => !v) : undefined}
+        title={'Thời khóa biểu & Trực nhật'}
+        subtitle={'Lớp ' + classInfo.name + ' · Lịch học, Phân công & Chấm trực nhật'}
+        rightIcon={isTeacher ? (addOpen ? 'close' : 'add') : undefined}
+        rightLabel={isTeacher ? (addOpen ? 'Đóng' : 'Thêm tiết') : undefined}
+        onRightPress={isTeacher ? () => setAddOpen((v) => !v) : undefined}
       />
 
       {/* Weekday Selector */}
@@ -199,17 +340,364 @@ export default function ScheduleScreen() {
                 dutyGroup}
             </Text>
             <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
-              {role === 'teacher'
-                ? 'Chạm vào thẻ này để xoay vòng phân công tổ trực nhật'
+              {canManageDuty
+                ? 'Chạm vào thẻ này để xoay vòng phân công tổ trực nhật (GVCN / Lớp trưởng / LP Lao động)'
                 : 'Giữ vệ sinh lớp học, lau bảng và sắp xếp bàn ghế gọn gàng'}
             </Text>
           </View>
-          {role === 'teacher' ? <Ionicons name="sync" size={18} color={theme.accent} /> : null}
+          {canManageDuty ? <Ionicons name="sync" size={18} color={theme.accent} /> : null}
         </Pressable>
       </FadeIn>
 
+      {/* Flagship Duty Assignment & Diligence Evaluation Panel */}
+      <FadeIn index={2}>
+        <Card
+          style={[
+            styles.dutyCard,
+            canManageDuty && { borderColor: theme.success, borderWidth: 1.3 },
+          ]}>
+          <View style={styles.dutyCardHead}>
+            <View style={[styles.dutyIcon, { backgroundColor: theme.successSoft }]}>
+              <Ionicons name="leaf" size={19} color={theme.success} />
+            </View>
+            <View style={styles.flex}>
+              <View style={styles.dutyTitleRow}>
+                <Text style={[styles.dutyCardTitle, { color: theme.text }]}>
+                  Phân công & Chấm Trực nhật
+                </Text>
+                {canManageDuty ? (
+                  <Badge
+                    label={isTeacher ? 'GVCN' : officerPositionLabel || 'Ban cán sự'}
+                    color={'success'}
+                    soft={'successSoft'}
+                    icon={'shield-checkmark'}
+                  />
+                ) : null}
+              </View>
+              <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
+                Kết quả Hoàn thành / Chưa hoàn thành sẽ ghi trực tiếp vào Điểm chuyên cần từng học sinh.
+              </Text>
+            </View>
+          </View>
+
+          {/* Date Switcher */}
+          <View style={[styles.dateStepper, { backgroundColor: theme.backgroundElement }]}>
+            <Pressable
+              onPress={() => setDutyDate((d) => shiftIsoDate(d, -1))}
+              style={[styles.stepMiniBtn, { backgroundColor: theme.card }]}
+              accessibilityRole="button"
+              accessibilityLabel="Ngày trước">
+              <Ionicons name="chevron-back" size={16} color={theme.text} />
+            </Pressable>
+            <Pressable onPress={() => setDutyDate(todayIso())} style={styles.dateStepperMid}>
+              <Text style={[styles.dateStepperText, { color: theme.text }]}>
+                {formatDateLong(dutyDate)}
+              </Text>
+              <Text
+                style={{
+                  color: isDutyToday ? theme.accentText : theme.textMuted,
+                  fontSize: 11,
+                  fontWeight: '700',
+                }}>
+                {isDutyToday
+                  ? `Hôm nay · Lịch tổ: ${dutyDateGroup}`
+                  : `Lịch tổ: ${dutyDateGroup} · Chạm để về hôm nay`}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setDutyDate((d) => shiftIsoDate(d, 1))}
+              style={[styles.stepMiniBtn, { backgroundColor: theme.card }]}
+              accessibilityRole="button"
+              accessibilityLabel="Ngày sau">
+              <Ionicons name="chevron-forward" size={16} color={theme.text} />
+            </Pressable>
+          </View>
+
+          {/* 7-Day Quick Date Chips */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.chips}>
+            {dutyDateStrip.map((iso) => {
+              const isTodayChip = iso === todayIso();
+              return (
+                <Chip
+                  key={iso}
+                  label={`${isTodayChip ? 'Nay' : formatWeekdayShort(iso)} · ${formatDayMonth(iso)}`}
+                  selected={dutyDate === iso}
+                  onPress={() => setDutyDate(iso)}
+                />
+              );
+            })}
+          </ScrollView>
+
+          {/* Summary Badges */}
+          <View style={styles.dutySummaryRow}>
+            <Badge
+              label={`Phân công: ${dutyCounts.total}`}
+              color={'accentText'}
+              soft={'accentSoft'}
+              icon={'people-outline'}
+            />
+            <Badge
+              label={`Hoàn thành: ${dutyCounts.completed}`}
+              color={'success'}
+              soft={'successSoft'}
+              icon={'checkmark-circle-outline'}
+            />
+            <Badge
+              label={`Chưa HT: ${dutyCounts.missed}`}
+              color={'danger'}
+              soft={'dangerSoft'}
+              icon={'close-circle-outline'}
+            />
+            {dutyCounts.pending > 0 ? (
+              <Badge
+                label={`Chờ chấm: ${dutyCounts.pending}`}
+                color={'warning'}
+                soft={'warningSoft'}
+                icon={'time-outline'}
+              />
+            ) : null}
+          </View>
+
+          {/* Manager Actions: Auto-assign by Group + Toggle Individual Students */}
+          {canManageDuty ? (
+            <View style={styles.dutyManagerBar}>
+              <View style={styles.twoCol}>
+                <Button
+                  label={`Phân công ${dutyDateGroup}`}
+                  icon={'flash'}
+                  size={'sm'}
+                  style={styles.flex}
+                  disabled={savingDuty}
+                  onPress={() => void handleAssignByGroup()}
+                />
+                <Button
+                  label={
+                    studentPickerOpen
+                      ? 'Đóng chọn HS'
+                      : `Chọn HS (${assignedIds.length})`
+                  }
+                  variant={'soft'}
+                  icon={studentPickerOpen ? 'chevron-up' : 'person-add-outline'}
+                  size={'sm'}
+                  onPress={() => setStudentPickerOpen((v) => !v)}
+                />
+              </View>
+
+              {studentPickerOpen ? (
+                <View style={[styles.pickerBox, { borderColor: theme.border }]}>
+                  <Text style={[styles.pickerHint, { color: theme.textSecondary }]}>
+                    Chạm tên học sinh để thêm hoặc gỡ khỏi lịch trực nhật ngày {formatDayMonth(dutyDate)}:
+                  </Text>
+                  {rosterList.length === 0 ? (
+                    <Text style={{ color: theme.textMuted, fontSize: 12 }}>
+                      Chưa có danh sách học sinh trong lớp.
+                    </Text>
+                  ) : (
+                    <View style={styles.wrapChips}>
+                      {rosterList.map((stu) => {
+                        const selected = assignedIds.includes(stu.id);
+                        return (
+                          <Chip
+                            key={stu.id}
+                            label={stu.group ? `${stu.name} (${stu.group})` : stu.name}
+                            icon={selected ? 'checkmark-circle' : 'add-circle-outline'}
+                            selected={selected}
+                            onPress={() => void handleToggleAssignedStudent(stu.id)}
+                          />
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* Assigned Students & Evaluation Controls */}
+          {assignedIds.length === 0 ? (
+            <View
+              style={[
+                styles.emptyDutyBox,
+                { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+              ]}>
+              <Ionicons name="clipboard-outline" size={20} color={theme.textMuted} />
+              <Text style={{ color: theme.textSecondary, fontSize: 12.5, flex: 1, lineHeight: 18 }}>
+                {canManageDuty
+                  ? `Chưa phân công học sinh trực nhật ngày ${formatDayMonth(dutyDate)}. Bấm “Phân công ${dutyDateGroup}” hoặc “Chọn HS” ở trên để bắt đầu.`
+                  : `Chưa có danh sách trực nhật chi tiết cho ngày ${formatDayMonth(dutyDate)}.`}
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.assignedList}>
+              {assignedIds.map((sid) => {
+                const stu = rosterById.get(sid);
+                const stuName = stu?.name ?? 'Học sinh lớp ' + classInfo.name;
+                const rec = dutyLog?.records?.[sid];
+                const status: DutyCompletionStatus = rec?.status ?? 'pending';
+                const att = attendanceStatsOfStudent(sid);
+                const diligence = att.diligenceScore ?? att.rate;
+
+                return (
+                  <View
+                    key={sid}
+                    style={[
+                      styles.dutyStuRow,
+                      {
+                        backgroundColor: theme.backgroundElement,
+                        borderColor:
+                          status === 'completed'
+                            ? theme.success
+                            : status === 'missed'
+                              ? theme.danger
+                              : theme.border,
+                      },
+                    ]}>
+                    <View style={styles.dutyStuTop}>
+                      <Avatar name={stuName} size={36} />
+                      <View style={styles.flex}>
+                        <Text style={[styles.dutyStuName, { color: theme.text }]} numberOfLines={1}>
+                          {stuName}
+                        </Text>
+                        <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
+                          {[
+                            stu?.group || null,
+                            `Chuyên cần: ${diligence !== null ? `${diligence}%` : '--'}`,
+                            att.dutyTotal > 0 ? `Trực: ${att.dutyCompleted} HT · ${att.dutyMissed} chưa HT` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </Text>
+                      </View>
+                      <Badge
+                        label={
+                          status === 'completed'
+                            ? 'Hoàn thành (+5đ)'
+                            : status === 'missed'
+                              ? 'Chưa HT (-5đ)'
+                              : 'Chờ chấm'
+                        }
+                        color={
+                          status === 'completed'
+                            ? 'success'
+                            : status === 'missed'
+                              ? 'danger'
+                              : 'warning'
+                        }
+                        soft={
+                          status === 'completed'
+                            ? 'successSoft'
+                            : status === 'missed'
+                              ? 'dangerSoft'
+                              : 'warningSoft'
+                        }
+                        icon={
+                          status === 'completed'
+                            ? 'checkmark-circle'
+                            : status === 'missed'
+                              ? 'close-circle'
+                              : 'time-outline'
+                        }
+                      />
+                    </View>
+
+                    {canManageDuty ? (
+                      <View style={styles.gradeRow}>
+                        <Pressable
+                          disabled={savingDuty}
+                          onPress={() => void handleGradeDuty(sid, stuName, 'completed')}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Đánh dấu ${stuName} hoàn thành trực nhật`}
+                          style={({ pressed }) => [
+                            styles.gradeBtn,
+                            {
+                              backgroundColor:
+                                status === 'completed' ? theme.success : theme.card,
+                              borderColor: theme.success,
+                            },
+                            pressed && styles.pressed,
+                          ]}>
+                          <Ionicons
+                            name="checkmark-circle"
+                            size={14}
+                            color={status === 'completed' ? '#FFFFFF' : theme.success}
+                          />
+                          <Text
+                            style={[
+                              styles.gradeBtnText,
+                              { color: status === 'completed' ? '#FFFFFF' : theme.success },
+                            ]}>
+                            Hoàn thành (+5đ)
+                          </Text>
+                        </Pressable>
+
+                        <Pressable
+                          disabled={savingDuty}
+                          onPress={() => void handleGradeDuty(sid, stuName, 'missed')}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Đánh dấu ${stuName} chưa hoàn thành trực nhật`}
+                          style={({ pressed }) => [
+                            styles.gradeBtn,
+                            {
+                              backgroundColor:
+                                status === 'missed' ? theme.danger : theme.card,
+                              borderColor: theme.danger,
+                            },
+                            pressed && styles.pressed,
+                          ]}>
+                          <Ionicons
+                            name="close-circle"
+                            size={14}
+                            color={status === 'missed' ? '#FFFFFF' : theme.danger}
+                          />
+                          <Text
+                            style={[
+                              styles.gradeBtnText,
+                              { color: status === 'missed' ? '#FFFFFF' : theme.danger },
+                            ]}>
+                            Chưa HT (-5đ)
+                          </Text>
+                        </Pressable>
+
+                        <Pressable
+                          disabled={savingDuty}
+                          onPress={() => void handleGradeDuty(sid, stuName, 'pending')}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Đặt lại ${stuName} về chờ chấm`}
+                          style={({ pressed }) => [
+                            styles.gradeResetBtn,
+                            {
+                              backgroundColor:
+                                status === 'pending' ? theme.warningSoft : theme.card,
+                              borderColor: theme.border,
+                            },
+                            pressed && styles.pressed,
+                          ]}>
+                          <Text
+                            style={[
+                              styles.gradeBtnText,
+                              {
+                                color:
+                                  status === 'pending' ? theme.warning : theme.textSecondary,
+                              },
+                            ]}>
+                            Chờ
+                          </Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </Card>
+      </FadeIn>
+
       {/* Add Lesson Composer */}
-      {addOpen && role === 'teacher' ? (
+      {addOpen && isTeacher ? (
         <Card style={styles.form}>
           <Text style={[styles.sessionTitle, { color: theme.text }]}>
             {'Thêm tiết học cho ' + (SCHOOL_WEEKDAYS.find((w) => w.day === selectedDay)?.label ?? '')}
@@ -269,7 +757,7 @@ export default function ScheduleScreen() {
       {/* Full Week Duty Roster */}
       <SectionHeader
         title={'Lịch trực nhật cả tuần'}
-        subtitle={role === 'teacher' ? 'Chạm vào từng thứ để đổi tổ nhanh' : 'Phân công theo tổ'}
+        subtitle={canManageDuty ? 'Chạm vào từng thứ để đổi tổ nhanh' : 'Phân công theo tổ'}
       />
       <Card style={styles.rosterGrid}>
         {SCHOOL_WEEKDAYS.map((w) => {
@@ -323,6 +811,75 @@ const styles = StyleSheet.create({
   },
   dutyIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
   dutyTitle: { fontSize: 14, fontWeight: '800' },
+  dutyCard: { gap: Spacing.three },
+  dutyCardHead: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.two + 2 },
+  dutyTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 2 },
+  dutyCardTitle: { fontSize: 15.5, fontWeight: '900' },
+  dateStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    padding: 6,
+    borderRadius: Radius.md,
+  },
+  stepMiniBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dateStepperMid: { flex: 1, alignItems: 'center' },
+  dateStepperText: { fontSize: 13.5, fontWeight: '800' },
+  chips: { gap: Spacing.two, paddingRight: Spacing.two },
+  dutySummaryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  dutyManagerBar: { gap: Spacing.two + 2 },
+  pickerBox: {
+    gap: Spacing.two,
+    paddingTop: Spacing.two + 2,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  pickerHint: { fontSize: 12, fontWeight: '700' },
+  wrapChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  emptyDutyBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two + 2,
+    padding: Spacing.three,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  assignedList: { gap: Spacing.two },
+  dutyStuRow: {
+    gap: Spacing.two,
+    padding: Spacing.two + 4,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  dutyStuTop: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  dutyStuName: { fontSize: 14, fontWeight: '800' },
+  gradeRow: { flexDirection: 'row', gap: 6 },
+  gradeBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+  },
+  gradeResetBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+  },
+  gradeBtnText: { fontSize: 11.5, fontWeight: '800' },
+  pressed: { opacity: 0.78, transform: [{ scale: 0.97 }] },
   form: { gap: Spacing.three },
   twoCol: { flexDirection: 'row', gap: Spacing.two },
   sessionCard: { gap: Spacing.three },

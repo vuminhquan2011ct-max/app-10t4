@@ -10,8 +10,10 @@ import type {
   ClassResource,
   ClassTask,
   DriveAttachment,
+  DutyDayLog,
   DutyRoster,
   Entry,
+  EntryStatus,
   FeedbackCategory,
   FeedbackItem,
   FundCategory,
@@ -19,6 +21,7 @@ import type {
   FundTransaction,
   KudosItem,
   KudosSticker,
+  OfficerDepartmentKey,
   Poll,
   RegisteredTeacherPublic,
   ResourceType,
@@ -53,6 +56,8 @@ export type PersistedState = {
   schedule: ScheduleSlot[];
   /** Lịch trực nhật theo thứ (`2`..`7` -> tên tổ). */
   dutyRoster: DutyRoster;
+  /** Nhật ký phân công & chấm hoàn thành trực nhật theo ngày (`YYYY-MM-DD`). */
+  dutyLogs: Record<string, DutyDayLog>;
   /** Bình chọn & khảo sát trong lớp. */
   polls: Poll[];
   /** Bảng nhiệm vụ & deadline học tập. */
@@ -105,8 +110,13 @@ export type EntryInput = {
   description?: string | null;
   proofUrl?: string | null;
   points: number;
+  status?: EntryStatus;
   submittedBy?: Role;
   reviewNote?: string | null;
+  recordedByName?: string | null;
+  recordedByPosition?: string | null;
+  recordedByStudentId?: string | null;
+  source?: Entry['source'];
 };
 
 export type AnnouncementInput = {
@@ -118,6 +128,9 @@ export type AnnouncementInput = {
   author?: string;
   subject?: string | null;
   authorRole?: AnnouncementAuthorRole;
+  department?: OfficerDepartmentKey | null;
+  authorPosition?: string | null;
+  eventId?: string | null;
   attachments?: DriveAttachment[];
 };
 
@@ -154,6 +167,13 @@ export type TaskInput = {
   priority: TaskPriority;
   note?: string | null;
   author?: string;
+  department?: OfficerDepartmentKey | null;
+  itemKind?: 'task' | 'event';
+  eventDate?: string | null;
+  location?: string | null;
+  assignedOfficerRole?: string | null;
+  authorName?: string | null;
+  authorPosition?: string | null;
   attachments?: DriveAttachment[];
 };
 

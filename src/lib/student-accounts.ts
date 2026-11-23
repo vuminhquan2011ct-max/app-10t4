@@ -16,6 +16,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
+import { canonicalizeOfficerPosition } from '@/lib/officer-roles';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
 import {
@@ -60,6 +61,8 @@ export type StudentAccountRecord = {
   authProviders?: AuthProviderKind[];
   /** Optional avatar URL (e.g. from Google or GitHub OAuth). */
   avatarUrl?: string | null;
+  /** Optional class officer position assigned exclusively by GVCN (`null` = regular member). */
+  position?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -71,6 +74,7 @@ export type StudentAccountChangeEvent =
       studentId: string;
       name?: string;
       loginId?: string;
+      position?: string | null;
       account?: StudentAccountRecord;
     }
   | { type: 'removed'; studentId: string }
@@ -421,6 +425,9 @@ function parseStudentRecord(item: unknown): StudentAccountRecord | null {
           : undefined;
   const avatarUrl =
     typeof r.avatarUrl === 'string' && r.avatarUrl.trim() ? r.avatarUrl.trim() : null;
+  const hasExplicitPosition = r.position !== undefined;
+  const parsedPosition =
+    typeof r.position === 'string' ? canonicalizeOfficerPosition(r.position) : null;
 
   return {
     studentId: r.studentId.trim(),
@@ -432,6 +439,7 @@ function parseStudentRecord(item: unknown): StudentAccountRecord | null {
     ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
     ...(authProviders && authProviders.length > 0 ? { authProviders } : {}),
     ...(avatarUrl ? { avatarUrl } : {}),
+    ...(hasExplicitPosition ? { position: parsedPosition } : {}),
     createdAt: typeof r.createdAt === 'string' && r.createdAt ? r.createdAt : now,
     updatedAt: typeof r.updatedAt === 'string' && r.updatedAt ? r.updatedAt : now,
   };
@@ -441,6 +449,7 @@ function mergeTwoStudentRecords(
   prev: StudentAccountRecord,
   next: StudentAccountRecord,
 ): StudentAccountRecord {
+  const isStrictlyDifferentTime = next.updatedAt !== prev.updatedAt;
   const remoteWins = next.updatedAt.localeCompare(prev.updatedAt) >= 0;
   const winner = remoteWins ? next : prev;
   const other = remoteWins ? prev : next;
@@ -455,6 +464,12 @@ function mergeTwoStudentRecords(
     : other.passwordHash.includes(':')
       ? other.passwordHash
       : '';
+  const resolvedPosition =
+    isStrictlyDifferentTime && winner.position !== undefined
+      ? winner.position
+      : winner.position !== undefined
+        ? winner.position
+        : other.position;
 
   return {
     ...winner,
@@ -463,6 +478,7 @@ function mergeTwoStudentRecords(
     ...(authUserId ? { authUserId } : {}),
     ...(mergedProviders.length > 0 ? { authProviders: mergedProviders } : {}),
     ...(avatarUrl ? { avatarUrl } : {}),
+    ...(resolvedPosition !== undefined ? { position: resolvedPosition } : {}),
   };
 }
 
@@ -1065,6 +1081,7 @@ export async function registerStudentAccount(
   const now = new Date().toISOString();
   const studentId = params.studentId?.trim() || createId('stu');
   // IMPORTANT: NEVER write email / authUserId / passwordHash into public `class_state` student object!
+  const cleanPosition = canonicalizeOfficerPosition(params.position);
   const student = buildStudent(roster, state?.classInfo.name ?? '10T4', {
     id: studentId,
     name: cleanName,
@@ -1072,7 +1089,7 @@ export async function registerStudentAccount(
     gender: params.gender ?? 'male',
     birthDate: params.birthDate ?? null,
     group: params.group ?? null,
-    position: params.position ?? null,
+    position: cleanPosition,
   });
 
   const providers = mergeAuthProviders(
@@ -1091,6 +1108,7 @@ export async function registerStudentAccount(
     ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
     ...(providers.length > 0 ? { authProviders: providers } : {}),
     ...(avatarUrl ? { avatarUrl } : {}),
+    ...(cleanPosition ? { position: cleanPosition } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -1414,6 +1432,83 @@ export async function updateStudentAccountName(
   }
 
   return { ok: true, account: updatedAccount, student: updatedStudent };
+}
+
+/**
+ * Updates a student's GVCN-assigned class officer position across `STUDENT_ACCOUNTS_KEY`,
+ * live in-process listeners, and Supabase auth registry (and optionally local `STORAGE_KEY`
+ * + `class_state` when `options?.writeToClassState !== false`).
+ */
+export async function updateStudentAccountPosition(
+  studentId: string,
+  position: string | null,
+  options?: { writeToClassState?: boolean },
+): Promise<void> {
+  const cleanPosition = canonicalizeOfficerPosition(position);
+  const now = new Date().toISOString();
+  const writeToClassState = options?.writeToClassState !== false;
+
+  const accounts = await loadStudentAccounts({ forceRemote: true });
+  const idx = accounts.findIndex((a) => a.studentId === studentId);
+  let updatedAccount: StudentAccountRecord | undefined;
+
+  if (idx >= 0) {
+    updatedAccount = {
+      ...accounts[idx],
+      position: cleanPosition,
+      updatedAt: now,
+    };
+    await saveStudentAccounts(accounts.map((a, i) => (i === idx ? updatedAccount! : a)));
+  }
+
+  let updatedStudent: Student | undefined;
+  if (writeToClassState) {
+    try {
+      const state = await readSafePersistedState();
+      const existingStu = state.students.find((s) => s.id === studentId);
+      if (existingStu) {
+        updatedStudent = { ...existingStu, position: cleanPosition, updatedAt: now };
+        const nextState: PersistedState = {
+          ...state,
+          students: state.students.map((s) => (s.id === studentId ? updatedStudent! : s)),
+        };
+        await Promise.all([
+          AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)),
+          AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+        ]);
+      }
+    } catch {
+      // Non-fatal: ClassStore holds live state and flushes cloud directly.
+    }
+  }
+
+  emitStudentAccountsChanged({
+    type: 'updated',
+    studentId,
+    position: cleanPosition,
+    account: updatedAccount,
+  });
+
+  if (isSupabaseConfigured) {
+    const tasks: Promise<unknown>[] = [];
+    if (updatedAccount) {
+      tasks.push(
+        upsertAuthRegistryRemote({
+          student: updatedAccount as unknown as Record<string, unknown>,
+        }).catch(() => false),
+      );
+    }
+    if (writeToClassState && updatedStudent) {
+      tasks.push(
+        upsertRegisteredMemberToCloud({ kind: 'student', student: updatedStudent }).catch(
+          () => null,
+        ),
+      );
+    }
+    if (tasks.length > 0) {
+      await awaitBriefly(Promise.all(tasks), 2_000);
+    }
+  }
 }
 
 export async function updateStudentAccountCredentials(params: {

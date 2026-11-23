@@ -6,6 +6,7 @@
 import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { formatDate, todayIso } from '@/lib/date';
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
+import { canonicalizeOfficerPosition } from '@/lib/officer-roles';
 import { createId, normalizeName } from '@/lib/utils';
 import type { StudentPrivateData } from '@/types/auth';
 import type {
@@ -16,6 +17,9 @@ import type {
   ClassResource,
   ClassTask,
   DriveAttachment,
+  DutyCompletionStatus,
+  DutyDayLog,
+  DutyStudentRecord,
   Entry,
   EntryCategory,
   EntryKind,
@@ -23,6 +27,7 @@ import type {
   FeedbackItem,
   FundTransaction,
   KudosItem,
+  OfficerDepartmentKey,
   Poll,
   Role,
   ScheduleSlot,
@@ -228,6 +233,26 @@ export function createActions(
         ),
       })),
 
+    /** Assigns or revokes (`null`) a student's class officer position (GVCN-only caller). */
+    assignStudentPositionLocal: (studentId: string, position: string | null) =>
+      mutate((prev) => {
+        const target = prev.students.find((s) => s.id === studentId);
+        if (!target) return prev;
+        const cleanPos = canonicalizeOfficerPosition(position);
+        const prevPos = target.position;
+        const now = new Date().toISOString();
+        const logText = cleanPos
+          ? `GVCN phân công chức vụ "${cleanPos}" cho ${target.name}`
+          : `GVCN đã hủy chức vụ${prevPos ? ` "${prevPos}"` : ''} của ${target.name}`;
+        return {
+          ...prev,
+          students: prev.students.map((s) =>
+            s.id === studentId ? { ...s, position: cleanPos, updatedAt: now } : s,
+          ),
+          activityLog: appendLog(prev, actorName(), logText),
+        };
+      }),
+
     removeStudent: (id: string) =>
       mutate((prev) => {
         const now = new Date().toISOString();
@@ -243,11 +268,31 @@ export function createActions(
         for (const [key, sid] of Object.entries(prev.seating.seats)) {
           if (sid !== id) nextSeats[key] = sid;
         }
+        let dutyLogsChanged = false;
+        const nextDutyLogs: Record<string, DutyDayLog> = {};
+        for (const [dateKey, day] of Object.entries(prev.dutyLogs ?? {})) {
+          const hadAssigned = day.assignedStudentIds.includes(id);
+          const hadRecord = Boolean(day.records?.[id]);
+          if (!hadAssigned && !hadRecord) {
+            nextDutyLogs[dateKey] = day;
+            continue;
+          }
+          dutyLogsChanged = true;
+          const nextRecords = { ...(day.records ?? {}) };
+          delete nextRecords[id];
+          nextDutyLogs[dateKey] = {
+            ...day,
+            assignedStudentIds: day.assignedStudentIds.filter((sid) => sid !== id),
+            records: nextRecords,
+            updatedAt: now,
+          };
+        }
         return {
           ...prev,
           students: prev.students.filter((s) => s.id !== id),
           entries: prev.entries.filter((e) => e.studentId !== id),
           kudos: prev.kudos.filter((k) => k.toStudentId !== id),
+          dutyLogs: dutyLogsChanged ? nextDutyLogs : prev.dutyLogs,
           deletedItemIds: stampDeletedItems(
             prev,
             [...removedEntries.map((e) => e.id), ...removedKudos.map((k) => k.id)],
@@ -266,13 +311,14 @@ export function createActions(
 
     addEntry: (input: EntryInput) => {
       const entry = buildEntry(input);
+      const signedPoints = `${entry.points > 0 ? '+' : ''}${entry.points}đ`;
       mutate((prev) => ({
         ...prev,
         entries: [entry, ...prev.entries],
         activityLog: appendLog(
           prev,
           actorName(),
-          `Ghi mục "${entry.title}" (+${entry.points}đ)`,
+          `Ghi mục "${entry.title}" (${signedPoints})`,
           actorStudentId(),
         ),
       }));
@@ -442,9 +488,19 @@ export function createActions(
 
     /* ---------- Announcements ---------- */
 
-    addAnnouncement: (input: AnnouncementInput) =>
+    addAnnouncement: (
+      input: AnnouncementInput & {
+        department?: OfficerDepartmentKey | null;
+        authorPosition?: string | null;
+        eventId?: string | null;
+      },
+    ) =>
       mutate((prev) => {
         const cleanSubject = input.subject?.trim() || null;
+        const cleanAuthorPos = input.authorPosition?.trim() || null;
+        const resolvedRole =
+          input.authorRole ??
+          (cleanSubject ? 'subject_teacher' : cleanAuthorPos ? 'officer' : 'teacher');
         const item: Announcement = {
           id: createId('ann'),
           title: input.title.trim(),
@@ -455,15 +511,27 @@ export function createActions(
           likes: 0,
           author: input.author?.trim() || actorName() || prev.classInfo.teacherName,
           subject: cleanSubject,
-          authorRole: input.authorRole ?? (cleanSubject ? 'subject_teacher' : 'teacher'),
+          authorRole: resolvedRole,
+          ...(input.department !== undefined ? { department: input.department } : {}),
+          ...(cleanAuthorPos ? { authorPosition: cleanAuthorPos } : {}),
+          ...(input.eventId?.trim() ? { eventId: input.eventId.trim() } : {}),
           attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
           createdAt: new Date().toISOString(),
         };
-        const logPrefix = cleanSubject ? `GV ${cleanSubject} đăng thông báo` : 'Đăng thông báo';
+        const logPrefix = cleanSubject
+          ? `GV ${cleanSubject} đăng thông báo`
+          : cleanAuthorPos
+            ? `${cleanAuthorPos} đăng thông báo`
+            : 'Đăng thông báo';
         return {
           ...prev,
           announcements: [item, ...prev.announcements],
-          activityLog: appendLog(prev, item.author, `${logPrefix} "${item.title}"`),
+          activityLog: appendLog(
+            prev,
+            item.author,
+            `${logPrefix} "${item.title}"`,
+            actorStudentId(),
+          ),
         };
       }),
 
@@ -631,7 +699,215 @@ export function createActions(
           ...prev.dutyRoster,
           [String(day) as `${Weekday}`]: group,
         },
+        activityLog: appendLog(
+          prev,
+          actorName(),
+          `Đổi lịch trực nhật Thứ ${day} sang ${group}`,
+          actorStudentId(),
+        ),
       })),
+
+    /** Assigns students & optional group for daily duty checkoff (`Lớp phó lao động` / `Lớp trưởng` / `GVCN`). */
+    assignDutyForDateLocal: (input: {
+      date: string;
+      assignedGroup?: string | null;
+      assignedStudentIds: string[];
+      note?: string | null;
+    }) =>
+      mutate((prev) => {
+        const cleanDate = input.date.trim();
+        if (!cleanDate) return prev;
+        const now = new Date().toISOString();
+        const uniqueIds = Array.from(
+          new Set(input.assignedStudentIds.map((sid) => sid.trim()).filter(Boolean)),
+        );
+        const assignedSet = new Set(uniqueIds);
+        const existingDay = prev.dutyLogs?.[cleanDate];
+        const prevRecords = existingDay?.records ?? {};
+
+        const nextRecords: Record<string, DutyStudentRecord> = {};
+        for (const sid of uniqueIds) {
+          nextRecords[sid] = prevRecords[sid] ?? {
+            studentId: sid,
+            status: 'pending',
+            note: null,
+            evaluatedBy: null,
+            evaluatedByPosition: null,
+            evaluatedAt: null,
+            entryId: null,
+          };
+        }
+
+        const removedEntryIds: string[] = [];
+        for (const [sid, rec] of Object.entries(prevRecords)) {
+          if (!assignedSet.has(sid) && rec?.entryId) {
+            removedEntryIds.push(rec.entryId);
+          }
+        }
+        const removedSet = new Set(removedEntryIds);
+
+        const nextDay: DutyDayLog = {
+          date: cleanDate,
+          assignedGroup:
+            input.assignedGroup !== undefined
+              ? input.assignedGroup?.trim() || null
+              : (existingDay?.assignedGroup ?? null),
+          assignedStudentIds: uniqueIds,
+          records: nextRecords,
+          note:
+            input.note !== undefined ? input.note?.trim() || null : (existingDay?.note ?? null),
+          assignedBy: actorName(),
+          updatedAt: now,
+        };
+
+        return {
+          ...prev,
+          dutyLogs: {
+            ...(prev.dutyLogs ?? {}),
+            [cleanDate]: nextDay,
+          },
+          entries:
+            removedEntryIds.length > 0
+              ? prev.entries.filter((e) => !removedSet.has(e.id))
+              : prev.entries,
+          deletedItemIds:
+            removedEntryIds.length > 0
+              ? stampDeletedItems(prev, removedEntryIds, now)
+              : prev.deletedItemIds,
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Phân công trực nhật ngày ${formatDate(cleanDate)} (${uniqueIds.length} HS)`,
+            actorStudentId(),
+          ),
+        };
+      }),
+
+    /**
+     * Marks a student's duty completion (`completed` | `missed` | `pending`) and directly
+     * syncs their Điểm chuyên cần evaluation entry without tombstone collisions.
+     */
+    markDutyCompletionLocal: (input: {
+      date: string;
+      studentId: string;
+      status: DutyCompletionStatus;
+      note?: string | null;
+      evaluatorPosition?: string | null;
+    }) =>
+      mutate((prev) => {
+        const cleanDate = input.date.trim();
+        const sid = input.studentId.trim();
+        if (!cleanDate || !sid) return prev;
+        const now = new Date().toISOString();
+        const existingDay = prev.dutyLogs?.[cleanDate];
+        const existingRecord = existingDay?.records?.[sid];
+        const assignedIds = existingDay?.assignedStudentIds.includes(sid)
+          ? existingDay.assignedStudentIds
+          : [...(existingDay?.assignedStudentIds ?? []), sid];
+        const studentName = prev.students.find((s) => s.id === sid)?.name ?? 'học sinh';
+        const evaluatorPos = input.evaluatorPosition?.trim() || 'Ban cán sự';
+        const cleanNote = input.note?.trim() || null;
+
+        let nextEntries = prev.entries;
+        let nextDeletedItemIds = prev.deletedItemIds;
+        let nextEntryId: string | null = null;
+
+        if (input.status === 'pending') {
+          if (existingRecord?.entryId) {
+            const oldId = existingRecord.entryId;
+            nextEntries = prev.entries.filter((e) => e.id !== oldId);
+            nextDeletedItemIds = stampDeletedItems(prev, [oldId], now);
+          }
+          nextEntryId = null;
+        } else {
+          // Reuse existing live entry ID when toggling completed <-> missed; otherwise mint a fresh ID
+          // so presence-only `deletedItemIds` tombstones on remote devices never kill re-marked entries.
+          const candidateId = existingRecord?.entryId?.trim() || '';
+          const canReuse = Boolean(candidateId && !prev.deletedItemIds?.[candidateId]);
+          const entryId = canReuse ? candidateId : createId('duty');
+          nextEntryId = entryId;
+
+          const existingEntry = prev.entries.find((e) => e.id === entryId);
+          const isCompleted = input.status === 'completed';
+          const dutyEntry: Entry = {
+            id: entryId,
+            studentId: sid,
+            title: isCompleted
+              ? `Hoàn thành trực nhật lớp (${formatDate(cleanDate)})`
+              : `Chưa hoàn thành trực nhật lớp (${formatDate(cleanDate)})`,
+            kind: isCompleted ? 'activity' : 'violation',
+            category: 'volunteer',
+            level: 'class',
+            date: cleanDate,
+            description:
+              cleanNote ||
+              (isCompleted
+                ? 'Lớp phó lao động / Ban cán sự ghi nhận hoàn thành trực nhật (Điểm chuyên cần)'
+                : 'Chưa hoàn thành nhiệm vụ trực nhật lớp (Điểm chuyên cần)'),
+            proofUrl: null,
+            points: isCompleted ? 5 : -5,
+            status: 'approved',
+            submittedBy: 'teacher',
+            reviewNote: null,
+            recordedByName: actorName(),
+            recordedByPosition: evaluatorPos,
+            recordedByStudentId: actorStudentId(),
+            source: 'duty_diligence',
+            createdAt: existingEntry?.createdAt ?? now,
+            updatedAt: now,
+          };
+
+          nextEntries = existingEntry
+            ? prev.entries.map((e) => (e.id === entryId ? dutyEntry : e))
+            : [dutyEntry, ...prev.entries];
+        }
+
+        const nextRecord: DutyStudentRecord = {
+          studentId: sid,
+          status: input.status,
+          note: cleanNote,
+          evaluatedBy: actorName(),
+          evaluatedByPosition: evaluatorPos,
+          evaluatedAt: now,
+          entryId: nextEntryId,
+        };
+
+        const nextDay: DutyDayLog = {
+          date: cleanDate,
+          assignedGroup: existingDay?.assignedGroup ?? null,
+          assignedStudentIds: assignedIds,
+          records: {
+            ...(existingDay?.records ?? {}),
+            [sid]: nextRecord,
+          },
+          note: existingDay?.note ?? null,
+          assignedBy: existingDay?.assignedBy ?? actorName(),
+          updatedAt: now,
+        };
+
+        const statusText =
+          input.status === 'completed'
+            ? 'Hoàn thành (+5đ chuyên cần)'
+            : input.status === 'missed'
+              ? 'Chưa hoàn thành (-5đ chuyên cần)'
+              : 'Đặt lại chờ chấm';
+
+        return {
+          ...prev,
+          dutyLogs: {
+            ...(prev.dutyLogs ?? {}),
+            [cleanDate]: nextDay,
+          },
+          entries: nextEntries,
+          deletedItemIds: nextDeletedItemIds,
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Trực nhật ${studentName} (${formatDate(cleanDate)}): ${statusText}`,
+            actorStudentId(),
+          ),
+        };
+      }),
 
     /* ---------- Polls ---------- */
 
@@ -682,8 +958,25 @@ export function createActions(
 
     /* ---------- Class Tasks & Deadlines ---------- */
 
-    addTask: (input: TaskInput) =>
+    addTask: (
+      input: TaskInput & {
+        department?: OfficerDepartmentKey | null;
+        itemKind?: 'task' | 'event';
+        eventDate?: string | null;
+        location?: string | null;
+        assignedOfficerRole?: string | null;
+        authorName?: string | null;
+        authorPosition?: string | null;
+      },
+    ) =>
       mutate((prev) => {
+        const cleanAuthor =
+          input.author?.trim() ||
+          input.authorName?.trim() ||
+          actorName() ||
+          prev.classInfo.teacherName;
+        const cleanAuthorPos = input.authorPosition?.trim() || null;
+        const resolvedKind = input.itemKind ?? 'task';
         const task: ClassTask = {
           id: createId('tsk'),
           title: input.title.trim(),
@@ -691,14 +984,29 @@ export function createActions(
           dueDate: input.dueDate,
           priority: input.priority,
           note: input.note?.trim() || null,
-          author: input.author?.trim() || actorName() || prev.classInfo.teacherName,
+          author: cleanAuthor,
+          ...(input.department !== undefined ? { department: input.department } : {}),
+          ...(input.itemKind !== undefined ? { itemKind: resolvedKind } : {}),
+          ...(input.eventDate?.trim() ? { eventDate: input.eventDate.trim() } : {}),
+          ...(input.location?.trim() ? { location: input.location.trim() } : {}),
+          ...(input.assignedOfficerRole?.trim()
+            ? { assignedOfficerRole: input.assignedOfficerRole.trim() }
+            : {}),
+          ...(input.authorName?.trim() ? { authorName: input.authorName.trim() } : {}),
+          ...(cleanAuthorPos ? { authorPosition: cleanAuthorPos } : {}),
           attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
           createdAt: new Date().toISOString(),
         };
+        const logPrefix = resolvedKind === 'event' ? 'Tạo sự kiện' : 'Giao nhiệm vụ';
         return {
           ...prev,
           tasks: [task, ...prev.tasks],
-          activityLog: appendLog(prev, actorName(), `Giao nhiệm vụ "${task.title}"`),
+          activityLog: appendLog(
+            prev,
+            cleanAuthor,
+            `${logPrefix} "${task.title}"`,
+            actorStudentId(),
+          ),
         };
       }),
 

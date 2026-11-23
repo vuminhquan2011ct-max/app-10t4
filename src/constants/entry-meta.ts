@@ -9,19 +9,23 @@ import type { Ionicons } from '@expo/vector-icons';
 
 import type { EntryCategory, EntryKind, EntryLevel, EntryStatus, Gender } from '@/types/models';
 
+export type CategoryKey = EntryCategory;
+
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
 export type EntryKindMeta = {
+  key: EntryKind;
   label: string;
   shortLabel: string;
   icon: IoniconName;
   /** Theme color key used as the accent of this kind. */
-  color: 'accent' | 'purple';
-  soft: 'accentSoft' | 'purpleSoft';
+  color: 'accent' | 'purple' | 'danger';
+  soft: 'accentSoft' | 'purpleSoft' | 'dangerSoft';
 };
 
 export const ENTRY_KINDS: Record<EntryKind, EntryKindMeta> = {
   achievement: {
+    key: 'achievement',
     label: 'Thành tích',
     shortLabel: 'Thành tích',
     icon: 'trophy',
@@ -29,15 +33,24 @@ export const ENTRY_KINDS: Record<EntryKind, EntryKindMeta> = {
     soft: 'accentSoft',
   },
   activity: {
+    key: 'activity',
     label: 'Hoạt động tham gia',
     shortLabel: 'Hoạt động',
     icon: 'sparkles',
     color: 'purple',
     soft: 'purpleSoft',
   },
+  violation: {
+    key: 'violation',
+    label: 'Vi phạm / Nhắc nhở',
+    shortLabel: 'Vi phạm',
+    icon: 'alert-circle',
+    color: 'danger',
+    soft: 'dangerSoft',
+  },
 };
 
-export const ENTRY_KIND_LIST: EntryKind[] = ['achievement', 'activity'];
+export const ENTRY_KIND_LIST: EntryKind[] = ['achievement', 'activity', 'violation'];
 
 export type EntryCategoryMeta = {
   label: string;
@@ -124,15 +137,46 @@ export const GENDERS: Record<Gender, { label: string; icon: IoniconName }> = {
 
 export const GENDER_LIST: Gender[] = ['male', 'female', 'other'];
 
-/** Chức vụ thường gặp, dùng làm gợi ý nhanh trong form. */
+/** Chức vụ Ban cán sự chuẩn trong lớp (chỉ GVCN được phân công / hủy). */
 export const POSITION_PRESETS = [
   'Lớp trưởng',
-  'Lớp phó học tập',
-  'Lớp phó văn thể',
-  'Lớp phó lao động',
   'Bí thư',
+  'Lớp phó học tập',
+  'Lớp phó lao động',
+  'Lớp phó kỷ luật',
+  'Lớp phó văn thể mỹ',
+  'Lớp phó thể thao',
   'Tổ trưởng',
-  'Cán sự môn',
-];
+] as const;
 
 export const GROUP_PRESETS = ['Tổ 1', 'Tổ 2', 'Tổ 3', 'Tổ 4'];
+
+/** Mẫu ghi nhận vi phạm / nhắc nhở nhanh cho Lớp phó kỷ luật, Lớp trưởng & GVCN. */
+export const VIOLATION_PRESETS: readonly {
+  title: string;
+  category: CategoryKey;
+  points: number;
+}[] = [
+  { title: 'Đi học muộn không lý do', category: 'other', points: -5 },
+  { title: 'Không mặc đúng đồng phục / quên thẻ học sinh', category: 'other', points: -3 },
+  { title: 'Mất trật tự, nói chuyện riêng trong giờ học', category: 'study', points: -5 },
+  { title: 'Chưa hoàn thành bài tập về nhà / thiếu dụng cụ học tập', category: 'study', points: -5 },
+  { title: 'Sử dụng điện thoại trái quy định trong giờ học', category: 'other', points: -10 },
+  { title: 'Chưa hoàn thành trực nhật / xả rác trong lớp', category: 'volunteer', points: -5 },
+  { title: 'Vi phạm nội quy trường / tác phong chưa nghiêm túc', category: 'other', points: -10 },
+] as const;
+
+/** Mẫu ghi nhận điểm cộng nhanh cho Tổ trưởng, Lớp trưởng & GVCN. */
+export const GROUP_BONUS_PRESETS: readonly {
+  title: string;
+  category: CategoryKey;
+  points: number;
+  kind: EntryKind;
+}[] = [
+  { title: 'Phát biểu xây dựng bài tích cực trong giờ', category: 'study', points: 5, kind: 'activity' },
+  { title: 'Đạt điểm 9–10 kiểm tra miệng / 15 phút', category: 'study', points: 10, kind: 'achievement' },
+  { title: 'Hỗ trợ bạn cùng tổ học tập tiến bộ', category: 'volunteer', points: 5, kind: 'activity' },
+  { title: 'Hoàn thành xuất sắc nhiệm vụ nhóm / thuyết trình', category: 'skill', points: 8, kind: 'achievement' },
+  { title: 'Tích cực tham gia phong trào văn nghệ / thể thao', category: 'art', points: 8, kind: 'activity' },
+  { title: 'Giữ gìn vệ sinh, nề nếp tổ gương mẫu cả tuần', category: 'volunteer', points: 10, kind: 'achievement' },
+] as const;

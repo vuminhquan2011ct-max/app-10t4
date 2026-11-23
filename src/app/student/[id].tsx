@@ -25,6 +25,7 @@ import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { badgesForStudent } from '@/lib/badges';
 import { ageOf, formatDate } from '@/lib/date';
 import { buildStudentReportCard, shareOrCopyText } from '@/lib/export';
+import { OFFICER_POSITIONS, getOfficerPositionMeta } from '@/lib/officer-roles';
 import { buildCategoryStats } from '@/lib/stats';
 import { useClassStore } from '@/store/class-store';
 
@@ -40,7 +41,9 @@ export default function StudentDetailScreen() {
     kudosOfStudent,
     seatOfStudent,
     quickReward,
+    assignStudentPosition,
     saveStudentPrivate,
+    canAssignPositions,
     canEditClass,
     canViewAll,
     canViewNotes,
@@ -57,6 +60,7 @@ export default function StudentDetailScreen() {
   const [phoneDraft, setPhoneDraft] = useState('');
   const [emailDraft, setEmailDraft] = useState('');
   const [addressDraft, setAddressDraft] = useState('');
+  const [updatingPosition, setUpdatingPosition] = useState(false);
 
   if (!student) {
     return (
@@ -116,6 +120,26 @@ export default function StudentDetailScreen() {
       showToast('Đã cập nhật thông tin liên hệ bảo mật!');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Không thể lưu liên hệ', 'danger');
+    }
+  };
+
+  const activePositionMeta = getOfficerPositionMeta(student.position);
+
+  const handleAssignPosition = async (nextPos: string | null) => {
+    if (!canAssignPositions || updatingPosition) return;
+    setUpdatingPosition(true);
+    try {
+      await assignStudentPosition(student.id, nextPos);
+      showToast(
+        nextPos
+          ? `Đã phân công ${student.name} làm ${nextPos}! ⭐`
+          : `Đã hủy chức vụ của ${student.name} (về thành viên thường)`,
+        nextPos ? 'success' : 'info',
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể cập nhật chức vụ', 'danger');
+    } finally {
+      setUpdatingPosition(false);
     }
   };
 
@@ -302,17 +326,117 @@ export default function StudentDetailScreen() {
       <FadeIn index={4} style={styles.grid}>
         <StatCard label={'Hoạt động'} value={stats.activities} icon={'sparkles'} tone={'purple'} />
         <StatCard
-          label={'Chuyên cần'}
-          value={att.rate !== null ? `${att.rate}%` : '--'}
+          label={'Điểm chuyên cần'}
+          value={
+            (att.diligenceScore ?? att.rate) !== null
+              ? `${att.diligenceScore ?? att.rate}%`
+              : '--'
+          }
           icon={'checkbox'}
-          tone={'warning'}
+          tone={(att.diligenceScore ?? att.rate ?? 100) >= 85 ? 'success' : 'warning'}
           hint={
-            att.total > 0
-              ? `${att.present} có · ${att.late} muộn · ${att.excused + att.absent} vắng`
-              : 'Chưa điểm danh'
+            [
+              att.total > 0
+                ? `${att.present} có · ${att.late} muộn · ${att.excused + att.absent} vắng`
+                : null,
+              att.dutyTotal > 0
+                ? `Trực nhật: ${att.dutyCompleted} HT · ${att.dutyMissed} chưa HT`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' | ') || 'Chưa điểm danh / trực nhật'
           }
         />
       </FadeIn>
+
+      {/* GVCN-Only Class Officer Position Assignment & Revocation Card */}
+      {canAssignPositions ? (
+        <FadeIn index={5}>
+          <Card style={[styles.honourCard, { borderColor: `${theme.accent}44`, borderWidth: 1.2 }]}>
+            <View style={styles.privHead}>
+              <View style={[styles.privIcon, { backgroundColor: theme.accentSoft }]}>
+                <Ionicons name="shield-checkmark" size={16} color={theme.accent} />
+              </View>
+              <View style={styles.flex}>
+                <Text style={[styles.cardLabel, { color: theme.text }]}>
+                  Phân công & Hủy Chức vụ Ban cán sự (Quyền GVCN)
+                </Text>
+                <Text style={{ color: theme.textMuted, fontSize: 11.5 }}>
+                  {student.position?.trim()
+                    ? `Đang giữ chức vụ: ${student.position.trim()}`
+                    : 'Hiện là thành viên thường · Chọn chức vụ bên dưới để phân công'}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.honourList}>
+              {OFFICER_POSITIONS.map((opt) => {
+                const selected = activePositionMeta?.key === opt.key;
+                const softKey = `${opt.color}Soft` as
+                  | 'accentSoft'
+                  | 'successSoft'
+                  | 'warningSoft'
+                  | 'dangerSoft'
+                  | 'purpleSoft';
+                return (
+                  <Pressable
+                    key={opt.key}
+                    disabled={updatingPosition}
+                    onPress={() => void handleAssignPosition(selected ? null : opt.label)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Phân công chức vụ ${opt.label}`}
+                    style={({ pressed }) => [
+                      styles.positionChip,
+                      {
+                        backgroundColor: selected ? theme[opt.color] : theme[softKey],
+                        borderColor: theme[opt.color],
+                      },
+                      pressed && styles.pressed,
+                    ]}>
+                    <Ionicons
+                      name={opt.icon as keyof typeof Ionicons.glyphMap}
+                      size={13}
+                      color={selected ? '#FFFFFF' : theme[opt.color]}
+                    />
+                    <Text
+                      style={[
+                        styles.positionChipText,
+                        { color: selected ? '#FFFFFF' : theme[opt.color] },
+                      ]}>
+                      {opt.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {activePositionMeta ? (
+              <View style={[styles.lockedBox, { backgroundColor: theme.backgroundElement }]}>
+                <Ionicons name="star" size={16} color={theme.accent} />
+                <View style={styles.flex}>
+                  <Text style={{ color: theme.text, fontSize: 12.5, fontWeight: '800' }}>
+                    {`Quyền hạn của ${activePositionMeta.label}:`}
+                  </Text>
+                  <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 2 }}>
+                    {activePositionMeta.permissions.join(' · ')}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
+            {student.position?.trim() ? (
+              <Button
+                label={updatingPosition ? 'Đang cập nhật...' : 'Hủy chức vụ (Về thành viên thường)'}
+                variant={'danger'}
+                size={'sm'}
+                icon={'close-circle-outline'}
+                disabled={updatingPosition}
+                onPress={() => void handleAssignPosition(null)}
+              />
+            ) : null}
+          </Card>
+        </FadeIn>
+      ) : null}
 
       {/* Teacher / Editor 1-Tap Quick Reward Bar */}
       {canEditClass ? (
@@ -543,6 +667,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   rewardText: { fontSize: 12, fontWeight: '800' },
+  positionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+  },
+  positionChipText: { fontSize: 12, fontWeight: '800' },
   actions: { flexDirection: 'row', gap: Spacing.two },
   pressed: { opacity: 0.8, transform: [{ scale: 0.96 }] },
 });

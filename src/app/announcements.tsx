@@ -11,6 +11,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useLocalSearchParams } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
@@ -35,7 +36,7 @@ import { OptionPicker } from '@/components/ui/option-picker';
 import { Screen } from '@/components/ui/screen';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
-import { Radius, Spacing } from '@/constants/theme';
+import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
 import {
   ANNOUNCEMENT_TAGS,
   ANNOUNCEMENT_TAG_LIST,
@@ -45,14 +46,31 @@ import { useTheme } from '@/hooks/use-theme';
 import { formatDate, relativeDay } from '@/lib/date';
 import { DRIVE_CONFIG, extractDriveFileIdFromUrl, getLocalPreviewUri } from '@/lib/drive';
 import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
+import {
+  OFFICER_DEPARTMENTS,
+  getOfficerDepartmentMeta,
+  type OfficerDepartmentKey,
+} from '@/lib/officer-roles';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
 import type { Announcement, AnnouncementTag, DriveAttachment } from '@/types/models';
 
-type AnnFilter = 'all' | 'subject_teachers' | 'homeroom' | AnnouncementTag;
+type AnnFilter = 'all' | 'subject_teachers' | 'homeroom' | 'officers' | AnnouncementTag;
+
+function softToneOf(color: 'accent' | 'success' | 'warning' | 'danger' | 'purple'): ThemeColor {
+  return `${color}Soft` as ThemeColor;
+}
 
 export default function AnnouncementsScreen() {
+  const params = useLocalSearchParams<{
+    prefillTitle?: string;
+    prefillBody?: string;
+    prefillDept?: string;
+    prefillTag?: string;
+    prefillEventDate?: string;
+    prefillEventId?: string;
+  }>();
   const auth = useAuth();
   const decor = useDecor();
   const {
@@ -60,6 +78,11 @@ export default function AnnouncementsScreen() {
     memberRole,
     isTeacher,
     isSubjectTeacher,
+    isOfficer,
+    isClassMonitor,
+    officerPositionLabel,
+    defaultDepartment,
+    currentStudent,
     subjectName,
     canPostAnnouncements,
     classInfo,
@@ -73,8 +96,38 @@ export default function AnnouncementsScreen() {
   const theme = useTheme();
   const { showToast } = useToast();
 
+  const isOfficerPublisher = !isTeacher && !isSubjectTeacher && isOfficer && canPostAnnouncements;
+  const resolvedPrefillTag: AnnouncementTag =
+    params.prefillTag && ANNOUNCEMENT_TAG_LIST.includes(params.prefillTag as AnnouncementTag)
+      ? (params.prefillTag as AnnouncementTag)
+      : isSubjectTeacher
+        ? 'subject'
+        : isOfficerPublisher
+          ? 'event'
+          : 'important';
+  const resolvedPrefillDept: OfficerDepartmentKey | null =
+    getOfficerDepartmentMeta(params.prefillDept)?.key ??
+    defaultDepartment ??
+    (isTeacher ? 'class_board' : null);
+  const prefillSig =
+    params.prefillTitle ||
+    params.prefillBody ||
+    params.prefillEventId ||
+    params.prefillEventDate
+      ? [
+          params.prefillTitle ?? '',
+          params.prefillBody ?? '',
+          params.prefillDept ?? '',
+          params.prefillTag ?? '',
+          params.prefillEventDate ?? '',
+          params.prefillEventId ?? '',
+        ].join('||')
+      : '';
+  const hasPrefill = Boolean(prefillSig && canPostAnnouncements);
+
+  const [appliedPrefillSig, setAppliedPrefillSig] = useState<string>(hasPrefill ? prefillSig : '');
   const [filter, setFilter] = useState<AnnFilter>('all');
-  const [composerOpen, setComposerOpen] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(hasPrefill);
   const [portalOpen, setPortalOpen] = useState(false);
 
   // Subject teacher quick unlock portal state
@@ -88,24 +141,57 @@ export default function AnnouncementsScreen() {
   const [showPortalPass, setShowPortalPass] = useState(false);
   const [portalError, setPortalError] = useState<string | null>(null);
 
-  // Composer fields
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [tag, setTag] = useState<AnnouncementTag>(isSubjectTeacher ? 'subject' : 'important');
+  // Composer fields (initialized from optional route prefill params cleanly)
+  const [title, setTitle] = useState(params.prefillTitle ?? '');
+  const [content, setContent] = useState(params.prefillBody ?? '');
+  const [tag, setTag] = useState<AnnouncementTag>(resolvedPrefillTag);
+  const [composerDept, setComposerDept] = useState<OfficerDepartmentKey | null>(resolvedPrefillDept);
   const [composerSubject, setComposerSubject] = useState<string>(
     subjectName || SUBJECT_TEACHER_PRESETS[0].subject,
   );
   const [composerAuthor, setComposerAuthor] = useState<string>(
-    auth.profile?.displayName?.trim() || (isTeacher ? classInfo.teacherName : ''),
+    auth.profile?.displayName?.trim() ||
+      (isTeacher
+        ? classInfo.teacherName
+        : isOfficerPublisher
+          ? currentStudent?.name ?? ''
+          : ''),
   );
-  const [eventDate, setEventDate] = useState<string | null>(null);
+  const [eventDate, setEventDate] = useState<string | null>(params.prefillEventDate?.trim() || null);
+  const [composerEventId, setComposerEventId] = useState<string | null>(
+    params.prefillEventId?.trim() || null,
+  );
   const [pinned, setPinned] = useState(isTeacher);
   const [attachments, setAttachments] = useState<DriveAttachmentItem[]>([]);
   const [deletingAttachmentIds, setDeletingAttachmentIds] = useState<Record<string, boolean>>({});
   const [likedIds, setLikedIds] = useState<Record<string, boolean>>({});
 
+  // Apply fresh route prefill params even when /announcements was already mounted in the nav stack
+  if (prefillSig && prefillSig !== appliedPrefillSig && canPostAnnouncements) {
+    setAppliedPrefillSig(prefillSig);
+    setTitle(params.prefillTitle ?? '');
+    setContent(params.prefillBody ?? '');
+    setTag(resolvedPrefillTag);
+    setComposerDept(resolvedPrefillDept);
+    setEventDate(params.prefillEventDate?.trim() || null);
+    setComposerEventId(params.prefillEventId?.trim() || null);
+    setComposerAuthor(
+      auth.profile?.displayName?.trim() ||
+        (isSubjectTeacher
+          ? `GV Bộ môn ${subjectName ?? ''}`.trim()
+          : isOfficerPublisher
+            ? currentStudent?.name || officerPositionLabel || 'Ban cán sự'
+            : classInfo.teacherName),
+    );
+    setComposerOpen(true);
+  }
+
   const subjectAnnCount = useMemo(
     () => announcements.filter((a) => a.authorRole === 'subject_teacher' || Boolean(a.subject)).length,
+    [announcements],
+  );
+  const officerAnnCount = useMemo(
+    () => announcements.filter((a) => a.authorRole === 'officer' || Boolean(a.authorPosition)).length,
     [announcements],
   );
 
@@ -116,8 +202,16 @@ export default function AnnouncementsScreen() {
         if (filter === 'subject_teachers') {
           return a.authorRole === 'subject_teacher' || Boolean(a.subject);
         }
+        if (filter === 'officers') {
+          return a.authorRole === 'officer' || Boolean(a.authorPosition);
+        }
         if (filter === 'homeroom') {
-          return a.authorRole !== 'subject_teacher' && !a.subject;
+          return (
+            a.authorRole !== 'subject_teacher' &&
+            a.authorRole !== 'officer' &&
+            !a.subject &&
+            !a.authorPosition
+          );
         }
         return a.tag === filter;
       }),
@@ -127,13 +221,17 @@ export default function AnnouncementsScreen() {
   const handleOpenComposer = () => {
     const nextOpen = !composerOpen;
     if (nextOpen) {
-      setTag(isSubjectTeacher ? 'subject' : 'important');
+      setTag(isSubjectTeacher ? 'subject' : isOfficerPublisher ? 'event' : 'important');
+      setComposerDept(defaultDepartment ?? (isTeacher ? 'class_board' : null));
       setComposerSubject(subjectName || SUBJECT_TEACHER_PRESETS[0].subject);
+      setComposerEventId(null);
       setComposerAuthor(
         auth.profile?.displayName?.trim() ||
           (isSubjectTeacher
             ? `GV Bộ môn ${subjectName ?? ''}`.trim()
-            : classInfo.teacherName),
+            : isOfficerPublisher
+              ? currentStudent?.name || officerPositionLabel || 'Ban cán sự'
+              : classInfo.teacherName),
       );
       setPinned(isTeacher);
     }
@@ -215,9 +313,12 @@ export default function AnnouncementsScreen() {
       }
       return [...prev, confirmed];
     });
-    // Non-blocking mirror to shared Gallery + Realtime Broadcast
     void saveUploadedFilesToGallery([f], {
-      uploaderName: composerAuthor.trim() || auth.profile?.displayName?.trim() || classInfo.teacherName,
+      uploaderName:
+        composerAuthor.trim() ||
+        auth.profile?.displayName?.trim() ||
+        currentStudent?.name ||
+        classInfo.teacherName,
       uploaderRole: memberRole,
       uploaderSubject: isSubjectTeacher ? composerSubject : null,
       caption: title.trim() ? `Thông báo: ${title.trim()}` : 'Đính kèm bảng tin lớp 10T4',
@@ -289,28 +390,46 @@ export default function AnnouncementsScreen() {
     const effectiveAuthor =
       composerAuthor.trim() ||
       auth.profile?.displayName?.trim() ||
-      (isSubjectTeacher ? `GV ${effectiveSubject}` : classInfo.teacherName);
+      (isSubjectTeacher
+        ? `GV ${effectiveSubject}`
+        : isOfficerPublisher
+          ? currentStudent?.name || officerPositionLabel || 'Ban cán sự'
+          : classInfo.teacherName);
+
+    const effectiveAuthorRole: Announcement['authorRole'] = isTeacher
+      ? 'teacher'
+      : isSubjectTeacher
+        ? 'subject_teacher'
+        : isOfficerPublisher
+          ? 'officer'
+          : 'editor';
 
     addAnnouncement({
       title,
       content,
       tag,
       eventDate,
+      eventId: composerEventId,
       pinned,
       author: effectiveAuthor,
       subject: effectiveSubject,
-      authorRole: isSubjectTeacher ? 'subject_teacher' : 'teacher',
+      authorRole: effectiveAuthorRole,
+      department: composerDept,
+      authorPosition: isOfficerPublisher ? officerPositionLabel : null,
       attachments: cleanAttachments,
     });
     setTitle('');
     setContent('');
     setEventDate(null);
+    setComposerEventId(null);
     setAttachments([]);
     setComposerOpen(false);
     showToast(
       effectiveSubject
         ? `Đã đăng thông báo môn ${effectiveSubject} lên bảng tin! 📚`
-        : 'Đã đăng thông báo mới lên bảng tin!',
+        : isOfficerPublisher
+          ? `Đã đăng bản tin ${officerPositionLabel ?? 'Ban cán sự'} lên bảng tin lớp! 📢`
+          : 'Đã đăng thông báo mới lên bảng tin!',
     );
   };
 
@@ -323,15 +442,21 @@ export default function AnnouncementsScreen() {
   };
 
   const canManageItem = (item: Announcement) => {
-    if (isTeacher) return true;
-    if (!isSubjectTeacher) return false;
-    const myName = auth.profile?.displayName?.trim().toLowerCase();
-    const sameSubject =
-      Boolean(subjectName) &&
-      Boolean(item.subject) &&
-      item.subject?.toLowerCase() === subjectName?.toLowerCase();
-    const sameAuthor = Boolean(myName) && item.author.toLowerCase() === myName;
-    return item.authorRole === 'subject_teacher' && (sameSubject || sameAuthor);
+    if (isTeacher || isClassMonitor) return true;
+    const myName = (auth.profile?.displayName?.trim() || currentStudent?.name?.trim() || '').toLowerCase();
+    const sameAuthor = Boolean(myName) && item.author.trim().toLowerCase() === myName;
+    if (isSubjectTeacher) {
+      const sameSubject =
+        Boolean(subjectName) &&
+        Boolean(item.subject) &&
+        item.subject?.toLowerCase() === subjectName?.toLowerCase();
+      return item.authorRole === 'subject_teacher' && (sameSubject || sameAuthor);
+    }
+    if (isOfficerPublisher) {
+      const sameDept = Boolean(defaultDepartment) && item.department === defaultDepartment;
+      return item.authorRole === 'officer' && (sameAuthor || sameDept);
+    }
+    return false;
   };
 
   const subjectEmojiOf = (sub?: string | null) => {
@@ -346,7 +471,7 @@ export default function AnnouncementsScreen() {
     <Screen withTabBar={false}>
       <PageHeader
         title={'Bảng tin lớp ' + classInfo.name}
-        subtitle={'Thông báo GVCN, Giáo viên bộ môn & lịch kiểm tra'}
+        subtitle={'Thông báo GVCN, GV Bộ môn & Ban cán sự lớp'}
         rightIcon={
           canPostAnnouncements ? (composerOpen ? 'close' : 'add') : portalOpen ? 'close' : 'book'
         }
@@ -361,6 +486,32 @@ export default function AnnouncementsScreen() {
         }
         onRightPress={canPostAnnouncements ? handleOpenComposer : () => setPortalOpen((v) => !v)}
       />
+
+      {/* Active Officer Publisher Strip */}
+      {isOfficerPublisher ? (
+        <FadeIn index={0}>
+          <LinearGradient
+            colors={['#4F46E5', '#7C3AED']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={styles.stBanner}>
+            <View style={styles.stIcon}>
+              <Ionicons name="megaphone" size={20} color="#FFFFFF" />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.stEyebrow}>QUYỀN BAN CÁN SỰ ĐĂNG BẢN TIN</Text>
+              <Text style={styles.stTitle} numberOfLines={1}>
+                {`${currentStudent?.name || auth.profile?.displayName || 'Ban cán sự'} · ${officerPositionLabel ?? ''}`}
+              </Text>
+            </View>
+            <Pressable
+              onPress={handleOpenComposer}
+              style={styles.stSwitchBtn}>
+              <Text style={styles.stSwitchText}>{composerOpen ? 'Đóng' : 'Soạn tin'}</Text>
+            </Pressable>
+          </LinearGradient>
+        </FadeIn>
+      ) : null}
 
       {/* Active Subject Teacher Strip */}
       {isSubjectTeacher ? (
@@ -392,7 +543,7 @@ export default function AnnouncementsScreen() {
         </FadeIn>
       ) : null}
 
-      {/* Subject Teacher Entry Portal (shown to Students inside Announcements) */}
+      {/* Subject Teacher Entry Portal (shown to Students without posting permission) */}
       {!canPostAnnouncements ? (
         <FadeIn index={0}>
           <Card style={[styles.portalCard, { borderColor: theme.warning, borderWidth: 1.2 }]}>
@@ -526,22 +677,30 @@ export default function AnnouncementsScreen() {
         </FadeIn>
       ) : null}
 
-      {/* Announcement Composer (GVCN & GV Bộ môn) */}
+      {/* Announcement Composer (GVCN, GV Bộ môn & Ban cán sự) */}
       {composerOpen && canPostAnnouncements ? (
         <FadeIn index={0}>
           <Card style={styles.composer}>
             <View style={styles.compHead}>
               <Text style={[styles.compTitle, { color: theme.text }]}>
-                {isSubjectTeacher ? 'Đăng thông báo Bộ môn' : 'Tạo thông báo mới'}
+                {isSubjectTeacher
+                  ? 'Đăng thông báo Bộ môn'
+                  : isOfficerPublisher
+                    ? 'Đăng bản tin Ban cán sự'
+                    : 'Tạo thông báo mới'}
               </Text>
               <Badge
                 label={
                   isSubjectTeacher
                     ? `${subjectEmojiOf(composerSubject)} GV ${composerSubject}`
-                    : '🛡️ GV Chủ nhiệm'
+                    : isOfficerPublisher
+                      ? officerPositionLabel || 'Ban cán sự'
+                      : '🛡️ GV Chủ nhiệm'
                 }
-                color={isSubjectTeacher ? 'success' : 'accent'}
-                soft={isSubjectTeacher ? 'successSoft' : 'accentSoft'}
+                color={isSubjectTeacher ? 'success' : isOfficerPublisher ? 'purple' : 'accent'}
+                soft={
+                  isSubjectTeacher ? 'successSoft' : isOfficerPublisher ? 'purpleSoft' : 'accentSoft'
+                }
               />
             </View>
 
@@ -556,6 +715,34 @@ export default function AnnouncementsScreen() {
               value={tag}
               onChange={setTag}
             />
+
+            {/* Department / Ban chuyên trách selector */}
+            {!isSubjectTeacher ? (
+              <View style={styles.subjectPickWrap}>
+                <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
+                  Phòng ban / Ban chuyên trách
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.chips}>
+                  <Chip
+                    label={'Chung cả lớp'}
+                    selected={composerDept === null}
+                    onPress={() => setComposerDept(null)}
+                  />
+                  {OFFICER_DEPARTMENTS.map((dept) => (
+                    <Chip
+                      key={dept.key}
+                      label={dept.short}
+                      icon={dept.icon as keyof typeof Ionicons.glyphMap}
+                      selected={composerDept === dept.key}
+                      onPress={() => setComposerDept(dept.key)}
+                    />
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
 
             {isSubjectTeacher || tag === 'subject' ? (
               <View style={styles.subjectPickWrap}>
@@ -579,16 +766,20 @@ export default function AnnouncementsScreen() {
             ) : null}
 
             <TextField
-              label={'Tên giáo viên đăng tin'}
+              label={isOfficerPublisher ? 'Người đăng bản tin' : 'Tên giáo viên đăng tin'}
               icon={'person-outline'}
-              placeholder={'VD: Cô Nguyễn Minh Anh / Thầy Ngô Vũ Hảo'}
+              placeholder={
+                isOfficerPublisher
+                  ? 'Tên thành viên Ban cán sự'
+                  : 'VD: Cô Nguyễn Minh Anh / Thầy Ngô Vũ Hảo'
+              }
               value={composerAuthor}
               onChangeText={setComposerAuthor}
             />
 
             <TextField
               label={'Tiêu đề'}
-              placeholder={'Ví dụ: Lịch kiểm tra 15p Toán / Dặn dò bài tập Văn'}
+              placeholder={'Ví dụ: Lịch kiểm tra 15p Toán / Kế hoạch sự kiện lớp'}
               value={title}
               onChangeText={setTitle}
             />
@@ -660,12 +851,17 @@ export default function AnnouncementsScreen() {
           onPress={() => setFilter('all')}
         />
         <Chip
+          label={`🏅 Ban cán sự (${officerAnnCount})`}
+          selected={filter === 'officers'}
+          onPress={() => setFilter('officers')}
+        />
+        <Chip
           label={`📚 GV Bộ môn (${subjectAnnCount})`}
           selected={filter === 'subject_teachers'}
           onPress={() => setFilter('subject_teachers')}
         />
         <Chip
-          label={`🛡️ GV Chủ nhiệm`}
+          label={'🛡️ GV Chủ nhiệm'}
           selected={filter === 'homeroom'}
           onPress={() => setFilter('homeroom')}
         />
@@ -684,7 +880,7 @@ export default function AnnouncementsScreen() {
         <EmptyState
           icon={'megaphone-outline'}
           title={'Chưa có thông báo nào'}
-          message={'Thông báo từ GVCN và các Giáo viên bộ môn sẽ hiển thị tại đây.'}
+          message={'Thông báo từ GVCN, Giáo viên bộ môn và Ban cán sự sẽ hiển thị tại đây.'}
         />
       ) : (
         visible.map((item, i) => {
@@ -692,6 +888,8 @@ export default function AnnouncementsScreen() {
           const liked = Boolean(likedIds[item.id]);
           const isFromSubjectTeacher =
             item.authorRole === 'subject_teacher' || Boolean(item.subject);
+          const isFromOfficer = item.authorRole === 'officer' || Boolean(item.authorPosition);
+          const deptMeta = getOfficerDepartmentMeta(item.department);
           const manageable = canManageItem(item);
 
           return (
@@ -705,6 +903,12 @@ export default function AnnouncementsScreen() {
                       borderLeftWidth: 4,
                       borderLeftColor: theme.success,
                     },
+                  isFromOfficer &&
+                    !item.pinned &&
+                    !isFromSubjectTeacher && {
+                      borderLeftWidth: 4,
+                      borderLeftColor: theme.purple,
+                    },
                 ]}>
                 <View style={styles.topRow}>
                   <Badge label={meta.label} color={meta.color} soft={meta.soft} icon={meta.icon} />
@@ -714,6 +918,13 @@ export default function AnnouncementsScreen() {
                       color={'success'}
                       soft={'successSoft'}
                     />
+                  ) : isFromOfficer ? (
+                    <Badge
+                      label={item.authorPosition || 'Ban cán sự'}
+                      color={'purple'}
+                      soft={'purpleSoft'}
+                      icon={'ribbon'}
+                    />
                   ) : (
                     <Badge
                       label={'GV Chủ nhiệm'}
@@ -722,6 +933,14 @@ export default function AnnouncementsScreen() {
                       icon={'shield-checkmark'}
                     />
                   )}
+                  {deptMeta ? (
+                    <Badge
+                      label={deptMeta.short}
+                      color={deptMeta.color}
+                      soft={softToneOf(deptMeta.color)}
+                      icon={deptMeta.icon as keyof typeof Ionicons.glyphMap}
+                    />
+                  ) : null}
                   {item.pinned ? (
                     <Badge label={'Đã ghim'} color={'gold'} soft={'goldSoft'} icon={'pin'} />
                   ) : null}
@@ -756,7 +975,9 @@ export default function AnnouncementsScreen() {
                   <Text style={[styles.author, { color: theme.textMuted }]}>
                     {isFromSubjectTeacher && item.subject
                       ? `Đăng bởi ${item.author} · GV ${item.subject}`
-                      : `Đăng bởi ${item.author}`}
+                      : item.authorPosition
+                        ? `Đăng bởi ${item.author} · ${item.authorPosition}`
+                        : `Đăng bởi ${item.author}`}
                   </Text>
 
                   <View style={styles.footerActions}>

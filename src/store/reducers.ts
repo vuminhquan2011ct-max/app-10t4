@@ -1,5 +1,6 @@
 /** Pure builders / mergers used by the store actions. */
 
+import { canonicalizeOfficerPosition } from '@/lib/officer-roles';
 import { createId, normalizeName } from '@/lib/utils';
 import type { Entry, Student } from '@/types/models';
 
@@ -19,6 +20,21 @@ function nextCode(students: Student[], className: string): string {
   return `${prefix}${String(max + 1).padStart(2, '0')}`;
 }
 
+function resolveEntryPoints(
+  kind: Entry['kind'],
+  rawPoints: number,
+  source?: Entry['source'],
+): number {
+  const rounded = Number.isFinite(rawPoints) ? Math.round(rawPoints) : 0;
+  if (kind === 'violation') {
+    return rounded < 0 ? rounded : -Math.max(1, Math.abs(rounded) || 5);
+  }
+  if (rounded < 0 && source === 'duty_diligence') {
+    return rounded;
+  }
+  return Math.max(0, rounded);
+}
+
 export function buildStudent(existing: Student[], className: string, input: StudentInput): Student {
   const now = new Date().toISOString();
   return {
@@ -31,7 +47,7 @@ export function buildStudent(existing: Student[], className: string, input: Stud
     email: text(input.email),
     address: text(input.address),
     group: text(input.group),
-    position: text(input.position),
+    position: canonicalizeOfficerPosition(input.position),
     note: text(input.note),
     createdAt: now,
     updatedAt: now,
@@ -48,7 +64,7 @@ export function mergeStudent(student: Student, patch: Partial<StudentInput>): St
   if (patch.email !== undefined) next.email = text(patch.email);
   if (patch.address !== undefined) next.address = text(patch.address);
   if (patch.group !== undefined) next.group = text(patch.group);
-  if (patch.position !== undefined) next.position = text(patch.position);
+  if (patch.position !== undefined) next.position = canonicalizeOfficerPosition(patch.position);
   if (patch.note !== undefined) next.note = text(patch.note);
   return next;
 }
@@ -56,6 +72,7 @@ export function mergeStudent(student: Student, patch: Partial<StudentInput>): St
 export function buildEntry(input: EntryInput): Entry {
   const now = new Date().toISOString();
   const fromStudent = input.submittedBy === 'student';
+  const resolvedSource = input.source;
   return {
     id: createId('ent'),
     studentId: input.studentId,
@@ -66,11 +83,19 @@ export function buildEntry(input: EntryInput): Entry {
     date: input.date,
     description: text(input.description),
     proofUrl: text(input.proofUrl),
-    points: Math.max(0, Math.round(input.points)),
-    // Teacher entries are trusted, student ones wait for review.
-    status: fromStudent ? 'pending' : 'approved',
+    points: resolveEntryPoints(input.kind, input.points, resolvedSource),
+    // Explicit status wins (used for officer-recorded entries); otherwise teacher=approved, student=pending.
+    status: input.status ?? (fromStudent ? 'pending' : 'approved'),
     submittedBy: input.submittedBy ?? 'teacher',
-    reviewNote: null,
+    reviewNote: text(input.reviewNote),
+    ...(input.recordedByName !== undefined ? { recordedByName: text(input.recordedByName) } : {}),
+    ...(input.recordedByPosition !== undefined
+      ? { recordedByPosition: text(input.recordedByPosition) }
+      : {}),
+    ...(input.recordedByStudentId !== undefined
+      ? { recordedByStudentId: input.recordedByStudentId ?? null }
+      : {}),
+    ...(resolvedSource !== undefined ? { source: resolvedSource } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -86,6 +111,22 @@ export function mergeEntry(entry: Entry, patch: Partial<EntryInput>): Entry {
   if (patch.date) next.date = patch.date;
   if (patch.description !== undefined) next.description = text(patch.description);
   if (patch.proofUrl !== undefined) next.proofUrl = text(patch.proofUrl);
-  if (patch.points !== undefined) next.points = Math.max(0, Math.round(patch.points));
+  if (patch.status !== undefined) next.status = patch.status;
+  if (patch.reviewNote !== undefined) next.reviewNote = text(patch.reviewNote);
+  if (patch.recordedByName !== undefined) next.recordedByName = text(patch.recordedByName);
+  if (patch.recordedByPosition !== undefined) {
+    next.recordedByPosition = text(patch.recordedByPosition);
+  }
+  if (patch.recordedByStudentId !== undefined) {
+    next.recordedByStudentId = patch.recordedByStudentId ?? null;
+  }
+  if (patch.source !== undefined) next.source = patch.source;
+  if (patch.points !== undefined || patch.kind !== undefined || patch.source !== undefined) {
+    next.points = resolveEntryPoints(
+      next.kind,
+      patch.points !== undefined ? patch.points : entry.points,
+      next.source,
+    );
+  }
   return next;
 }

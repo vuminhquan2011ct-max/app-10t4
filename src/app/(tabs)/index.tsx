@@ -31,9 +31,14 @@ import { ANNOUNCEMENT_TAGS, KUDOS_STICKERS, MEMBER_ROLES } from '@/constants/uti
 import { useBrandGradient, useIsDark, useTheme, useThemePreference } from '@/hooks/use-theme';
 import { formatDayMonth, relativeDay } from '@/lib/date';
 import { computeClassHealth, getLivePeriodStatus } from '@/lib/intelligence';
+import { getOfficerPositionMeta } from '@/lib/officer-roles';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
+
+function softToneOf(color: 'accent' | 'success' | 'warning' | 'danger' | 'purple'): ThemeColor {
+  return `${color}Soft` as ThemeColor;
+}
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
 type AnalyticsTab = 'groups' | 'weekly' | 'categories';
@@ -116,6 +121,7 @@ export default function DashboardScreen() {
   const store = useClassStore();
   const {
     classInfo,
+    students,
     totals,
     ranking,
     registeredMembers,
@@ -125,6 +131,14 @@ export default function DashboardScreen() {
     isSubjectTeacher,
     subjectName,
     canEditClass,
+    isOfficer,
+    officerPositionLabel,
+    canAssignPositions,
+    canManageDuty,
+    canRecordBonus,
+    canRecordViolation,
+    canManageTasksAndEvents,
+    canPostAnnouncements,
     currentStudent,
     syncStatus,
     classStreak,
@@ -166,7 +180,7 @@ export default function DashboardScreen() {
   const rest = ranking.slice(3, 6);
   const maxPoints = Math.max(1, ranking[0]?.points ?? 1);
   const goalPoints = Math.max(10, classInfo.goalPoints ?? 200);
-  const goalRatio = Math.min(1, totals.points / goalPoints);
+  const goalRatio = Math.max(0, Math.min(1, totals.points / goalPoints));
   const goalPercent = Math.round(goalRatio * 100);
   const featuredAnnouncement = announcements[0] ?? null;
   const activePoll = polls.find((p) => !p.closed) ?? null;
@@ -1000,6 +1014,180 @@ export default function DashboardScreen() {
         </FadeIn>
       ) : null}
 
+      {/* Officer & GVCN Role Command Card ("Bảng Điều Phối Chức Vụ & Ban Cán Sự 10T4") */}
+      {canAssignPositions ? (
+        <FadeIn index={3}>
+          <Card style={[styles.officerHubCard, { borderColor: theme.purple, borderWidth: 1.4 }]}>
+            <View style={styles.officerHubHead}>
+              <View style={[styles.officerHubIcon, { backgroundColor: theme.purpleSoft }]}>
+                <Ionicons name="shield-checkmark" size={20} color={theme.purple} />
+              </View>
+              <View style={styles.flex}>
+                <Text style={[styles.officerHubEyebrow, { color: theme.purple }]}>
+                  QUYỀN GIÁO VIÊN CHỦ NHIỆM
+                </Text>
+                <Text style={[styles.officerHubTitle, { color: theme.text }]}>
+                  {'Bảng Điều Phối Ban Cán Sự ' + classInfo.name}
+                </Text>
+                <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
+                  {`Đang hoạt động: ${students.filter((s) => Boolean(s.position?.trim())).length} cán sự lớp · Chỉ GVCN có quyền phân công hoặc hủy chức vụ.`}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.officerHubBtns}>
+              <Button
+                label={'Phân công / Hủy chức vụ Ban cán sự'}
+                icon={'people-circle'}
+                size={'sm'}
+                style={styles.flex}
+                onPress={() => router.push('/members' as never)}
+              />
+              <Button
+                label={'Trực nhật'}
+                variant={'soft'}
+                icon={'leaf-outline'}
+                size={'sm'}
+                onPress={() => router.push('/schedule' as never)}
+              />
+            </View>
+          </Card>
+        </FadeIn>
+      ) : isOfficer && officerPositionLabel ? (
+        (() => {
+          const posMeta = getOfficerPositionMeta(officerPositionLabel);
+          const tone = posMeta?.color ?? 'purple';
+          const softTone = softToneOf(tone);
+          return (
+            <FadeIn index={3}>
+              <Card
+                style={[
+                  styles.officerHubCard,
+                  { borderColor: theme[tone], borderWidth: 1.4 },
+                ]}>
+                <View style={styles.officerHubHead}>
+                  <View style={[styles.officerHubIcon, { backgroundColor: theme[softTone] }]}>
+                    <Ionicons
+                      name={(posMeta?.icon ?? 'ribbon') as IoniconName}
+                      size={20}
+                      color={theme[tone]}
+                    />
+                  </View>
+                  <View style={styles.flex}>
+                    <View style={styles.officerBadgeRow}>
+                      <Text style={[styles.officerHubEyebrow, { color: theme[tone] }]}>
+                        BẢNG ĐIỀU PHỐI BAN CÁN SỰ
+                      </Text>
+                      <Badge
+                        label={officerPositionLabel}
+                        color={tone}
+                        soft={softTone}
+                        icon={(posMeta?.icon ?? 'star') as IoniconName}
+                      />
+                    </View>
+                    <Text style={[styles.officerHubTitle, { color: theme.text }]}>
+                      {posMeta?.summary || 'Được GVCN phân công điều phối hoạt động lớp'}
+                    </Text>
+                  </View>
+                </View>
+
+                {posMeta && posMeta.permissions.length > 0 ? (
+                  <View style={styles.officerPermList}>
+                    {posMeta.permissions.map((perm) => (
+                      <View key={perm} style={styles.officerPermItem}>
+                        <Ionicons name="checkmark-circle" size={14} color={theme[tone]} />
+                        <Text style={{ color: theme.textSecondary, fontSize: 12, flex: 1 }}>
+                          {perm}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+
+                <View style={styles.officerActionGrid}>
+                  {canManageDuty ? (
+                    <Pressable
+                      onPress={() => router.push('/schedule' as never)}
+                      style={({ pressed }) => [
+                        styles.officerActionBtn,
+                        { backgroundColor: theme.successSoft, borderColor: theme.success },
+                        pressed && styles.pressed,
+                      ]}>
+                      <Ionicons name="leaf" size={15} color={theme.success} />
+                      <Text style={[styles.officerActionText, { color: theme.success }]}>
+                        Phân công & Chấm trực nhật
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  {canRecordBonus ? (
+                    <Pressable
+                      onPress={() =>
+                        router.push({ pathname: '/entry-form', params: { mode: 'bonus' } } as never)
+                      }
+                      style={({ pressed }) => [
+                        styles.officerActionBtn,
+                        { backgroundColor: theme.accentSoft, borderColor: theme.accent },
+                        pressed && styles.pressed,
+                      ]}>
+                      <Ionicons name="add-circle" size={15} color={theme.accentText} />
+                      <Text style={[styles.officerActionText, { color: theme.accentText }]}>
+                        {canRecordViolation ? 'Ghi điểm cộng toàn lớp' : 'Ghi điểm cộng Tổ'}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  {canRecordViolation ? (
+                    <Pressable
+                      onPress={() =>
+                        router.push({
+                          pathname: '/entry-form',
+                          params: { mode: 'violation' },
+                        } as never)
+                      }
+                      style={({ pressed }) => [
+                        styles.officerActionBtn,
+                        { backgroundColor: theme.dangerSoft, borderColor: theme.danger },
+                        pressed && styles.pressed,
+                      ]}>
+                      <Ionicons name="alert-circle" size={15} color={theme.danger} />
+                      <Text style={[styles.officerActionText, { color: theme.danger }]}>
+                        Ghi học sinh vi phạm
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  {canManageTasksAndEvents ? (
+                    <Pressable
+                      onPress={() => router.push('/tasks' as never)}
+                      style={({ pressed }) => [
+                        styles.officerActionBtn,
+                        { backgroundColor: theme.purpleSoft, borderColor: theme.purple },
+                        pressed && styles.pressed,
+                      ]}>
+                      <Ionicons name="briefcase" size={15} color={theme.purple} />
+                      <Text style={[styles.officerActionText, { color: theme.purple }]}>
+                        Nhiệm vụ · Phòng ban · Sự kiện
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  {canPostAnnouncements ? (
+                    <Pressable
+                      onPress={() => router.push('/announcements' as never)}
+                      style={({ pressed }) => [
+                        styles.officerActionBtn,
+                        { backgroundColor: theme.warningSoft, borderColor: theme.warning },
+                        pressed && styles.pressed,
+                      ]}>
+                      <Ionicons name="megaphone" size={15} color={theme.warning} />
+                      <Text style={[styles.officerActionText, { color: theme.warning }]}>
+                        Đăng Bản tin lớp
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </Card>
+            </FadeIn>
+          );
+        })()
+      ) : null}
+
       {/* Personalized Student Corner (for authenticated student) */}
       {currentStudent && myStats && !canEditClass ? (
         <FadeIn index={3}>
@@ -1026,7 +1214,11 @@ export default function DashboardScreen() {
                 </View>
                 <Text style={[styles.cornerName, { color: theme.text }]}>{currentStudent.name}</Text>
                 <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
-                  {[currentStudent.group || 'Lớp ' + classInfo.name, mySeat?.label]
+                  {[
+                    currentStudent.group || 'Lớp ' + classInfo.name,
+                    currentStudent.position?.trim() || null,
+                    mySeat?.label,
+                  ]
                     .filter(Boolean)
                     .join(' · ')}
                 </Text>
@@ -1042,11 +1234,19 @@ export default function DashboardScreen() {
             </View>
             <View style={styles.cornerStats}>
               <Badge
-                label={`Chuyên cần ${myAtt?.rate !== null && myAtt?.rate !== undefined ? `${myAtt.rate}%` : '--'}`}
+                label={`Điểm CC ${(myAtt?.diligenceScore ?? myAtt?.rate) !== null && (myAtt?.diligenceScore ?? myAtt?.rate) !== undefined ? `${myAtt?.diligenceScore ?? myAtt?.rate}%` : '--'}`}
                 color={'success'}
                 soft={'successSoft'}
                 icon={'checkbox-outline'}
               />
+              {myAtt && myAtt.dutyTotal > 0 ? (
+                <Badge
+                  label={`Trực nhật ${myAtt.dutyCompleted} HT · ${myAtt.dutyMissed} chưa HT`}
+                  color={myAtt.dutyMissed > 0 ? 'warning' : 'success'}
+                  soft={myAtt.dutyMissed > 0 ? 'warningSoft' : 'successSoft'}
+                  icon={'leaf-outline'}
+                />
+              ) : null}
               <Badge
                 label={`${myKudosCount} Kudos`}
                 color={'danger'}
@@ -1301,7 +1501,7 @@ export default function DashboardScreen() {
         />
         <StatCard
           label={canViewAll ? 'Thành tích & HĐ' : 'Bài đăng của bạn'}
-          value={totals.entries}
+          value={canViewAll ? totals.entries : (myStats?.total ?? totals.entries)}
           icon={'trophy'}
           tone={'purple'}
           onPress={() => router.push('/feed' as never)}
@@ -1317,7 +1517,7 @@ export default function DashboardScreen() {
         />
         <StatCard
           label={canViewAll ? 'Tổng điểm thi đua' : 'Điểm cá nhân'}
-          value={totals.points}
+          value={canViewAll ? totals.points : (myStats?.points ?? totals.points)}
           icon={'ribbon'}
           tone={'success'}
           onPress={() => router.push('/students' as never)}
@@ -1465,7 +1665,7 @@ export default function DashboardScreen() {
                                 style={[
                                   styles.fill,
                                   {
-                                    width: `${Math.max(4, Math.round((row.points / maxPoints) * 100))}%` as `${number}%`,
+                                    width: `${Math.min(100, Math.max(4, Math.round((Math.max(0, row.points) / maxPoints) * 100)))}%` as `${number}%`,
                                   },
                                 ]}
                               />
@@ -2133,4 +2333,36 @@ const styles = StyleSheet.create({
     fontSize: 9.5,
     fontWeight: '900',
   },
+  officerHubCard: { gap: Spacing.two + 4 },
+  officerHubHead: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.two + 2 },
+  officerHubIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  officerBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 2,
+  },
+  officerHubEyebrow: { fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
+  officerHubTitle: { fontSize: 15, fontWeight: '900', lineHeight: 20, marginTop: 1 },
+  officerHubBtns: { flexDirection: 'row', gap: Spacing.two },
+  officerPermList: { gap: 4 },
+  officerPermItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  officerActionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
+  officerActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  officerActionText: { fontSize: 12, fontWeight: '800' },
 });

@@ -106,6 +106,7 @@ function FeedProofPreview({
 
 type Filter = 'all' | EntryStatus;
 type CatFilter = 'all' | EntryCategory;
+type KindFilter = 'all' | 'bonus' | 'violation' | 'duty';
 
 const FILTERS: { value: Filter; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: 'all', label: 'Tất cả', icon: 'layers-outline' },
@@ -114,12 +115,24 @@ const FILTERS: { value: Filter; label: string; icon: keyof typeof Ionicons.glyph
   { value: 'rejected', label: 'Từ chối', icon: 'close-circle-outline' },
 ];
 
+const KIND_FILTERS: { value: KindFilter; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+  { value: 'all', label: 'Tất cả', icon: 'apps-outline' },
+  { value: 'bonus', label: 'Điểm cộng', icon: 'sparkles-outline' },
+  { value: 'violation', label: 'Vi phạm', icon: 'alert-circle-outline' },
+  { value: 'duty', label: 'Trực nhật', icon: 'leaf-outline' },
+];
+
 export default function FeedScreen() {
   const {
     entries,
     role,
     canViewAll,
     canEditClass,
+    isOfficer,
+    officerPositionLabel,
+    canRecordBonus,
+    canRecordViolation,
+    classRosterPublic,
     currentStudentId,
     getStudent,
     setEntryStatus,
@@ -132,10 +145,16 @@ export default function FeedScreen() {
   const { showToast } = useToast();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [catFilter, setCatFilter] = useState<CatFilter>('all');
   const [confirmProofEntryId, setConfirmProofEntryId] = useState<string | null>(null);
   const [deletingProofEntryId, setDeletingProofEntryId] = useState<string | null>(null);
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const rosterById = useMemo(
+    () => new Map(classRosterPublic.map((s) => [s.id, s])),
+    [classRosterPublic],
+  );
 
   useEffect(() => {
     return () => {
@@ -157,20 +176,45 @@ export default function FeedScreen() {
     return result;
   }, [entries]);
 
+  const kindCounts = useMemo(() => {
+    const c: Record<KindFilter, number> = { all: entries.length, bonus: 0, violation: 0, duty: 0 };
+    for (const entry of entries) {
+      const isViol = entry.kind === 'violation' || entry.points < 0;
+      const isDuty = entry.source === 'duty_diligence';
+      if (isDuty) c.duty += 1;
+      if (isViol) c.violation += 1;
+      else if (!isDuty) c.bonus += 1;
+    }
+    return c;
+  }, [entries]);
+
   const sorted = useMemo(() => {
     const q = stripVietnamese(query);
     return entries
       .filter((entry) => {
         const matchStatus = filter === 'all' || entry.status === filter;
         const matchCat = catFilter === 'all' || entry.category === catFilter;
-        const studentName = getStudent(entry.studentId)?.name ?? '';
+        const isViol = entry.kind === 'violation' || entry.points < 0;
+        const isDuty = entry.source === 'duty_diligence';
+        const matchKind =
+          kindFilter === 'all'
+            ? true
+            : kindFilter === 'violation'
+              ? isViol
+              : kindFilter === 'duty'
+                ? isDuty
+                : !isViol && !isDuty;
+        const studentName =
+          getStudent(entry.studentId)?.name ?? rosterById.get(entry.studentId)?.name ?? '';
         const matchQuery =
           !q ||
-          stripVietnamese(`${entry.title} ${studentName} ${entry.description ?? ''}`).includes(q);
-        return matchStatus && matchCat && matchQuery;
+          stripVietnamese(
+            `${entry.title} ${studentName} ${entry.description ?? ''} ${entry.recordedByName ?? ''} ${entry.recordedByPosition ?? ''}`,
+          ).includes(q);
+        return matchStatus && matchCat && matchKind && matchQuery;
       })
       .sort((a, b) => b.date.localeCompare(a.date));
-  }, [entries, filter, catFilter, query, getStudent]);
+  }, [entries, filter, kindFilter, catFilter, query, getStudent, rosterById]);
 
   const handleApproveAll = () => {
     approveAllPending();
@@ -208,16 +252,27 @@ export default function FeedScreen() {
     }
   };
 
+  const primaryCtaLabel =
+    canRecordViolation && !canRecordBonus && !canEditClass
+      ? 'Ghi học sinh vi phạm'
+      : canRecordBonus && !canEditClass && !canRecordViolation
+        ? 'Ghi điểm cộng Tổ'
+        : canRecordBonus && canRecordViolation && !canEditClass
+          ? 'Ghi điểm / Vi phạm'
+          : 'Ghi thành tích mới';
+
   return (
     <Screen onRefresh={pullNow}>
       <FadeIn index={0}>
         <SectionHeader
           large
-          title={canViewAll ? 'Nhật ký thành tích' : 'Bài đăng của tôi'}
+          title={canViewAll || isOfficer ? 'Nhật ký thi đua & Kỷ luật' : 'Bài đăng của tôi'}
           subtitle={
             canViewAll
-              ? sorted.length + ' / ' + entries.length + ' mục toàn lớp · Dòng thời gian trực tiếp'
-              : sorted.length + ' mục của riêng bạn · Chỉ bạn & GVCN thấy'
+              ? sorted.length + ' / ' + entries.length + ' mục toàn lớp · Điểm cộng, Vi phạm & Trực nhật'
+              : isOfficer
+                ? `${sorted.length} mục thuộc phạm vi ${officerPositionLabel ?? 'Ban cán sự'}`
+                : sorted.length + ' mục của riêng bạn · Chỉ bạn & GVCN thấy'
           }
         />
       </FadeIn>
@@ -240,7 +295,11 @@ export default function FeedScreen() {
             <View style={styles.liveTag}>
               <View style={styles.liveDot} />
               <Text style={styles.liveTagText}>
-                {canViewAll ? 'SỔ VÀNG THI ĐUA LỚP 10T4' : 'NHẬT KÝ CÁ NHÂN'}
+                {canViewAll
+                  ? 'SỔ VÀNG THI ĐUA LỚP 10T4'
+                  : isOfficer
+                    ? `BAN CÁN SỰ · ${(officerPositionLabel || 'ĐIỀU PHỐI').toUpperCase()}`
+                    : 'NHẬT KÝ CÁ NHÂN'}
               </Text>
             </View>
             <Text style={styles.bannerCountHint}>{`Hiển thị ${sorted.length} mục`}</Text>
@@ -296,7 +355,7 @@ export default function FeedScreen() {
               ]}>
               <Ionicons name="add-circle" size={17} color={gradient[0]} />
               <Text style={[styles.bannerPrimaryText, { color: gradient[0] }]}>
-                Ghi thành tích mới
+                {primaryCtaLabel}
               </Text>
             </Pressable>
 
@@ -320,10 +379,29 @@ export default function FeedScreen() {
         <Card style={styles.filterCard}>
           <TextField
             icon={'search'}
-            placeholder={'Tìm thành tích, tên học sinh, mô tả...'}
+            placeholder={'Tìm thành tích, vi phạm, tên học sinh, người ghi...'}
             value={query}
             onChangeText={setQuery}
           />
+
+          {/* Kind Filter Chips: Tất cả | Điểm cộng | Vi phạm | Trực nhật */}
+          <View style={styles.filterGroup}>
+            <Text style={[styles.filterHeading, { color: theme.textMuted }]}>PHÂN LOẠI GHI NHẬN</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.filters}>
+              {KIND_FILTERS.map((item) => (
+                <Chip
+                  key={item.value}
+                  label={`${item.label} · ${kindCounts[item.value]}`}
+                  icon={item.icon}
+                  selected={kindFilter === item.value}
+                  onPress={() => setKindFilter(item.value)}
+                />
+              ))}
+            </ScrollView>
+          </View>
 
           {/* Status Filter Chips */}
           <View style={styles.filterGroup}>
@@ -376,17 +454,31 @@ export default function FeedScreen() {
       {sorted.length === 0 ? (
         <EmptyState
           title={'Chưa có mục phù hợp'}
-          message={'Thử bỏ bộ lọc hoặc bấm "Ghi thành tích mới" để thêm nhé.'}
+          message={'Thử bỏ bộ lọc hoặc bấm nút thêm mới ở trên để ghi nhận nhé.'}
         />
       ) : (
         sorted.map((entry, i) => {
           const status = ENTRY_STATUSES[entry.status];
-          const kind = ENTRY_KINDS[entry.kind];
-          const category = ENTRY_CATEGORIES[entry.category];
+          const isViolation = entry.kind === 'violation' || entry.points < 0;
+          const isDuty = entry.source === 'duty_diligence';
+          const kind = ENTRY_KINDS[entry.kind] ?? ENTRY_KINDS.achievement;
+          const accentColor = isViolation ? 'danger' : kind.color;
+          const accentSoft = isViolation ? 'dangerSoft' : kind.soft;
+          const category = ENTRY_CATEGORIES[entry.category] ?? ENTRY_CATEGORIES.study;
           const student = getStudent(entry.studentId);
-          const studentName = student?.name ?? 'Học sinh đã xoá';
+          const pubStudent = rosterById.get(entry.studentId);
+          const studentName = student?.name ?? pubStudent?.name ?? 'Học sinh';
+          const studentGroup = student?.group ?? pubStudent?.group ?? null;
           const canOpenForm =
             canEditClass || (entry.status === 'pending' && entry.studentId === currentStudentId);
+          const canOpenStudent = canViewAll || entry.studentId === currentStudentId;
+          const attributionText =
+            entry.recordedByPosition && entry.recordedByName
+              ? `Ghi bởi ${entry.recordedByPosition}: ${entry.recordedByName}`
+              : entry.recordedByPosition || entry.recordedByName
+                ? `Ghi bởi ${entry.recordedByPosition || entry.recordedByName}`
+                : null;
+
           return (
             <FadeIn key={entry.id} index={Math.min(i + 3, 10)}>
               <Card
@@ -396,35 +488,42 @@ export default function FeedScreen() {
                     borderColor: theme.warning,
                     borderWidth: 1,
                   },
+                  isViolation &&
+                    entry.status !== 'pending' && {
+                      borderColor: theme.danger,
+                      borderWidth: 1,
+                    },
                 ]}
                 onPress={
                   canOpenForm
                     ? () =>
                         router.push({ pathname: '/entry-form', params: { id: entry.id } } as never)
-                    : () =>
-                        router.push({
-                          pathname: '/student/[id]',
-                          params: { id: entry.studentId },
-                        } as never)
+                    : canOpenStudent
+                      ? () =>
+                          router.push({
+                            pathname: '/student/[id]',
+                            params: { id: entry.studentId },
+                          } as never)
+                      : undefined
                 }>
                 {/* Left Accent Timeline Stripe */}
                 <View
                   style={[
                     styles.timelineStripe,
-                    { backgroundColor: theme[kind.color] },
+                    { backgroundColor: theme[accentColor] },
                   ]}
                 />
 
-                {/* Top Meta Header: Student Avatar + Name + Date + Status */}
+                {/* Top Meta Header: Student Avatar + Name + Date */}
                 <View style={styles.metaTopRow}>
                   <View style={styles.studentPill}>
                     <Avatar name={studentName} size={24} />
                     <Text style={[styles.studentNameText, { color: theme.text }]} numberOfLines={1}>
                       {studentName}
                     </Text>
-                    {student?.group ? (
+                    {studentGroup ? (
                       <Text style={[styles.studentGroupText, { color: theme.textMuted }]}>
-                        {`· ${student.group}`}
+                        {`· ${studentGroup}`}
                       </Text>
                     ) : null}
                   </View>
@@ -442,32 +541,40 @@ export default function FeedScreen() {
                     style={[
                       styles.iconBox,
                       {
-                        backgroundColor: theme[kind.soft],
-                        borderColor: theme[kind.color],
+                        backgroundColor: theme[accentSoft],
+                        borderColor: theme[accentColor],
                       },
                     ]}>
-                    <Ionicons name={kind.icon} size={21} color={theme[kind.color]} />
+                    <Ionicons
+                      name={isViolation ? 'alert-circle' : kind.icon}
+                      size={21}
+                      color={theme[accentColor]}
+                    />
                   </View>
                   <View style={styles.headBody}>
                     <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
                       {entry.title}
                     </Text>
-                    <Text style={[styles.kindLabelText, { color: theme[kind.color] }]}>
-                      {kind.label}
+                    <Text style={[styles.kindLabelText, { color: theme[accentColor] }]}>
+                      {isViolation ? 'Vi phạm / Nhắc nhở' : kind.label}
                     </Text>
                   </View>
-                  {entry.points > 0 ? (
+                  {entry.points !== 0 ? (
                     <View
                       style={[
                         styles.points,
                         {
-                          backgroundColor: theme[kind.soft],
-                          borderColor: theme[kind.color],
+                          backgroundColor: theme[accentSoft],
+                          borderColor: theme[accentColor],
                         },
                       ]}>
-                      <Ionicons name="sparkles" size={11} color={theme[kind.color]} />
-                      <Text style={[styles.pointsValue, { color: theme[kind.color] }]}>
-                        {'+' + entry.points + 'đ'}
+                      <Ionicons
+                        name={entry.points < 0 ? 'alert-circle' : 'sparkles'}
+                        size={11}
+                        color={theme[accentColor]}
+                      />
+                      <Text style={[styles.pointsValue, { color: theme[accentColor] }]}>
+                        {entry.points > 0 ? `+${entry.points}đ` : `${entry.points}đ`}
                       </Text>
                     </View>
                   ) : null}
@@ -488,6 +595,30 @@ export default function FeedScreen() {
 
                 {/* Badges Row */}
                 <View style={styles.badges}>
+                  {isViolation ? (
+                    <Badge
+                      label={'Vi phạm'}
+                      color={'danger'}
+                      soft={'dangerSoft'}
+                      icon={'alert-circle'}
+                    />
+                  ) : null}
+                  {isDuty ? (
+                    <Badge
+                      label={'Trực nhật · Chuyên cần'}
+                      color={entry.points < 0 ? 'danger' : 'success'}
+                      soft={entry.points < 0 ? 'dangerSoft' : 'successSoft'}
+                      icon={'leaf'}
+                    />
+                  ) : null}
+                  {attributionText ? (
+                    <Badge
+                      label={attributionText}
+                      color={'purple'}
+                      soft={'purpleSoft'}
+                      icon={'shield-checkmark-outline'}
+                    />
+                  ) : null}
                   <Badge
                     label={status.label}
                     color={status.color}

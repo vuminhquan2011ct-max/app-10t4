@@ -23,6 +23,8 @@ import type {
   ClassResource,
   ClassTask,
   DriveAttachment,
+  DutyDayLog,
+  DutyStudentRecord,
   Entry,
   FeedbackCategory,
   FeedbackItem,
@@ -81,6 +83,7 @@ function getLegacyTemplate(): PersistedState {
       students: [],
       entries: [],
       attendance: {},
+      dutyLogs: {},
       fundPaid: {},
       kudos: [],
       activityLog: [],
@@ -137,6 +140,7 @@ export function stripForSharedSync(state: PersistedState): Record<string, unknow
       note: null,
     })),
     registeredTeachers: state.registeredTeachers ?? [],
+    dutyLogs: state.dutyLogs ?? {},
     deletedStudentIds: state.deletedStudentIds ?? {},
     deletedTeacherIds: state.deletedTeacherIds ?? {},
     deletedDriveFileIds: state.deletedDriveFileIds ?? {},
@@ -431,6 +435,9 @@ function mergeAnnouncements(
     } else {
       byContent.set(key, {
         ...existing,
+        department: existing.department ?? item.department ?? null,
+        authorPosition: existing.authorPosition ?? item.authorPosition ?? null,
+        eventId: existing.eventId ?? item.eventId ?? null,
         likes: Math.max(existing.likes ?? 0, item.likes ?? 0),
         attachments: mergeAttachments(existing.attachments, item.attachments, deletedDriveFileIds),
       });
@@ -527,13 +534,20 @@ function mergeTasks(
   const byContent = new Map<string, ClassTask>();
   for (const item of byId.values()) {
     if (isItemTombstoned(deletedItemIds, item.id)) continue;
-    const key = `${normText(item.title)}|${normText(item.subject)}|${normText(item.author)}`;
+    const key = `${item.itemKind ?? 'task'}|${item.department ?? ''}|${normText(item.title)}|${normText(item.subject)}|${normText(item.author)}`;
     const existing = byContent.get(key);
     if (!existing) {
       byContent.set(key, item);
     } else {
       byContent.set(key, {
         ...existing,
+        department: existing.department ?? item.department ?? null,
+        itemKind: existing.itemKind ?? item.itemKind,
+        eventDate: existing.eventDate ?? item.eventDate ?? null,
+        location: existing.location ?? item.location ?? null,
+        assignedOfficerRole: existing.assignedOfficerRole ?? item.assignedOfficerRole ?? null,
+        authorName: existing.authorName ?? item.authorName ?? null,
+        authorPosition: existing.authorPosition ?? item.authorPosition ?? null,
         attachments: mergeAttachments(existing.attachments, item.attachments, deletedDriveFileIds),
       });
     }
@@ -756,6 +770,108 @@ function mergeAttendance(
   return out;
 }
 
+function mergeDutyLogs(
+  remoteLogs: Record<string, DutyDayLog>,
+  localLogs: Record<string, DutyDayLog>,
+  deletedStudentIds: Record<string, string>,
+  prefer: 'local' | 'remote',
+): Record<string, DutyDayLog> {
+  const out: Record<string, DutyDayLog> = {};
+  const dates = new Set([...Object.keys(remoteLogs), ...Object.keys(localLogs)]);
+
+  for (const date of dates) {
+    const rDay = remoteLogs[date];
+    const lDay = localLogs[date];
+    if (!rDay && !lDay) continue;
+
+    let assignedGroup: string | null;
+    let note: string | null;
+    let assignedBy: string | null;
+    let updatedAt: string;
+    let candidateIds: string[];
+    const mergedRecords: Record<string, DutyStudentRecord> = {};
+
+    if (rDay && lDay) {
+      const lTime = ts(lDay.updatedAt);
+      const rTime = ts(rDay.updatedAt);
+      const isStrictlyDifferent = lTime !== rTime;
+      const localDayNewer = lTime > rTime || (lTime === rTime && prefer === 'local');
+      const primaryDay = localDayNewer ? lDay : rDay;
+      const secondaryDay = localDayNewer ? rDay : lDay;
+      const primaryTime = localDayNewer ? lTime : rTime;
+
+      updatedAt = primaryDay.updatedAt || secondaryDay.updatedAt;
+      assignedGroup = isStrictlyDifferent
+        ? (primaryDay.assignedGroup ?? null)
+        : (primaryDay.assignedGroup ?? secondaryDay.assignedGroup ?? null);
+      note = isStrictlyDifferent
+        ? (primaryDay.note ?? null)
+        : (primaryDay.note ?? secondaryDay.note ?? null);
+      assignedBy = primaryDay.assignedBy ?? secondaryDay.assignedBy ?? null;
+
+      const idSet = new Set<string>(primaryDay.assignedStudentIds ?? []);
+      if (!isStrictlyDifferent) {
+        for (const sid of secondaryDay.assignedStudentIds ?? []) {
+          if (sid) idSet.add(sid);
+        }
+      } else {
+        // Retain any student from secondaryDay whose evaluation happened strictly after primaryDay.updatedAt.
+        for (const [sid, rec] of Object.entries(secondaryDay.records ?? {})) {
+          if (sid && ts(rec.evaluatedAt) > primaryTime) {
+            idSet.add(sid);
+          }
+        }
+      }
+      candidateIds = Array.from(idSet);
+
+      for (const sid of candidateIds) {
+        const lRec = lDay.records?.[sid];
+        const rRec = rDay.records?.[sid];
+        if (lRec && rRec) {
+          const lRecTime = ts(lRec.evaluatedAt) || lTime;
+          const rRecTime = ts(rRec.evaluatedAt) || rTime;
+          const pickLocal = lRecTime > rRecTime || (lRecTime === rRecTime && prefer === 'local');
+          mergedRecords[sid] = pickLocal ? lRec : rRec;
+        } else if (lRec || rRec) {
+          mergedRecords[sid] = (lRec ?? rRec)!;
+        }
+      }
+    } else {
+      const only = (lDay ?? rDay)!;
+      updatedAt = only.updatedAt;
+      assignedGroup = only.assignedGroup ?? null;
+      note = only.note ?? null;
+      assignedBy = only.assignedBy ?? null;
+      candidateIds = Array.from(new Set(only.assignedStudentIds ?? []));
+      for (const [sid, rec] of Object.entries(only.records ?? {})) {
+        if (!candidateIds.includes(sid)) candidateIds.push(sid);
+        mergedRecords[sid] = rec;
+      }
+    }
+
+    const liveIds = candidateIds.filter((sid) => !isTombstoned(deletedStudentIds, sid, updatedAt));
+    const liveIdSet = new Set(liveIds);
+    const liveRecords: Record<string, DutyStudentRecord> = {};
+    for (const [sid, rec] of Object.entries(mergedRecords)) {
+      if (!liveIdSet.has(sid)) continue;
+      if (isTombstoned(deletedStudentIds, sid, rec.evaluatedAt || updatedAt)) continue;
+      liveRecords[sid] = rec;
+    }
+
+    out[date] = {
+      date,
+      assignedGroup,
+      assignedStudentIds: liveIds,
+      records: liveRecords,
+      note,
+      assignedBy,
+      updatedAt,
+    };
+  }
+
+  return out;
+}
+
 /**
  * Deterministic, non-destructive merge of remote and local `PersistedState`.
  *
@@ -820,6 +936,19 @@ export function mergeClassStates(
   );
   const activityLog = mergeActivityLog(r.activityLog, l.activityLog);
   const attendance = mergeAttendance(r.attendance, l.attendance, deletedStudentIds, prefer);
+  const dutyLogs = mergeDutyLogs(r.dutyLogs ?? {}, l.dutyLogs ?? {}, deletedStudentIds, prefer);
+
+  // Reconcile duty_diligence entries against the winning `dutyLogs` so concurrent
+  // grading on two devices never leaves an orphaned duplicate entry, and unassigning
+  // or resetting a student to `pending` drops any stale duty_diligence entry.
+  const reconciledEntries = entries.filter((entry) => {
+    if (entry.source !== 'duty_diligence') return true;
+    const dayLog = dutyLogs[entry.date];
+    if (!dayLog) return true;
+    const rec = dayLog.records?.[entry.studentId];
+    if (!rec || rec.status === 'pending' || !rec.entryId) return false;
+    return rec.entryId === entry.id;
+  });
 
   const fundPaidRaw =
     prefer === 'local'
@@ -872,7 +1001,7 @@ export function mergeClassStates(
     version: 1,
     classInfo,
     students,
-    entries,
+    entries: reconciledEntries,
     role: l.role,
     currentStudentId: l.currentStudentId,
     attendance,
@@ -883,6 +1012,7 @@ export function mergeClassStates(
     fundCycleAmount,
     schedule,
     dutyRoster,
+    dutyLogs,
     polls,
     tasks,
     feedback,
@@ -1136,11 +1266,22 @@ export async function removeRegisteredMemberFromCloud(
         for (const [k, sid] of Object.entries(base.seating.seats)) {
           if (sid !== id) nextSeats[k] = sid;
         }
+        const nextDutyLogs: Record<string, DutyDayLog> = {};
+        for (const [dateKey, dayLog] of Object.entries(base.dutyLogs ?? {})) {
+          const nextRecords = { ...dayLog.records };
+          delete nextRecords[id];
+          nextDutyLogs[dateKey] = {
+            ...dayLog,
+            assignedStudentIds: dayLog.assignedStudentIds.filter((sid) => sid !== id),
+            records: nextRecords,
+          };
+        }
         nextState = {
           ...base,
           students: base.students.filter((s) => s.id !== id),
           entries: base.entries.filter((e) => e.studentId !== id),
           kudos: base.kudos.filter((k) => k.toStudentId !== id),
+          dutyLogs: nextDutyLogs,
           fundPaid: nextPaid,
           seating: { ...base.seating, seats: nextSeats, updatedAt: now },
           deletedStudentIds: { ...(base.deletedStudentIds ?? {}), [id]: now },

@@ -19,9 +19,14 @@ import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { stripVietnamese } from '@/lib/intelligence';
+import { OFFICER_POSITIONS, getOfficerPositionMeta } from '@/lib/officer-roles';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
+
+function softToneOf(color: 'accent' | 'success' | 'warning' | 'danger' | 'purple'): ThemeColor {
+  return `${color}Soft` as ThemeColor;
+}
 
 type SortKey = 'points' | 'name' | 'entries';
 type SmartFilter = 'all' | 'officers' | 'unpaid' | 'zero';
@@ -81,6 +86,8 @@ export default function StudentsScreen() {
     canViewAll,
     canEditClass,
     canAddStudents,
+    canAssignPositions,
+    assignStudentPosition,
     quickReward,
     pullNow,
   } = useClassStore();
@@ -91,6 +98,30 @@ export default function StudentsScreen() {
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [smartFilter, setSmartFilter] = useState<SmartFilter>('all');
   const [sortBy, setSortBy] = useState<SortKey>('points');
+  const [positionRowId, setPositionRowId] = useState<string | null>(null);
+  const [savingPositionId, setSavingPositionId] = useState<string | null>(null);
+
+  const handleAssignPosition = async (
+    studentId: string,
+    studentName: string,
+    nextPosition: string | null,
+  ) => {
+    if (!canAssignPositions || savingPositionId) return;
+    setSavingPositionId(studentId);
+    try {
+      await assignStudentPosition(studentId, nextPosition);
+      showToast(
+        nextPosition
+          ? `Đã phân công ${studentName} giữ chức vụ ${nextPosition}!`
+          : `Đã hủy chức vụ của ${studentName} (về thành viên thường)`,
+        nextPosition ? 'success' : 'info',
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể cập nhật chức vụ', 'danger');
+    } finally {
+      setSavingPositionId(null);
+    }
+  };
 
   const publicStudentRoster = useMemo(() => {
     const q = stripVietnamese(query);
@@ -414,6 +445,14 @@ export default function StudentsScreen() {
                         <Text style={styles.myMetaChipText}>{mySeat.label}</Text>
                       </View>
                     ) : null}
+                    {myAtt && myAtt.dutyTotal > 0 ? (
+                      <View style={styles.myMetaChip}>
+                        <Ionicons name="leaf-outline" size={11} color="#A7F3D0" />
+                        <Text style={styles.myMetaChipText}>
+                          {`Trực nhật: ${myAtt.dutyCompleted} HT · ${myAtt.dutyMissed} chưa HT`}
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               </View>
@@ -439,9 +478,12 @@ export default function StudentsScreen() {
                     <Ionicons name="checkmark-done" size={13} color="#A7F3D0" />
                   </View>
                   <Text style={styles.myStatVal}>
-                    {myAtt?.rate !== null && myAtt?.rate !== undefined ? `${myAtt.rate}%` : '--'}
+                    {(myAtt?.diligenceScore ?? myAtt?.rate) !== null &&
+                    (myAtt?.diligenceScore ?? myAtt?.rate) !== undefined
+                      ? `${myAtt?.diligenceScore ?? myAtt?.rate}%`
+                      : '--'}
                   </Text>
-                  <Text style={styles.myStatLab}>Chuyên cần</Text>
+                  <Text style={styles.myStatLab}>Điểm CC</Text>
                 </View>
                 <View style={styles.myStatBox}>
                   <View style={styles.myStatIconCircle}>
@@ -858,12 +900,16 @@ export default function StudentsScreen() {
           const progressPct =
             topPoints > 0 ? Math.min(100, Math.max(8, Math.round((row.points / topPoints) * 100))) : 8;
           const isPaid = Boolean(fundPaid[row.student.id]);
+          const diligence = att.diligenceScore ?? att.rate;
+          const posMeta = getOfficerPositionMeta(row.student.position);
+          const posExpanded = canAssignPositions && positionRowId === row.student.id;
+          const isSavingPos = savingPositionId === row.student.id;
 
           return (
             <FadeIn key={row.student.id} index={Math.min(i + 4, 10)}>
               <Card
                 style={[
-                  styles.row,
+                  styles.rowCard,
                   medal && {
                     borderColor: theme[medal.color],
                     borderWidth: 1.5,
@@ -872,159 +918,261 @@ export default function StudentsScreen() {
                 onPress={() =>
                   router.push({ pathname: '/student/[id]', params: { id: row.student.id } } as never)
                 }>
-                {/* Left Avatar + Glowing Medal Rank Badge */}
-                <View style={styles.avatarWrap}>
-                  <Avatar name={row.student.name} size={54} ring={Boolean(medal)} />
-                  <View
-                    style={[
-                      styles.rankBadge,
-                      medal ? styles.rankBadgeMedal : null,
-                      {
-                        backgroundColor: medal ? theme[medal.soft] : theme.backgroundElement,
-                        borderColor: medal ? theme[medal.color] : theme.card,
-                        shadowColor: medal ? theme[medal.color] : 'transparent',
-                      },
-                    ]}>
-                    {medal ? (
-                      <View style={styles.medalInner}>
-                        <Ionicons name={medal.icon} size={10} color={theme[medal.color]} />
-                        <Text style={[styles.medalRankNum, { color: theme[medal.color] }]}>
-                          {row.rank}
-                        </Text>
-                      </View>
-                    ) : (
-                      <Text style={[styles.rankText, { color: theme.textSecondary }]}>
-                        #{row.rank}
-                      </Text>
-                    )}
-                  </View>
-                </View>
-
-                {/* Center Body: Name, Group & Officer Pills, Progress Bar */}
-                <View style={styles.body}>
-                  <View style={styles.nameLine}>
-                    <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
-                      {row.student.name}
-                    </Text>
-                    {medal ? (
-                      <View
-                        style={[
-                          styles.topCrownPill,
-                          { backgroundColor: theme[medal.soft], borderColor: theme[medal.color] },
-                        ]}>
-                        <Text style={[styles.topCrownText, { color: theme[medal.color] }]}>
-                          {medal.label}
-                        </Text>
-                      </View>
-                    ) : null}
-                  </View>
-
-                  <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
-                    {[
-                      `ID: ${row.student.code}`,
-                      seat ? `Bàn H${seat.row}·G${seat.col}` : null,
-                      `${stats.total} ghi nhận`,
-                      isPaid ? 'Đã đóng quỹ' : null,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </Text>
-
-                  {/* Group & Officer Pills */}
-                  <View style={styles.metaBadges}>
-                    <Badge
-                      label={row.student.group?.trim() || 'Chưa phân tổ'}
-                      color={'accentText'}
-                      soft={'accentSoft'}
-                    />
-                    {row.student.position?.trim() ? (
-                      <Badge
-                        label={row.student.position.trim()}
-                        color={'purple'}
-                        soft={'purpleSoft'}
-                        icon={'star'}
-                      />
-                    ) : null}
-                    {att.rate !== null ? (
-                      <Badge
-                        label={`CC ${att.rate}%`}
-                        color={att.rate >= 90 ? 'success' : 'warning'}
-                        soft={att.rate >= 90 ? 'successSoft' : 'warningSoft'}
-                      />
-                    ) : null}
-                  </View>
-
-                  {/* Smooth Gradient Progress Bar */}
-                  <View
-                    style={[
-                      styles.progressTrack,
-                      { backgroundColor: theme.backgroundElement },
-                    ]}>
-                    <LinearGradient
-                      colors={
-                        medal
-                          ? [theme[medal.color], gradient[1]]
-                          : [gradient[0], gradient[1]]
-                      }
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 0 }}
-                      style={[styles.progressFill, { width: `${progressPct}%` }]}
-                    />
-                  </View>
-                </View>
-
-                {/* Right Column: Score Pill & Polished +2đ Quick Reward Pill */}
-                <View style={styles.rightCol}>
-                  <View
-                    style={[
-                      styles.pointsPill,
-                      {
-                        backgroundColor: medal ? theme[medal.soft] : theme.accentSoft,
-                        borderColor: medal ? theme[medal.color] : theme.border,
-                      },
-                    ]}>
-                    <Text
+                <View style={styles.row}>
+                  {/* Left Avatar + Glowing Medal Rank Badge */}
+                  <View style={styles.avatarWrap}>
+                    <Avatar name={row.student.name} size={54} ring={Boolean(medal)} />
+                    <View
                       style={[
-                        styles.points,
-                        { color: medal ? theme[medal.color] : theme.accentText },
-                      ]}>
-                      {row.points}
-                    </Text>
-                    <Text
-                      style={[
-                        styles.pointsUnit,
-                        { color: medal ? theme[medal.color] : theme.accentText },
-                      ]}>
-                      điểm
-                    </Text>
-                  </View>
-                  {canEditClass ? (
-                    <Pressable
-                      onPress={() => {
-                        quickReward(
-                          row.student.id,
-                          'Phát biểu & tích cực xây dựng bài',
-                          2,
-                          'study',
-                          'activity',
-                          'class',
-                        );
-                        showToast(`Đã thưởng nhanh +2đ cho ${row.student.name}! ⚡`);
-                      }}
-                      hitSlop={6}
-                      style={({ pressed }) => [
-                        styles.quickPlus,
+                        styles.rankBadge,
+                        medal ? styles.rankBadgeMedal : null,
                         {
-                          backgroundColor: theme.successSoft,
-                          borderColor: theme.success,
+                          backgroundColor: medal ? theme[medal.soft] : theme.backgroundElement,
+                          borderColor: medal ? theme[medal.color] : theme.card,
+                          shadowColor: medal ? theme[medal.color] : 'transparent',
                         },
-                        pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
                       ]}>
-                      <Ionicons name="flash" size={10} color={theme.success} />
-                      <Text style={[styles.quickPlusText, { color: theme.success }]}>+2đ</Text>
-                    </Pressable>
-                  ) : null}
+                      {medal ? (
+                        <View style={styles.medalInner}>
+                          <Ionicons name={medal.icon} size={10} color={theme[medal.color]} />
+                          <Text style={[styles.medalRankNum, { color: theme[medal.color] }]}>
+                            {row.rank}
+                          </Text>
+                        </View>
+                      ) : (
+                        <Text style={[styles.rankText, { color: theme.textSecondary }]}>
+                          #{row.rank}
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+
+                  {/* Center Body: Name, Group & Officer Pills, Progress Bar */}
+                  <View style={styles.body}>
+                    <View style={styles.nameLine}>
+                      <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
+                        {row.student.name}
+                      </Text>
+                      {medal ? (
+                        <View
+                          style={[
+                            styles.topCrownPill,
+                            { backgroundColor: theme[medal.soft], borderColor: theme[medal.color] },
+                          ]}>
+                          <Text style={[styles.topCrownText, { color: theme[medal.color] }]}>
+                            {medal.label}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+
+                    <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
+                      {[
+                        `ID: ${row.student.code}`,
+                        seat ? `Bàn H${seat.row}·G${seat.col}` : null,
+                        `${stats.total} ghi nhận`,
+                        isPaid ? 'Đã đóng quỹ' : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Text>
+
+                    {/* Group, Officer & Diligence Pills */}
+                    <View style={styles.metaBadges}>
+                      <Badge
+                        label={row.student.group?.trim() || 'Chưa phân tổ'}
+                        color={'accentText'}
+                        soft={'accentSoft'}
+                      />
+                      {row.student.position?.trim() ? (
+                        <Badge
+                          label={row.student.position.trim()}
+                          color={posMeta?.color ?? 'purple'}
+                          soft={posMeta ? softToneOf(posMeta.color) : 'purpleSoft'}
+                          icon={(posMeta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap}
+                        />
+                      ) : null}
+                      {diligence !== null ? (
+                        <Badge
+                          label={`CC ${diligence}%`}
+                          color={diligence >= 90 ? 'success' : diligence >= 75 ? 'warning' : 'danger'}
+                          soft={
+                            diligence >= 90
+                              ? 'successSoft'
+                              : diligence >= 75
+                                ? 'warningSoft'
+                                : 'dangerSoft'
+                          }
+                        />
+                      ) : null}
+                      {att.dutyTotal > 0 ? (
+                        <Badge
+                          label={`TN ${att.dutyCompleted}/${att.dutyTotal}`}
+                          color={att.dutyMissed > 0 ? 'warning' : 'success'}
+                          soft={att.dutyMissed > 0 ? 'warningSoft' : 'successSoft'}
+                          icon={'leaf-outline'}
+                        />
+                      ) : null}
+                    </View>
+
+                    {/* Smooth Gradient Progress Bar */}
+                    <View
+                      style={[
+                        styles.progressTrack,
+                        { backgroundColor: theme.backgroundElement },
+                      ]}>
+                      <LinearGradient
+                        colors={
+                          medal
+                            ? [theme[medal.color], gradient[1]]
+                            : [gradient[0], gradient[1]]
+                        }
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 0 }}
+                        style={[styles.progressFill, { width: `${progressPct}%` }]}
+                      />
+                    </View>
+                  </View>
+
+                  {/* Right Column: Score Pill, +2đ Quick Reward & GVCN Quick Position Toggle */}
+                  <View style={styles.rightCol}>
+                    <View
+                      style={[
+                        styles.pointsPill,
+                        {
+                          backgroundColor: medal ? theme[medal.soft] : theme.accentSoft,
+                          borderColor: medal ? theme[medal.color] : theme.border,
+                        },
+                      ]}>
+                      <Text
+                        style={[
+                          styles.points,
+                          { color: medal ? theme[medal.color] : theme.accentText },
+                        ]}>
+                        {row.points}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.pointsUnit,
+                          { color: medal ? theme[medal.color] : theme.accentText },
+                        ]}>
+                        điểm
+                      </Text>
+                    </View>
+                    {canEditClass ? (
+                      <Pressable
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          quickReward(
+                            row.student.id,
+                            'Phát biểu & tích cực xây dựng bài',
+                            2,
+                            'study',
+                            'activity',
+                            'class',
+                          );
+                          showToast(`Đã thưởng nhanh +2đ cho ${row.student.name}! ⚡`);
+                        }}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Thưởng nhanh +2 điểm cho ${row.student.name}`}
+                        style={({ pressed }) => [
+                          styles.quickPlus,
+                          {
+                            backgroundColor: theme.successSoft,
+                            borderColor: theme.success,
+                          },
+                          pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
+                        ]}>
+                        <Ionicons name="flash" size={10} color={theme.success} />
+                        <Text style={[styles.quickPlusText, { color: theme.success }]}>+2đ</Text>
+                      </Pressable>
+                    ) : null}
+                    {canAssignPositions ? (
+                      <Pressable
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          setPositionRowId((cur) =>
+                            cur === row.student.id ? null : row.student.id,
+                          );
+                        }}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Phân công chức vụ cho ${row.student.name}`}
+                        style={({ pressed }) => [
+                          styles.quickPlus,
+                          {
+                            backgroundColor: posExpanded ? theme.purple : theme.purpleSoft,
+                            borderColor: theme.purple,
+                          },
+                          pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
+                        ]}>
+                        <Ionicons
+                          name={posExpanded ? 'chevron-up' : 'shield-checkmark-outline'}
+                          size={10}
+                          color={posExpanded ? '#FFFFFF' : theme.purple}
+                        />
+                        <Text
+                          style={[
+                            styles.quickPlusText,
+                            { color: posExpanded ? '#FFFFFF' : theme.purple },
+                          ]}>
+                          Chức vụ
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 </View>
+
+                {/* Inline GVCN-Only Quick Officer Assignment / Revocation Drawer */}
+                {posExpanded ? (
+                  <Pressable
+                    onPress={(e) => e.stopPropagation?.()}
+                    style={[styles.posDrawer, { borderColor: theme.border }]}>
+                    <Text style={[styles.posDrawerLabel, { color: theme.textSecondary }]}>
+                      Phân công / Hủy chức vụ Ban cán sự (Chỉ GVCN)
+                    </Text>
+                    <View style={styles.posWrapChips}>
+                      {OFFICER_POSITIONS.map((opt) => (
+                        <Chip
+                          key={opt.key}
+                          label={opt.label}
+                          icon={opt.icon as keyof typeof Ionicons.glyphMap}
+                          selected={row.student.position === opt.label}
+                          onPress={() =>
+                            void handleAssignPosition(row.student.id, row.student.name, opt.label)
+                          }
+                        />
+                      ))}
+                    </View>
+                    {posMeta ? (
+                      <Text style={{ color: theme.textMuted, fontSize: 11.5, lineHeight: 16 }}>
+                        {posMeta.summary}
+                      </Text>
+                    ) : null}
+                    <View style={styles.posDrawerBtns}>
+                      {row.student.position?.trim() ? (
+                        <Button
+                          label={isSavingPos ? 'Đang lưu...' : 'Hủy chức vụ'}
+                          variant={'danger'}
+                          size={'sm'}
+                          icon={'close-circle-outline'}
+                          disabled={isSavingPos}
+                          style={styles.flex}
+                          onPress={() =>
+                            void handleAssignPosition(row.student.id, row.student.name, null)
+                          }
+                        />
+                      ) : null}
+                      <Button
+                        label={'Đóng'}
+                        variant={'ghost'}
+                        size={'sm'}
+                        onPress={() => setPositionRowId(null)}
+                      />
+                    </View>
+                  </Pressable>
+                ) : null}
               </Card>
             </FadeIn>
           );
@@ -1036,6 +1184,20 @@ export default function StudentsScreen() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  rowCard: { gap: Spacing.two + 2 },
+  posDrawer: {
+    gap: Spacing.two,
+    paddingTop: Spacing.two + 2,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  posDrawerLabel: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  posWrapChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  posDrawerBtns: { flexDirection: 'row', gap: Spacing.two },
   ctaRow: { flexDirection: 'row', gap: Spacing.two },
   chips: { gap: Spacing.two, paddingRight: Spacing.two },
   bentoStrip: {

@@ -19,10 +19,11 @@ import { Screen } from '@/components/ui/screen';
 import { SectionHeader } from '@/components/ui/section-header';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
-import { Radius, Spacing } from '@/constants/theme';
+import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
 import { MEMBER_ROLES, MEMBER_STATUSES } from '@/constants/utilities-meta';
 import { useTheme } from '@/hooks/use-theme';
 import { stripVietnamese } from '@/lib/intelligence';
+import { OFFICER_POSITIONS, getOfficerPositionMeta } from '@/lib/officer-roles';
 import {
   MIN_STUDENT_PASSWORD_LENGTH,
   loadStudentAccounts,
@@ -42,16 +43,22 @@ type AccountTab = 'teachers' | 'students';
 
 const ROLE_ORDER: MemberRole[] = ['teacher', 'editor', 'student'];
 
+function softToneOf(color: 'accent' | 'success' | 'warning' | 'danger' | 'purple'): ThemeColor {
+  return `${color}Soft` as ThemeColor;
+}
+
 export default function MembersScreen() {
   const auth = useAuth();
   const {
     isTeacher,
+    canAssignPositions,
     students,
     registeredMembers,
     registeredTeachers,
     activityLog,
     statsOfStudent,
     updateStudent,
+    assignStudentPosition,
     logActivity,
     pullNow,
   } = useClassStore();
@@ -66,11 +73,13 @@ export default function MembersScreen() {
   // Local account management tabs (GVCN only)
   const [accountTab, setAccountTab] = useState<AccountTab>('students');
 
-  // Local student account credentials management
+  // Local student account credentials & officer position management
   const [studentAccounts, setStudentAccounts] = useState<StudentAccountRecord[]>([]);
   const [accountQuery, setAccountQuery] = useState('');
   const [resetTargetId, setResetTargetId] = useState<string | null>(null);
   const [resetPassDraft, setResetPassDraft] = useState('');
+  const [positionTargetId, setPositionTargetId] = useState<string | null>(null);
+  const [savingPositionId, setSavingPositionId] = useState<string | null>(null);
 
   // Local teacher account credentials management
   const [teacherAccounts, setTeacherAccounts] = useState<TeacherAccountRecord[]>([]);
@@ -163,10 +172,33 @@ export default function MembersScreen() {
     return [...students]
       .filter((s) => {
         if (!q) return true;
-        return stripVietnamese(`${s.name} ${s.code} ${s.group ?? ''}`).includes(q);
+        return stripVietnamese(`${s.name} ${s.code} ${s.group ?? ''} ${s.position ?? ''}`).includes(q);
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.code.localeCompare(b.code, 'vi'));
   }, [students, accountQuery]);
+
+  const handleAssignPosition = async (
+    studentId: string,
+    studentName: string,
+    nextPosition: string | null,
+  ) => {
+    if (!canAssignPositions || savingPositionId) return;
+    setSavingPositionId(studentId);
+    try {
+      await assignStudentPosition(studentId, nextPosition);
+      await refreshAccounts();
+      showToast(
+        nextPosition
+          ? `Đã phân công ${studentName} giữ chức vụ ${nextPosition}!`
+          : `Đã hủy chức vụ của ${studentName} (về thành viên thường)`,
+        nextPosition ? 'success' : 'info',
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể cập nhật chức vụ', 'danger');
+    } finally {
+      setSavingPositionId(null);
+    }
+  };
 
   const filteredTeachers = useMemo(() => {
     const q = stripVietnamese(teacherQuery);
@@ -591,6 +623,9 @@ export default function MembersScreen() {
                   const acc = accountByStudentId.get(stu.id);
                   const stats = statsOfStudent(stu.id);
                   const isResetting = resetTargetId === stu.id;
+                  const isEditingPos = positionTargetId === stu.id;
+                  const posMeta = getOfficerPositionMeta(stu.position);
+                  const isSavingPos = savingPositionId === stu.id;
 
                   return (
                     <FadeIn key={stu.id} index={Math.min(idx + 1, 8)}>
@@ -609,6 +644,16 @@ export default function MembersScreen() {
                               ].join(' · ')}
                             </Text>
                             <View style={styles.badgeRow}>
+                              {stu.position?.trim() ? (
+                                <Badge
+                                  label={stu.position.trim()}
+                                  color={posMeta?.color ?? 'purple'}
+                                  soft={posMeta ? softToneOf(posMeta.color) : 'purpleSoft'}
+                                  icon={
+                                    (posMeta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap
+                                  }
+                                />
+                              ) : null}
                               <Badge
                                 label={acc ? 'Đã đặt mật khẩu 🔐' : 'Chưa đặt mật khẩu'}
                                 color={acc ? 'success' : 'warning'}
@@ -616,6 +661,13 @@ export default function MembersScreen() {
                                 icon={acc ? 'key' : 'alert-circle-outline'}
                               />
                             </View>
+                            {posMeta ? (
+                              <Text
+                                style={{ color: theme.textMuted, fontSize: 11, marginTop: 4 }}
+                                numberOfLines={2}>
+                                {posMeta.summary}
+                              </Text>
+                            ) : null}
                           </View>
                         </View>
 
@@ -648,21 +700,76 @@ export default function MembersScreen() {
                               />
                             </View>
                           </View>
+                        ) : isEditingPos && canAssignPositions ? (
+                          <View style={[styles.panel, { borderColor: theme.border }]}>
+                            <Text style={[styles.subLabel, { color: theme.textSecondary }]}>
+                              Phân công / Đổi chức vụ Ban cán sự (Chỉ GVCN)
+                            </Text>
+                            <View style={styles.wrapChips}>
+                              {OFFICER_POSITIONS.map((opt) => (
+                                <Chip
+                                  key={opt.key}
+                                  label={opt.label}
+                                  icon={opt.icon as keyof typeof Ionicons.glyphMap}
+                                  selected={stu.position === opt.label}
+                                  onPress={() => void handleAssignPosition(stu.id, stu.name, opt.label)}
+                                />
+                              ))}
+                            </View>
+                            {posMeta ? (
+                              <Text style={{ color: theme.textSecondary, fontSize: 11.5, lineHeight: 17 }}>
+                                {`Quyền hạn hiện tại: ${posMeta.permissions.join(' · ')}`}
+                              </Text>
+                            ) : null}
+                            <View style={styles.quickRow}>
+                              {stu.position?.trim() ? (
+                                <Button
+                                  label={isSavingPos ? 'Đang lưu...' : 'Hủy chức vụ'}
+                                  variant={'danger'}
+                                  size={'sm'}
+                                  icon={'close-circle-outline'}
+                                  disabled={isSavingPos}
+                                  style={styles.flex}
+                                  onPress={() => void handleAssignPosition(stu.id, stu.name, null)}
+                                />
+                              ) : null}
+                              <Button
+                                label={'Đóng'}
+                                variant={'ghost'}
+                                size={'sm'}
+                                onPress={() => setPositionTargetId(null)}
+                              />
+                            </View>
+                          </View>
                         ) : (
                           <View style={styles.quickRow}>
+                            {canAssignPositions ? (
+                              <Button
+                                label={stu.position?.trim() ? 'Đổi chức vụ' : 'Phân công'}
+                                variant={'soft'}
+                                size={'sm'}
+                                icon={'shield-checkmark-outline'}
+                                style={styles.flex}
+                                onPress={() => {
+                                  setResetTargetId(null);
+                                  setPositionTargetId(stu.id);
+                                }}
+                              />
+                            ) : null}
                             <Button
-                              label={acc ? 'Đặt lại mật khẩu' : 'Đặt mật khẩu'}
+                              label={acc ? 'Đặt lại MK' : 'Đặt MK'}
                               variant={'soft'}
                               size={'sm'}
                               icon={'key-outline'}
                               style={styles.flex}
                               onPress={() => {
+                                setPositionTargetId(null);
                                 setResetTargetId(stu.id);
                                 setResetPassDraft('');
                               }}
                             />
                             <Button
-                              label={'Xem trang'}
+                              label={'Hồ sơ'}
                               variant={'ghost'}
                               size={'sm'}
                               icon={'person-circle-outline'}
@@ -887,6 +994,53 @@ export default function MembersScreen() {
                           ))}
                         </ScrollView>
 
+                        {/* Officer Position Assignment & Revocation for Linked Student (GVCN Only) */}
+                        {canAssignPositions && linkedStudent ? (
+                          <>
+                            <Text style={[styles.subLabel, { color: theme.textSecondary }]}>
+                              {'Chức vụ Ban cán sự (Chỉ GVCN): ' +
+                                (linkedStudent.position?.trim() || 'Thành viên thường')}
+                            </Text>
+                            <View style={styles.wrapChips}>
+                              {OFFICER_POSITIONS.map((opt) => (
+                                <Chip
+                                  key={opt.key}
+                                  label={opt.label}
+                                  icon={opt.icon as keyof typeof Ionicons.glyphMap}
+                                  selected={linkedStudent.position === opt.label}
+                                  onPress={() =>
+                                    void handleAssignPosition(
+                                      linkedStudent.id,
+                                      linkedStudent.name,
+                                      opt.label,
+                                    )
+                                  }
+                                />
+                              ))}
+                            </View>
+                            {linkedStudent.position?.trim() ? (
+                              <Button
+                                label={
+                                  savingPositionId === linkedStudent.id
+                                    ? 'Đang lưu...'
+                                    : 'Hủy chức vụ (Về thành viên thường)'
+                                }
+                                size={'sm'}
+                                variant={'danger'}
+                                icon={'close-circle-outline'}
+                                disabled={savingPositionId === linkedStudent.id}
+                                onPress={() =>
+                                  void handleAssignPosition(
+                                    linkedStudent.id,
+                                    linkedStudent.name,
+                                    null,
+                                  )
+                                }
+                              />
+                            ) : null}
+                          </>
+                        ) : null}
+
                         {/* Block / Unblock */}
                         <View style={styles.quickRow}>
                           {member.status !== 'approved' ? (
@@ -985,6 +1139,7 @@ const styles = StyleSheet.create({
   iconBox: { width: 44, height: 44, borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center' },
   title: { fontSize: 17, fontWeight: '900' },
   chips: { gap: Spacing.two, paddingRight: Spacing.two },
+  wrapChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   memberCard: { gap: Spacing.three },
   memberHead: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
   memberName: { fontSize: 15, fontWeight: '800' },

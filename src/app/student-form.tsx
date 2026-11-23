@@ -44,6 +44,7 @@ export default function StudentFormScreen() {
     checkLoginIdTaken,
     suggestNextStudentCode,
     isTeacher,
+    canAssignPositions,
     canViewAll,
     canEditClass,
     canAddStudents,
@@ -163,7 +164,7 @@ export default function StudentFormScreen() {
       gender,
       birthDate,
       group,
-      position,
+      ...(canAssignPositions ? { position: position.trim() || null } : {}),
     };
     let targetId = existing?.id ?? '';
 
@@ -478,13 +479,29 @@ export default function StudentFormScreen() {
             value={group || null}
             onChange={setGroup}
           />
-          <OptionPicker
-            label={'Chức vụ'}
-            layout={'row'}
-            options={POSITION_PRESETS.map((p) => ({ value: p, label: p }))}
-            value={position || null}
-            onChange={(p) => setPosition(position === p ? '' : p)}
-          />
+          {canAssignPositions ? (
+            <View style={styles.fieldGroup}>
+              <OptionPicker
+                label={'Chức vụ Ban cán sự (Chỉ GVCN phân công)'}
+                layout={'row'}
+                options={POSITION_PRESETS.map((p) => ({ value: p, label: p }))}
+                value={position || null}
+                onChange={(p) => setPosition(position === p ? '' : p)}
+              />
+              {position.trim() ? (
+                <Button
+                  label={'Hủy chức vụ (Về thành viên thường)'}
+                  variant={'danger'}
+                  size={'sm'}
+                  icon={'close-circle-outline'}
+                  onPress={() => {
+                    setPosition('');
+                    showToast('Đã chọn hủy chức vụ — bấm Lưu để áp dụng', 'info');
+                  }}
+                />
+              ) : null}
+            </View>
+          ) : null}
 
           {canManagePrivate ? (
             <>

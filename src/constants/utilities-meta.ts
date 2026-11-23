@@ -9,6 +9,7 @@ import type { ThemeColor } from '@/constants/theme';
 import type {
   AnnouncementTag,
   AttendanceStatus,
+  DutyCompletionStatus,
   FeedbackCategory,
   FundCategory,
   KudosSticker,
@@ -65,6 +66,50 @@ export const ATTENDANCE_STATUS_LIST: AttendanceStatus[] = [
   'late',
   'excused',
   'absent',
+];
+
+/* ---------- Duty Completion (Trực nhật -> Điểm chuyên cần) ---------- */
+
+export type DutyStatusMeta = {
+  label: string;
+  short: string;
+  icon: IoniconName;
+  color: ThemeColor;
+  soft: ThemeColor;
+  diligenceDelta: number;
+};
+
+export const DUTY_COMPLETION_STATUSES: Record<DutyCompletionStatus, DutyStatusMeta> = {
+  pending: {
+    label: 'Chờ chấm trực nhật',
+    short: 'Chờ chấm',
+    icon: 'time-outline',
+    color: 'warning',
+    soft: 'warningSoft',
+    diligenceDelta: 0,
+  },
+  completed: {
+    label: 'Hoàn thành trực nhật',
+    short: 'Hoàn thành',
+    icon: 'checkmark-circle',
+    color: 'success',
+    soft: 'successSoft',
+    diligenceDelta: 3,
+  },
+  missed: {
+    label: 'Chưa hoàn thành trực nhật',
+    short: 'Chưa hoàn thành',
+    icon: 'close-circle',
+    color: 'danger',
+    soft: 'dangerSoft',
+    diligenceDelta: -8,
+  },
+};
+
+export const DUTY_COMPLETION_STATUS_LIST: DutyCompletionStatus[] = [
+  'completed',
+  'missed',
+  'pending',
 ];
 
 /* ---------- Announcements ---------- */
@@ -181,6 +226,26 @@ export const TASK_PRIORITIES: Record<
 };
 
 export const TASK_PRIORITY_LIST: TaskPriority[] = ['high', 'medium', 'low'];
+
+export const TASK_ITEM_KINDS: Record<
+  'task' | 'event',
+  { label: string; short: string; icon: IoniconName; color: ThemeColor; soft: ThemeColor }
+> = {
+  task: {
+    label: 'Nhiệm vụ GV giao',
+    short: 'Nhiệm vụ',
+    icon: 'checkbox',
+    color: 'accent',
+    soft: 'accentSoft',
+  },
+  event: {
+    label: 'Sự kiện lớp',
+    short: 'Sự kiện',
+    icon: 'sparkles',
+    color: 'purple',
+    soft: 'purpleSoft',
+  },
+};
 
 /* ---------- Private Feedback ---------- */
 

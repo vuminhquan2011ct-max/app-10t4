@@ -35,6 +35,13 @@ import {
   type DeleteDriveMediaResult,
   type DeleteDriveMediaTarget,
 } from '@/lib/drive-gallery';
+import {
+  canonicalizeOfficerPosition,
+  computeOfficerPermissions,
+  type OfficerDepartmentKey,
+  type OfficerPermissions,
+  type OfficerRoleKey,
+} from '@/lib/officer-roles';
 import { getRealtimeClientId, subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import {
   attendanceStatsFor,
@@ -62,6 +69,7 @@ import {
   subscribeStudentAccountsChanged,
   suggestNextLoginId,
   updateStudentAccountCredentials,
+  updateStudentAccountPosition,
 } from '@/lib/student-accounts';
 import {
   loadTeacherAccounts,
@@ -75,9 +83,12 @@ import type {
   Announcement,
   AttendanceDay,
   AttendanceStats,
+  AttendanceStatus,
   ClassInfo,
   ClassResource,
   ClassTask,
+  DutyCompletionStatus,
+  DutyDayLog,
   DutyRoster,
   Entry,
   FeedbackCategory,
@@ -85,6 +96,7 @@ import type {
   FundTransaction,
   KudosItem,
   Poll,
+  PublicStudentRosterItem,
   RankingRow,
   RegisteredTeacherPublic,
   Role,
@@ -92,6 +104,7 @@ import type {
   SeatingPlan,
   Student,
   StudentStats,
+  Weekday,
 } from '@/types/models';
 
 import { createActions } from './actions';
@@ -179,16 +192,22 @@ type BaseActions = Omit<
   | 'appendStudentsLocal'
   | 'bulkAddStudentsLocal'
   | 'updateStudent'
+  | 'assignStudentPositionLocal'
   | 'addEntry'
   | 'updateEntry'
   | 'removeEntry'
   | 'clearEntryProof'
+  | 'setAttendance'
+  | 'markAllPresent'
   | 'addAnnouncement'
   | 'removeAnnouncement'
   | 'removeAnnouncementAttachment'
   | 'addTask'
   | 'removeTask'
   | 'removeTaskAttachment'
+  | 'updateDutyRoster'
+  | 'assignDutyForDateLocal'
+  | 'markDutyCompletionLocal'
   | 'removeResource'
   | 'removePoll'
   | 'removeKudos'
@@ -208,6 +227,10 @@ type BaseActions = Omit<
   | 'clapKudosLocal'
   | 'addResourceLocal'
 >;
+
+export type ExtendedAnnouncementInput = AnnouncementInput;
+
+export type ExtendedTaskInput = TaskInput;
 
 export type ClassStore = BaseActions & {
   ready: boolean;
@@ -235,6 +258,38 @@ export type ClassStore = BaseActions & {
   subjectName: string | null;
   /** True when user can post & manage announcements (GVCN, GV Bộ môn, Ban cán sự). */
   canPostAnnouncements: boolean;
+  /** Full role-based officer permissions derived from GVCN-assigned `currentStudent.position`. */
+  officerPermissions: OfficerPermissions;
+  officerRoles: OfficerRoleKey[];
+  isOfficer: boolean;
+  officerPositionLabel: string | null;
+  defaultDepartment: OfficerDepartmentKey | null;
+  isClassMonitor: boolean;
+  isSecretary: boolean;
+  isAcademicVP: boolean;
+  isLaborVP: boolean;
+  isDisciplineVP: boolean;
+  isArtsVP: boolean;
+  isSportsVP: boolean;
+  isGroupLeader: boolean;
+  canAssignPositions: boolean;
+  canManageDuty: boolean;
+  canRecordBonus: boolean;
+  canRecordViolation: boolean;
+  canRecordBonusForStudent: (
+    target: { id: string; group?: string | null } | null | undefined,
+  ) => boolean;
+  canRecordViolationForStudent: (
+    target: { id: string; group?: string | null } | null | undefined,
+  ) => boolean;
+  canManageTasksAndEvents: boolean;
+  /** Public-safe student roster items ({ id, name, code, gender, group, position } — zero private fields!). */
+  classRosterPublic: PublicStudentRosterItem[];
+  bonusTargetStudents: PublicStudentRosterItem[];
+  violationTargetStudents: PublicStudentRosterItem[];
+  dutyTargetStudents: PublicStudentRosterItem[];
+  dutyLogs: Record<string, DutyDayLog>;
+  dutyLogOfDate: (date: string) => DutyDayLog | undefined;
   /** True for teacher OR approved editor (ban cán sự). */
   canEditClass: boolean;
   /** True when user can add students to the class roster (including students). */
@@ -292,18 +347,39 @@ export type ClassStore = BaseActions & {
   updateEntry: (id: string, patch: Partial<EntryInput>) => void;
   removeEntry: (id: string) => void;
   clearEntryProof: (entryId: string) => Promise<void>;
-  addAnnouncement: (input: AnnouncementInput) => void;
+  setAttendance: (
+    date: string,
+    studentId: string,
+    status: AttendanceStatus,
+    note?: string | null,
+  ) => void;
+  markAllPresent: (date: string) => void;
+  addAnnouncement: (input: ExtendedAnnouncementInput) => void;
   removeAnnouncement: (id: string) => void;
   removeAnnouncementAttachment: (
     announcementId: string,
     attachment: { id: string; driveFileId?: string; url?: string; name?: string },
   ) => Promise<void>;
-  addTask: (input: TaskInput) => void;
+  addTask: (input: ExtendedTaskInput) => void;
   removeTask: (taskId: string) => void;
   removeTaskAttachment: (
     taskId: string,
     attachment: { id: string; driveFileId?: string; url?: string; name?: string },
   ) => Promise<void>;
+  updateDutyRoster: (day: Weekday, group: string) => void;
+  assignStudentPosition: (studentId: string, position: string | null) => Promise<void>;
+  assignDutyForDate: (input: {
+    date: string;
+    assignedGroup?: string | null;
+    assignedStudentIds: string[];
+    note?: string | null;
+  }) => Promise<void>;
+  markDutyCompletion: (input: {
+    date: string;
+    studentId: string;
+    status: DutyCompletionStatus;
+    note?: string | null;
+  }) => Promise<void>;
   removeResource: (id: string) => void;
   removePoll: (pollId: string) => void;
   removeKudos: (id: string) => void;
@@ -373,8 +449,6 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const canEditClass = memberRole === 'teacher' || memberRole === 'editor';
   const canAddStudents =
     canEditClass || memberRole === 'student' || memberRole === 'subject_teacher';
-  const canPostAnnouncements =
-    memberRole === 'teacher' || memberRole === 'subject_teacher' || memberRole === 'editor';
   const canViewNotes = isCloudOAuth
     ? isTeacher || Boolean(auth.profile?.canViewPrivate)
     : isTeacher;
@@ -388,6 +462,23 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     : memberRole === 'student'
       ? (auth.studentId ?? null)
       : null;
+
+  const currentStudent = useMemo(
+    () => (effectiveStudentId ? state.students.find((s) => s.id === effectiveStudentId) ?? null : null),
+    [state.students, effectiveStudentId],
+  );
+
+  const officerPermissions = useMemo(
+    () =>
+      computeOfficerPermissions({
+        isTeacher,
+        isSubjectTeacher,
+        memberRole,
+        currentStudent,
+      }),
+    [isTeacher, isSubjectTeacher, memberRole, currentStudent],
+  );
+  const canPostAnnouncements = officerPermissions.canPostAnnouncements;
 
   const canViewPrivateOf = useCallback(
     (studentId: string) => {
@@ -496,6 +587,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
               name: acc.name,
               code: acc.loginId,
               gender: 'male',
+              position: acc.position ?? null,
             });
             mergedStudents.push({
               ...restored,
@@ -597,7 +689,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           };
         });
       } else if (event.type === 'updated') {
-        if (event.name !== undefined || event.loginId !== undefined) {
+        if (
+          event.name !== undefined ||
+          event.loginId !== undefined ||
+          event.position !== undefined
+        ) {
           const now = new Date().toISOString();
           mutate((prev) => ({
             ...prev,
@@ -607,6 +703,10 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
                     ...s,
                     name: event.name ? normalizeName(event.name) : s.name,
                     code: event.loginId ?? s.code,
+                    position:
+                      event.position !== undefined
+                        ? canonicalizeOfficerPosition(event.position)
+                        : s.position,
                     updatedAt: event.account?.updatedAt ?? now,
                   }
                 : s,
@@ -834,6 +934,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         : await suggestNextLoginId(stateRef.current.classInfo.name, stateRef.current.students);
 
       const password = input.password?.trim() ?? '';
+      const safePosition = isTeacher ? canonicalizeOfficerPosition(input.position) : null;
       const reg = await registerStudentAccount({
         studentId: input.id,
         name: input.name,
@@ -842,7 +943,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         gender: input.gender,
         birthDate: input.birthDate ?? null,
         group: input.group ?? null,
-        position: input.position ?? null,
+        position: safePosition,
         writeToClassState: false,
         knownStudents: stateRef.current.students,
       });
@@ -858,7 +959,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         gender: input.gender,
         birthDate: input.birthDate ?? null,
         group: input.group ?? null,
-        position: input.position ?? null,
+        position: safePosition,
       };
 
       // Idempotent upsert so `subscribeStudentAccountsChanged` and `addStudent` never duplicate.
@@ -886,7 +987,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       }
       return reg.student.id;
     },
-    [actions, auth, canEditClass, flushCloud, isCloudOAuth, mutate, pullNow],
+    [actions, auth, canEditClass, flushCloud, isCloudOAuth, isTeacher, mutate, pullNow],
   );
 
   const updateStudent = useCallback(
@@ -901,25 +1002,50 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (!cred.ok) {
         throw new Error(cred.error || 'Không thể cập nhật thông tin tài khoản học sinh');
       }
-      const { password: _discarded, ...restPatch } = patch;
+      const { password: _discarded, position: rawPosition, ...restPatch } = patch;
       const cleanPatch: Partial<StudentInput> = {
         ...restPatch,
         code: cred.account?.loginId ?? restPatch.code,
+        ...(isTeacher && rawPosition !== undefined
+          ? { position: canonicalizeOfficerPosition(rawPosition) }
+          : {}),
       };
       const existingStu = stateRef.current.students.find((s) => s.id === id);
       const mergedStu = existingStu ? mergeStudent(existingStu, cleanPatch) : null;
 
       actions.updateStudent(id, cleanPatch);
+      if (isTeacher && rawPosition !== undefined) {
+        await updateStudentAccountPosition(id, canonicalizeOfficerPosition(rawPosition), {
+          writeToClassState: false,
+        });
+      }
       await auth.refreshStudentAccountCount();
 
-      if (isCloudSync && mergedStu) {
-        void upsertRegisteredMemberToCloud({ kind: 'student', student: mergedStu }).catch(
+      const latestStu = stateRef.current.students.find((s) => s.id === id) ?? mergedStu;
+      if (isCloudSync && latestStu) {
+        void upsertRegisteredMemberToCloud({ kind: 'student', student: latestStu }).catch(
           () => {},
         );
       }
       flushCloud('update-student');
     },
-    [actions, auth, flushCloud, isCloudSync],
+    [actions, auth, flushCloud, isCloudSync, isTeacher],
+  );
+
+  const assignStudentPosition = useCallback(
+    async (studentId: string, position: string | null): Promise<void> => {
+      if (!isTeacher) {
+        throw new Error('Chỉ Giáo viên chủ nhiệm mới có quyền phân công hoặc hủy chức vụ Ban cán sự.');
+      }
+      const normalizedPos = canonicalizeOfficerPosition(position);
+      actions.assignStudentPositionLocal(studentId, normalizedPos);
+      await updateStudentAccountPosition(studentId, normalizedPos, {
+        writeToClassState: false,
+      });
+      await auth.refreshStudentAccountCount();
+      flushCloud('assign-position');
+    },
+    [actions, auth, flushCloud, isTeacher],
   );
 
   const bulkAddStudents = useCallback(
@@ -965,38 +1091,206 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const addEntry = useCallback(
     async (input: EntryInput) => {
-      // Strictly bind student submissions to the authenticated student's own ID.
-      const enforcedStudentId = canViewAll
-        ? input.studentId
-        : (effectiveStudentId ?? input.studentId);
-      const created = actions.addEntry({
-        ...input,
-        studentId: enforcedStudentId,
-        submittedBy: canEditClass ? 'teacher' : 'student',
-      });
+      const targetStudent = stateRef.current.students.find((s) => s.id === input.studentId) ?? null;
+      const isViolation = input.kind === 'violation' || input.points < 0;
+      const isClassmateTarget =
+        Boolean(input.studentId) && input.studentId !== effectiveStudentId;
+
+      let finalInput: EntryInput;
+
+      if (canViewAll) {
+        finalInput = {
+          ...input,
+          status: input.status ?? 'approved',
+          submittedBy: 'teacher',
+          recordedByName: input.recordedByName ?? actorLabel,
+          recordedByPosition: input.recordedByPosition ?? 'GVCN',
+          recordedByStudentId: null,
+          source: input.source ?? 'teacher',
+        };
+      } else if (isViolation) {
+        if (!officerPermissions.canRecordViolationForStudent(targetStudent)) {
+          throw new Error('Bạn không có quyền ghi nhận học sinh vi phạm.');
+        }
+        finalInput = {
+          ...input,
+          kind: 'violation',
+          status: 'approved',
+          submittedBy: 'teacher',
+          recordedByName: actorLabel,
+          recordedByPosition: officerPermissions.officerPositionLabel ?? 'Ban cán sự',
+          recordedByStudentId: effectiveStudentId,
+          source: 'officer_violation',
+        };
+      } else if (
+        isClassmateTarget ||
+        (officerPermissions.canRecordBonusForStudent(targetStudent) &&
+          (input.source === 'officer_bonus' || input.submittedBy === 'teacher'))
+      ) {
+        if (!officerPermissions.canRecordBonusForStudent(targetStudent)) {
+          throw new Error(
+            'Bạn chỉ được ghi điểm cộng cho thành viên thuộc tổ hoặc phạm vi được phân công.',
+          );
+        }
+        finalInput = {
+          ...input,
+          status: 'approved',
+          submittedBy: 'teacher',
+          recordedByName: actorLabel,
+          recordedByPosition: officerPermissions.officerPositionLabel ?? 'Ban cán sự',
+          recordedByStudentId: effectiveStudentId,
+          source: 'officer_bonus',
+        };
+      } else {
+        // Regular student self-submission -> strictly bound to own student ID and pending approval.
+        const enforcedStudentId = effectiveStudentId ?? input.studentId;
+        finalInput = {
+          ...input,
+          studentId: enforcedStudentId,
+          submittedBy: canEditClass ? 'teacher' : 'student',
+          status: canEditClass ? 'approved' : 'pending',
+          source: canEditClass ? 'teacher' : 'self',
+        };
+      }
+
+      const created = actions.addEntry(finalInput);
       flushCloud('add-entry');
       if (isCloudOAuth && !canEditClass) {
         await submitEntryRemote(created);
         await pullNow();
       }
     },
-    [actions, canViewAll, effectiveStudentId, canEditClass, flushCloud, isCloudOAuth, pullNow],
+    [
+      actions,
+      actorLabel,
+      canViewAll,
+      effectiveStudentId,
+      canEditClass,
+      officerPermissions,
+      flushCloud,
+      isCloudOAuth,
+      pullNow,
+    ],
+  );
+
+  const setAttendance = useCallback(
+    (date: string, studentId: string, status: AttendanceStatus, note?: string | null) => {
+      if (!isTeacher && !officerPermissions.isClassMonitor && !canEditClass) return;
+      actions.setAttendance(date, studentId, status, note);
+      flushCloud('attendance');
+    },
+    [actions, canEditClass, flushCloud, isTeacher, officerPermissions.isClassMonitor],
+  );
+
+  const markAllPresent = useCallback(
+    (date: string) => {
+      if (!isTeacher && !officerPermissions.isClassMonitor && !canEditClass) return;
+      actions.markAllPresent(date);
+      flushCloud('attendance');
+    },
+    [actions, canEditClass, flushCloud, isTeacher, officerPermissions.isClassMonitor],
   );
 
   const addAnnouncement = useCallback(
-    (input: AnnouncementInput) => {
-      actions.addAnnouncement(input);
+    (input: ExtendedAnnouncementInput) => {
+      if (!canPostAnnouncements) return;
+      const resolvedAuthorRole =
+        input.authorRole ??
+        (isTeacher
+          ? 'teacher'
+          : isSubjectTeacher
+            ? 'subject_teacher'
+            : officerPermissions.isOfficer
+              ? 'officer'
+              : 'editor');
+      actions.addAnnouncement({
+        ...input,
+        authorRole: resolvedAuthorRole,
+        authorPosition:
+          input.authorPosition !== undefined
+            ? input.authorPosition
+            : officerPermissions.isOfficer
+              ? officerPermissions.officerPositionLabel
+              : null,
+        department:
+          input.department !== undefined
+            ? input.department
+            : officerPermissions.defaultDepartment,
+      });
       flushCloud('add-announcement');
     },
-    [actions, flushCloud],
+    [actions, canPostAnnouncements, flushCloud, isTeacher, isSubjectTeacher, officerPermissions],
   );
 
   const addTask = useCallback(
-    (input: TaskInput) => {
-      actions.addTask(input);
+    (input: ExtendedTaskInput) => {
+      if (!officerPermissions.canManageTasksAndEvents) return;
+      actions.addTask({
+        ...input,
+        authorName: input.authorName ?? input.author ?? actorLabel,
+        authorPosition:
+          input.authorPosition !== undefined
+            ? input.authorPosition
+            : isTeacher
+              ? 'GVCN'
+              : isSubjectTeacher
+                ? `GV ${subjectName ?? 'Bộ môn'}`
+                : officerPermissions.officerPositionLabel,
+        department:
+          input.department !== undefined
+            ? input.department
+            : officerPermissions.defaultDepartment,
+      });
       flushCloud('add-task');
     },
-    [actions, flushCloud],
+    [actions, actorLabel, flushCloud, isTeacher, isSubjectTeacher, subjectName, officerPermissions],
+  );
+
+  const updateDutyRoster = useCallback(
+    (day: Weekday, group: string) => {
+      if (!officerPermissions.canManageDuty) return;
+      actions.updateDutyRoster(day, group);
+      flushCloud('update-duty-roster');
+    },
+    [actions, flushCloud, officerPermissions.canManageDuty],
+  );
+
+  const assignDutyForDate = useCallback(
+    async (input: {
+      date: string;
+      assignedGroup?: string | null;
+      assignedStudentIds: string[];
+      note?: string | null;
+    }): Promise<void> => {
+      if (!officerPermissions.canManageDuty) {
+        throw new Error('Chỉ GVCN, Lớp trưởng hoặc Lớp phó lao động mới có quyền phân công trực nhật.');
+      }
+      actions.assignDutyForDateLocal(input);
+      flushCloud('assign-duty');
+    },
+    [actions, flushCloud, officerPermissions.canManageDuty],
+  );
+
+  const markDutyCompletion = useCallback(
+    async (input: {
+      date: string;
+      studentId: string;
+      status: DutyCompletionStatus;
+      note?: string | null;
+    }): Promise<void> => {
+      if (!officerPermissions.canManageDuty) {
+        throw new Error('Chỉ GVCN, Lớp trưởng hoặc Lớp phó lao động mới có quyền chấm trực nhật.');
+      }
+      const evaluatorPosition = isTeacher
+        ? 'GVCN'
+        : (officerPermissions.officerPositionLabel ?? 'Ban cán sự');
+      actions.markDutyCompletionLocal({
+        ...input,
+        evaluatorPosition,
+      });
+      flushCloud('mark-duty-completion');
+    },
+    [actions, flushCloud, isTeacher, officerPermissions],
   );
 
   const updateEntry = useCallback(
@@ -1529,6 +1823,59 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     tasks,
   } = state;
 
+  const dutyLogs = useMemo<Record<string, DutyDayLog>>(() => state.dutyLogs ?? {}, [state.dutyLogs]);
+
+  const dutyLogOfDate = useCallback((date: string) => dutyLogs[date], [dutyLogs]);
+
+  // Public-safe class roster (ZERO private contact fields — safe for officer target pickers!).
+  const classRosterPublic = useMemo<PublicStudentRosterItem[]>(() => {
+    const deletedStu = state.deletedStudentIds ?? {};
+    return state.students
+      .filter((s) => {
+        const delAt = deletedStu[s.id];
+        return !delAt || delAt.localeCompare(s.updatedAt) <= 0;
+      })
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        code: s.code,
+        gender: s.gender,
+        group: s.group ?? null,
+        position: s.position ?? null,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+  }, [state.students, state.deletedStudentIds]);
+
+  const currentStudentGroup = currentStudent?.group?.trim().toLowerCase() ?? '';
+
+  const bonusTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
+    if (!officerPermissions.canRecordBonus) return [];
+    if (isTeacher || officerPermissions.isClassMonitor) return classRosterPublic;
+    if (officerPermissions.isGroupLeader && currentStudentGroup) {
+      return classRosterPublic.filter(
+        (s) => (s.group?.trim().toLowerCase() ?? '') === currentStudentGroup,
+      );
+    }
+    return [];
+  }, [
+    officerPermissions.canRecordBonus,
+    officerPermissions.isClassMonitor,
+    officerPermissions.isGroupLeader,
+    isTeacher,
+    currentStudentGroup,
+    classRosterPublic,
+  ]);
+
+  const violationTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
+    if (!officerPermissions.canRecordViolation) return [];
+    return classRosterPublic;
+  }, [officerPermissions.canRecordViolation, classRosterPublic]);
+
+  const dutyTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
+    if (!officerPermissions.canManageDuty) return [];
+    return classRosterPublic;
+  }, [officerPermissions.canManageDuty, classRosterPublic]);
+
   const visibleStudents = useMemo(() => {
     if (canViewAll) return state.students;
     if (!effectiveStudentId) return [];
@@ -1536,13 +1883,50 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   }, [canViewAll, state.students, effectiveStudentId]);
 
   const visibleEntries = useMemo(() => {
-    if (canViewAll) return state.entries;
+    if (canViewAll || officerPermissions.isClassMonitor) return state.entries;
     if (!effectiveStudentId) return [];
-    return state.entries.filter((e) => e.studentId === effectiveStudentId);
-  }, [canViewAll, state.entries, effectiveStudentId]);
+
+    let myGroupStudentIds: Set<string> | null = null;
+    if (officerPermissions.isGroupLeader && currentStudentGroup) {
+      myGroupStudentIds = new Set(
+        state.students
+          .filter((s) => (s.group?.trim().toLowerCase() ?? '') === currentStudentGroup)
+          .map((s) => s.id),
+      );
+    }
+
+    return state.entries.filter((e) => {
+      if (e.studentId === effectiveStudentId || e.recordedByStudentId === effectiveStudentId) {
+        return true;
+      }
+      if (officerPermissions.isDisciplineVP && e.kind === 'violation') {
+        return true;
+      }
+      if (officerPermissions.isLaborVP && e.source === 'duty_diligence') {
+        return true;
+      }
+      if (myGroupStudentIds && myGroupStudentIds.has(e.studentId)) {
+        return true;
+      }
+      return false;
+    });
+  }, [
+    canViewAll,
+    officerPermissions.isClassMonitor,
+    officerPermissions.isDisciplineVP,
+    officerPermissions.isLaborVP,
+    officerPermissions.isGroupLeader,
+    currentStudentGroup,
+    state.students,
+    state.entries,
+    effectiveStudentId,
+  ]);
+
+  const canReadClassDiligence =
+    canViewAll || officerPermissions.canManageDuty || officerPermissions.isClassMonitor;
 
   const visibleAttendance = useMemo(() => {
-    if (canViewAll) return state.attendance;
+    if (canReadClassDiligence) return state.attendance;
     if (!effectiveStudentId) return {};
     const scoped: Record<string, AttendanceDay> = {};
     for (const [dateKey, day] of Object.entries(state.attendance)) {
@@ -1556,7 +1940,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       }
     }
     return scoped;
-  }, [canViewAll, state.attendance, effectiveStudentId]);
+  }, [canReadClassDiligence, state.attendance, effectiveStudentId]);
 
   const visibleFundPaid = useMemo(() => {
     if (canViewAll) return state.fundPaid;
@@ -1678,11 +2062,6 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const todayDutyGroup = dutyRoster[String(currentSchoolWeekday()) as keyof DutyRoster] ?? 'Tổ 1';
 
-  const currentStudent = useMemo(
-    () => visibleStudents.find((s) => s.id === effectiveStudentId) ?? null,
-    [visibleStudents, effectiveStudentId],
-  );
-
   const getStudent = useCallback(
     (id: string) => visibleStudents.find((s) => s.id === id),
     [visibleStudents],
@@ -1704,8 +2083,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   );
 
   const attendanceStatsOfStudent = useCallback(
-    (studentId: string) => attendanceStatsFor(visibleAttendance, studentId),
-    [visibleAttendance],
+    (studentId: string) => attendanceStatsFor(visibleAttendance, studentId, dutyLogs),
+    [visibleAttendance, dutyLogs],
   );
 
   const attendanceOfDate = useCallback(
@@ -1761,8 +2140,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       clearEntryProof,
       setEntryStatus: actions.setEntryStatus,
       approveAllPending: actions.approveAllPending,
-      setAttendance: actions.setAttendance,
-      markAllPresent: actions.markAllPresent,
+      setAttendance,
+      markAllPresent,
       addAnnouncement,
       togglePinAnnouncement: actions.togglePinAnnouncement,
       removeAnnouncement,
@@ -1773,7 +2152,10 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       updateFundCycle: actions.updateFundCycle,
       addScheduleSlot: actions.addScheduleSlot,
       removeScheduleSlot: actions.removeScheduleSlot,
-      updateDutyRoster: actions.updateDutyRoster,
+      updateDutyRoster,
+      assignStudentPosition,
+      assignDutyForDate,
+      markDutyCompletion,
       addPoll: actions.addPoll,
       togglePollClosed: actions.togglePollClosed,
       removePoll,
@@ -1822,6 +2204,32 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       isSubjectTeacher,
       subjectName,
       canPostAnnouncements,
+      officerPermissions,
+      officerRoles: officerPermissions.officerRoles,
+      isOfficer: officerPermissions.isOfficer,
+      officerPositionLabel: officerPermissions.officerPositionLabel,
+      defaultDepartment: officerPermissions.defaultDepartment,
+      isClassMonitor: officerPermissions.isClassMonitor,
+      isSecretary: officerPermissions.isSecretary,
+      isAcademicVP: officerPermissions.isAcademicVP,
+      isLaborVP: officerPermissions.isLaborVP,
+      isDisciplineVP: officerPermissions.isDisciplineVP,
+      isArtsVP: officerPermissions.isArtsVP,
+      isSportsVP: officerPermissions.isSportsVP,
+      isGroupLeader: officerPermissions.isGroupLeader,
+      canAssignPositions: officerPermissions.canAssignPositions,
+      canManageDuty: officerPermissions.canManageDuty,
+      canRecordBonus: officerPermissions.canRecordBonus,
+      canRecordViolation: officerPermissions.canRecordViolation,
+      canRecordBonusForStudent: officerPermissions.canRecordBonusForStudent,
+      canRecordViolationForStudent: officerPermissions.canRecordViolationForStudent,
+      canManageTasksAndEvents: officerPermissions.canManageTasksAndEvents,
+      classRosterPublic,
+      bonusTargetStudents,
+      violationTargetStudents,
+      dutyTargetStudents,
+      dutyLogs,
+      dutyLogOfDate,
       canEditClass,
       canAddStudents,
       canViewNotes,
@@ -1874,6 +2282,12 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       addStudent,
       bulkAddStudents,
       updateStudent,
+      assignStudentPosition,
+      updateDutyRoster,
+      assignDutyForDate,
+      markDutyCompletion,
+      setAttendance,
+      markAllPresent,
       addAnnouncement,
       removeAnnouncement,
       removeAnnouncementAttachment,
@@ -1919,6 +2333,13 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       isSubjectTeacher,
       subjectName,
       canPostAnnouncements,
+      officerPermissions,
+      classRosterPublic,
+      bonusTargetStudents,
+      violationTargetStudents,
+      dutyTargetStudents,
+      dutyLogs,
+      dutyLogOfDate,
       canEditClass,
       canAddStudents,
       canViewNotes,

@@ -5,6 +5,10 @@
  * `JSON.stringify` in AsyncStorage and synced as one JSONB document in Supabase.
  */
 
+import type { OfficerDepartmentKey } from '@/lib/officer-roles';
+
+export type { OfficerDepartmentKey, OfficerRoleKey } from '@/lib/officer-roles';
+
 export type Role = 'teacher' | 'student';
 
 export type Gender = 'male' | 'female' | 'other';
@@ -40,8 +44,18 @@ export type RegisteredTeacherPublic = {
   updatedAt: string;
 };
 
-/** `achievement` = thành tích, `activity` = hoạt động / phong trào đã tham gia. */
-export type EntryKind = 'achievement' | 'activity';
+/** Thông tin công khai an toàn của học sinh trong danh sách lớp (KHÔNG chứa SĐT/email/địa chỉ/ghi chú). */
+export type PublicStudentRosterItem = {
+  id: string;
+  name: string;
+  code: string;
+  gender: Gender;
+  group: string | null;
+  position: string | null;
+};
+
+/** `achievement` = thành tích, `activity` = hoạt động / phong trào, `violation` = vi phạm / nhắc nhở. */
+export type EntryKind = 'achievement' | 'activity' | 'violation';
 
 export type EntryCategory = 'study' | 'sport' | 'art' | 'volunteer' | 'skill' | 'other';
 
@@ -66,6 +80,14 @@ export type Entry = {
   submittedBy: Role;
   /** Ghi chú của giáo viên khi duyệt / từ chối. */
   reviewNote: string | null;
+  /** Tên người ghi nhận (Ban cán sự / GVCN). */
+  recordedByName?: string | null;
+  /** Chức vụ người ghi nhận (ví dụ: Tổ trưởng, Lớp phó kỷ luật, Lớp trưởng, GVCN). */
+  recordedByPosition?: string | null;
+  /** ID học sinh ghi nhận (nếu là Ban cán sự). */
+  recordedByStudentId?: string | null;
+  /** Nguồn gốc bản ghi thi đua / vi phạm / chuyên cần trực nhật. */
+  source?: 'self' | 'officer_bonus' | 'officer_violation' | 'duty_diligence' | 'teacher';
   createdAt: string;
   updatedAt: string;
 };
@@ -91,6 +113,7 @@ export type StudentStats = {
   rejected: number;
   achievements: number;
   activities: number;
+  violations?: number;
   total: number;
   /** Ngày của hoạt động gần nhất (ISO) hoặc `null`. */
   lastActivity: string | null;
@@ -103,6 +126,7 @@ export const EMPTY_STATS: StudentStats = {
   rejected: 0,
   achievements: 0,
   activities: 0,
+  violations: 0,
   total: 0,
   lastActivity: null,
 };
@@ -138,6 +162,40 @@ export type AttendanceStats = {
   total: number;
   /** 0..100, hoặc `null` nếu chưa có ngày điểm danh nào. */
   rate: number | null;
+  /** Số buổi trực nhật đã hoàn thành. */
+  dutyCompleted: number;
+  /** Số buổi trực nhật chưa hoàn thành / bỏ trực. */
+  dutyMissed: number;
+  /** Tổng số buổi trực nhật đã chấm (`dutyCompleted + dutyMissed`). */
+  dutyTotal: number;
+  /** Điểm chuyên cần tổng hợp (0..100), tích hợp điểm danh & trực nhật. */
+  diligenceScore: number | null;
+  /** Điểm cộng/trừ chuyên cần từ kết quả trực nhật (`+3` hoàn thành, `-8` chưa hoàn thành). */
+  diligenceDeltaFromDuty: number;
+};
+
+/* ---------- Phân công & Chấm Trực nhật (Điểm chuyên cần) ---------- */
+
+export type DutyCompletionStatus = 'pending' | 'completed' | 'missed';
+
+export type DutyStudentRecord = {
+  studentId: string;
+  status: DutyCompletionStatus;
+  note?: string | null;
+  evaluatedBy?: string | null;
+  evaluatedByPosition?: string | null;
+  evaluatedAt?: string | null;
+  entryId?: string | null;
+};
+
+export type DutyDayLog = {
+  date: string;
+  assignedGroup?: string | null;
+  assignedStudentIds: string[];
+  records: Record<string, DutyStudentRecord>;
+  note?: string | null;
+  assignedBy?: string | null;
+  updatedAt: string;
 };
 
 /* ---------- Tệp đính kèm Google Drive (K8T4_app) ---------- */
@@ -157,7 +215,7 @@ export type DriveAttachment = {
 
 export type AnnouncementTag = 'important' | 'subject' | 'exam' | 'event' | 'reminder';
 
-export type AnnouncementAuthorRole = 'teacher' | 'subject_teacher' | 'editor';
+export type AnnouncementAuthorRole = 'teacher' | 'subject_teacher' | 'editor' | 'officer';
 
 export type Announcement = {
   id: string;
@@ -171,8 +229,14 @@ export type Announcement = {
   author: string;
   /** Môn học (khi Giáo viên bộ môn đăng thông báo). */
   subject?: string | null;
-  /** Vai trò người đăng: GVCN hoặc GV Bộ môn. */
+  /** Vai trò người đăng: GVCN, GV Bộ môn hoặc Ban cán sự. */
   authorRole?: AnnouncementAuthorRole;
+  /** Phòng ban / ban chuyên trách phát hành bản tin (tuỳ chọn). */
+  department?: OfficerDepartmentKey | null;
+  /** Chức vụ cụ thể của người đăng (ví dụ: Lớp trưởng, Bí thư, Lớp phó văn thể mỹ). */
+  authorPosition?: string | null;
+  /** ID sự kiện / nhiệm vụ liên kết (nếu chuyển từ màn hình Nhiệm vụ & Sự kiện). */
+  eventId?: string | null;
   /** Ảnh / tài liệu đính kèm lưu trên Google Drive `K8T4_app`. */
   attachments?: DriveAttachment[];
   createdAt: string;
@@ -249,6 +313,20 @@ export type ClassTask = {
   priority: TaskPriority;
   note: string | null;
   author: string;
+  /** Phòng ban / ban chuyên trách phụ trách nhiệm vụ hoặc sự kiện. */
+  department?: OfficerDepartmentKey | null;
+  /** Phân loại: nhiệm vụ GV giao (`task`) hoặc sự kiện lớp (`event`). */
+  itemKind?: 'task' | 'event';
+  /** Ngày diễn ra sự kiện (ISO `YYYY-MM-DD`, tuỳ chọn). */
+  eventDate?: string | null;
+  /** Địa điểm tổ chức sự kiện (tuỳ chọn). */
+  location?: string | null;
+  /** Chức vụ Ban cán sự được giao phụ trách (tuỳ chọn). */
+  assignedOfficerRole?: string | null;
+  /** Tên hiển thị người tạo nhiệm vụ / sự kiện. */
+  authorName?: string | null;
+  /** Chức vụ người tạo nhiệm vụ / sự kiện. */
+  authorPosition?: string | null;
   /** Đề bài / ảnh / tài liệu đính kèm lưu trên Google Drive `K8T4_app`. */
   attachments?: DriveAttachment[];
   createdAt: string;
