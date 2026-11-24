@@ -1,5 +1,6 @@
 /** Pure builders / mergers used by the store actions. */
 
+import { STUDY_STAMP_POINTS, roundPoints } from '@/constants/entry-meta';
 import {
   formatPositionsDisplay,
   normalizeCustomGrants,
@@ -29,7 +30,13 @@ function resolveEntryPoints(
   rawPoints: number,
   source?: Entry['source'],
 ): number {
-  const rounded = Number.isFinite(rawPoints) ? Math.round(rawPoints) : 0;
+  if (kind === 'study') {
+    if (!Number.isFinite(rawPoints) || rawPoints <= 0) {
+      return STUDY_STAMP_POINTS;
+    }
+    return roundPoints(Math.max(STUDY_STAMP_POINTS, rawPoints));
+  }
+  const rounded = roundPoints(rawPoints);
   if (kind === 'violation') {
     return rounded < 0 ? rounded : -Math.max(1, Math.abs(rounded) || 5);
   }
@@ -92,19 +99,22 @@ export function buildEntry(input: EntryInput): Entry {
   const fromStudent = input.submittedBy === 'student';
   const resolvedSource = input.source;
   const cleanSubject = text(input.subject);
-  const resolvedSpeechCount =
-    input.kind === 'study' ? Math.max(1, Math.round(input.speechCount ?? 1)) : undefined;
+  const isStudy = input.kind === 'study';
+  const resolvedSpeechCount = isStudy ? 1 : undefined;
+  const resolvedPoints = isStudy
+    ? STUDY_STAMP_POINTS
+    : resolveEntryPoints(input.kind, input.points, resolvedSource);
   return {
     id: createId('ent'),
     studentId: input.studentId,
     title: input.title.trim(),
     kind: input.kind,
-    category: input.category,
+    category: isStudy ? 'study' : input.category,
     level: input.level,
     date: input.date,
     description: text(input.description),
     proofUrl: text(input.proofUrl),
-    points: resolveEntryPoints(input.kind, input.points, resolvedSource),
+    points: resolvedPoints,
     // Explicit status wins (used for officer-recorded entries); otherwise teacher=approved, student=pending.
     status: input.status ?? (fromStudent ? 'pending' : 'approved'),
     submittedBy: input.submittedBy ?? 'teacher',
@@ -137,13 +147,6 @@ export function mergeEntry(entry: Entry, patch: Partial<EntryInput>): Entry {
   if (patch.status !== undefined) next.status = patch.status;
   if (patch.reviewNote !== undefined) next.reviewNote = text(patch.reviewNote);
   if (patch.subject !== undefined) next.subject = text(patch.subject);
-  if (patch.speechCount !== undefined || patch.kind !== undefined) {
-    if (next.kind === 'study') {
-      next.speechCount = Math.max(1, Math.round(patch.speechCount ?? entry.speechCount ?? 1));
-    } else if (patch.kind !== undefined) {
-      delete next.speechCount;
-    }
-  }
   if (patch.recordedByName !== undefined) next.recordedByName = text(patch.recordedByName);
   if (patch.recordedByPosition !== undefined) {
     next.recordedByPosition = text(patch.recordedByPosition);
@@ -152,12 +155,21 @@ export function mergeEntry(entry: Entry, patch: Partial<EntryInput>): Entry {
     next.recordedByStudentId = patch.recordedByStudentId ?? null;
   }
   if (patch.source !== undefined) next.source = patch.source;
-  if (patch.points !== undefined || patch.kind !== undefined || patch.source !== undefined) {
-    next.points = resolveEntryPoints(
-      next.kind,
-      patch.points !== undefined ? patch.points : entry.points,
-      next.source,
-    );
+  if (next.kind === 'study') {
+    next.category = 'study';
+    next.speechCount = 1;
+    next.points = STUDY_STAMP_POINTS;
+  } else {
+    if (patch.kind !== undefined) {
+      delete next.speechCount;
+    }
+    if (patch.points !== undefined || patch.kind !== undefined || patch.source !== undefined) {
+      next.points = resolveEntryPoints(
+        next.kind,
+        patch.points !== undefined ? patch.points : entry.points,
+        next.source,
+      );
+    }
   }
   return next;
 }

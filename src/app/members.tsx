@@ -20,6 +20,7 @@ import { Screen } from '@/components/ui/screen';
 import { SectionHeader } from '@/components/ui/section-header';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
+import { formatPoints } from '@/constants/entry-meta';
 import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
 import { MEMBER_ROLES, MEMBER_STATUSES } from '@/constants/utilities-meta';
 import { useTheme } from '@/hooks/use-theme';
@@ -674,7 +675,7 @@ export default function MembersScreen() {
                               {[
                                 `ID: ${stu.code}`,
                                 stu.group || 'Chưa phân tổ',
-                                `${stats.total} bài · ${stats.points}đ`,
+                                `${stats.total} bài · ${formatPoints(stats.points)}đ`,
                               ].join(' · ')}
                             </Text>
                             <View style={styles.badgeRow}>

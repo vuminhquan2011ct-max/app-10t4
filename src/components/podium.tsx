@@ -3,6 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '@/components/ui/avatar';
+import { formatPoints } from '@/constants/entry-meta';
 import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
 import { useIsDark, useTheme } from '@/hooks/use-theme';
 
@@ -88,7 +89,7 @@ export function Podium({ entries, onPressEntry }: PodiumProps) {
                 styles.pointsCapsule,
                 { backgroundColor: soft, borderColor: `${color}40` },
               ]}>
-              <Text style={[styles.points, { color }]}>{`${entry.points} điểm`}</Text>
+              <Text style={[styles.points, { color }]}>{`${formatPoints(entry.points)} điểm`}</Text>
             </View>
 
             <LinearGradient

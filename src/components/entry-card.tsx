@@ -2,7 +2,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Badge } from '@/components/ui/badge';
-import { ENTRY_CATEGORIES, ENTRY_KINDS, ENTRY_LEVELS, ENTRY_STATUSES } from '@/constants/entry-meta';
+import {
+  ENTRY_CATEGORIES,
+  ENTRY_KINDS,
+  ENTRY_LEVELS,
+  ENTRY_STATUSES,
+  formatSignedPoints,
+} from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatDate } from '@/lib/date';
@@ -87,20 +93,12 @@ export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
         </View>
         <View style={styles.badges}>
           {isStudy ? (
-            <>
-              <Badge
-                label={entry.subject ? `Phát biểu · ${entry.subject}` : 'Học tập · Phát biểu'}
-                color={'success'}
-                soft={'successSoft'}
-                icon={'book'}
-              />
-              <Badge
-                label={`${speechCount} lượt`}
-                color={'success'}
-                soft={'successSoft'}
-                icon={'hand-left-outline'}
-              />
-            </>
+            <Badge
+              label={`${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`} · ${entry.subject || 'Học tập'}`}
+              color={'success'}
+              soft={'successSoft'}
+              icon={'book'}
+            />
           ) : null}
           {isAcademic ? (
             <Badge
@@ -116,7 +114,7 @@ export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
           <Badge label={status.label} color={status.color} soft={status.soft} icon={status.icon} />
           {entry.points !== 0 ? (
             <Badge
-              label={entry.points > 0 ? `+${entry.points}đ` : `${entry.points}đ`}
+              label={formatSignedPoints(entry.points)}
               color={entry.points < 0 ? 'danger' : kind.color}
               soft={entry.points < 0 ? 'dangerSoft' : kind.soft}
               icon={entry.points < 0 ? 'remove-circle-outline' : 'ribbon-outline'}

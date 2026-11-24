@@ -1,6 +1,6 @@
 /** Computes the derived numbers and analytics shown across the app. */
 
-import { ENTRY_CATEGORY_LIST, ENTRY_LEVELS, GROUP_PRESETS } from '@/constants/entry-meta';
+import { ENTRY_CATEGORY_LIST, ENTRY_LEVELS, GROUP_PRESETS, roundPoints } from '@/constants/entry-meta';
 import {
   daysSince,
   daysUntilBirthday,
@@ -58,14 +58,14 @@ export function statsFor(entries: Entry[], studentId?: string): StudentStats {
 
     if (entry.status === 'approved') {
       approved += 1;
-      points += entry.points;
+      points = roundPoints(points + entry.points);
       if (entry.kind === 'study') {
         const count =
           typeof entry.speechCount === 'number' && Number.isFinite(entry.speechCount)
             ? Math.max(1, Math.round(entry.speechCount))
             : 1;
         studySpeeches += count;
-        studyPoints += entry.points;
+        studyPoints = roundPoints(studyPoints + entry.points);
       }
       if (!lastActivity || entry.date > lastActivity) lastActivity = entry.date;
     } else if (entry.status === 'pending') {
@@ -76,7 +76,7 @@ export function statsFor(entries: Entry[], studentId?: string): StudentStats {
   }
 
   return {
-    points,
+    points: roundPoints(points),
     approved,
     pending,
     rejected,
@@ -85,7 +85,7 @@ export function statsFor(entries: Entry[], studentId?: string): StudentStats {
     violations,
     studySpeeches,
     studyEntries,
-    studyPoints,
+    studyPoints: roundPoints(studyPoints),
     academicAchievements,
     total,
     lastActivity,
@@ -107,7 +107,7 @@ export function buildRanking(students: Student[], entries: Entry[]): RankingRow[
   const byStudent = groupEntriesByStudent(entries);
   const rows = students.map((student) => {
     const stats = statsFor(byStudent.get(student.id) ?? []);
-    return { student, points: stats.points, approved: stats.approved };
+    return { student, points: roundPoints(stats.points), approved: stats.approved };
   });
 
   rows.sort(
@@ -240,13 +240,13 @@ export function buildGroupStats(students: Student[], entries: Entry[]): GroupSta
     const members = students.filter((s) => (s.group?.trim() ?? '') === group);
     let points = 0;
     for (const m of members) {
-      points += statsFor(byStudent.get(m.id) ?? []).points;
+      points = roundPoints(points + statsFor(byStudent.get(m.id) ?? []).points);
     }
     return {
       group,
       students: members.length,
-      points,
-      avgPoints: members.length > 0 ? Math.round((points / members.length) * 10) / 10 : 0,
+      points: roundPoints(points),
+      avgPoints: members.length > 0 ? roundPoints(points / members.length) : 0,
     };
   });
 
@@ -273,12 +273,12 @@ export function buildCategoryStats(entries: Entry[]): CategoryStat[] {
     if (entry.status !== 'approved') continue;
     const bucket = map[entry.category] ?? map.other;
     bucket.count += 1;
-    bucket.points += entry.points;
+    bucket.points = roundPoints(bucket.points + entry.points);
   }
   return ENTRY_CATEGORY_LIST.map((category) => ({
     category,
     count: map[category].count,
-    points: map[category].points,
+    points: roundPoints(map[category].points),
   })).sort((a, b) => b.points - a.points || b.count - a.count);
 }
 
@@ -310,7 +310,7 @@ export function buildWeeklyActivity(entries: Entry[]): DailyBar[] {
     const slot = index.get(entry.date);
     if (!slot) continue;
     slot.count += 1;
-    slot.points += entry.points;
+    slot.points = roundPoints(slot.points + entry.points);
   }
   return days;
 }
@@ -422,7 +422,7 @@ function aggregateBySubject(list: Entry[]): SubjectSpeechStat[] {
     }
     bucket.speeches += count;
     bucket.entries += 1;
-    bucket.points += Math.max(0, entry.points);
+    bucket.points = roundPoints(bucket.points + Math.max(0, entry.points));
     bucket.students.add(entry.studentId);
   }
   return Array.from(map.entries())
@@ -430,7 +430,7 @@ function aggregateBySubject(list: Entry[]): SubjectSpeechStat[] {
       subject,
       speeches: b.speeches,
       entries: b.entries,
-      points: b.points,
+      points: roundPoints(b.points),
       studentCount: b.students.size,
     }))
     .sort((a, b) => b.speeches - a.speeches || b.points - a.points || a.subject.localeCompare(b.subject, 'vi'));
@@ -464,7 +464,7 @@ function aggregateByGroup(
       buckets.set(g, bucket);
     }
     bucket.speeches += speechesOfEntry(entry);
-    bucket.points += Math.max(0, entry.points);
+    bucket.points = roundPoints(bucket.points + Math.max(0, entry.points));
     bucket.active.add(entry.studentId);
   }
 
@@ -472,7 +472,7 @@ function aggregateByGroup(
     .map(([group, b]) => ({
       group,
       speeches: b.speeches,
-      points: b.points,
+      points: roundPoints(b.points),
       activeStudents: b.active.size,
     }))
     .sort((a, b) => b.speeches - a.speeches || b.points - a.points || a.group.localeCompare(b.group, 'vi'));
@@ -522,7 +522,7 @@ export function buildStudyParticipationStats(params: {
     const ws = startOfWeekIso(entry.date);
     const cur = weekTotals.get(ws) ?? { speeches: 0, points: 0 };
     cur.speeches += speechesOfEntry(entry);
-    cur.points += Math.max(0, entry.points);
+    cur.points = roundPoints(cur.points + Math.max(0, entry.points));
     weekTotals.set(ws, cur);
   }
 
@@ -533,7 +533,7 @@ export function buildStudyParticipationStats(params: {
       weekEnd: endOfWeekIso(weekStart),
       label: formatWeekLabel(weekStart),
       speeches: agg.speeches,
-      points: agg.points,
+      points: roundPoints(agg.points),
     }));
 
   // 1. Selected week stats
@@ -558,16 +558,16 @@ export function buildStudyParticipationStats(params: {
   >();
   for (const entry of weekEntries) {
     const count = speechesOfEntry(entry);
-    const pts = Math.max(0, entry.points);
+    const pts = roundPoints(Math.max(0, entry.points));
     const subj = subjectOfStudyEntry(entry);
     weekSpeeches += count;
-    weekPoints += pts;
+    weekPoints = roundPoints(weekPoints + pts);
     weekActiveSet.add(entry.studentId);
 
     const daySlot = dailyMap.get(entry.date);
     if (daySlot) {
       daySlot.speeches += count;
-      daySlot.points += pts;
+      daySlot.points = roundPoints(daySlot.points + pts);
     }
 
     let stuAgg = weeklyStudentAgg.get(entry.studentId);
@@ -576,7 +576,7 @@ export function buildStudyParticipationStats(params: {
       weeklyStudentAgg.set(entry.studentId, stuAgg);
     }
     stuAgg.speeches += count;
-    stuAgg.points += pts;
+    stuAgg.points = roundPoints(stuAgg.points + pts);
     stuAgg.bySubject[subj] = (stuAgg.bySubject[subj] ?? 0) + count;
   }
 
@@ -593,16 +593,16 @@ export function buildStudyParticipationStats(params: {
 
   for (const entry of hk1Entries) {
     const count = speechesOfEntry(entry);
-    const pts = Math.max(0, entry.points);
+    const pts = roundPoints(Math.max(0, entry.points));
     const subj = subjectOfStudyEntry(entry);
     hk1Speeches += count;
-    hk1Points += pts;
+    hk1Points = roundPoints(hk1Points + pts);
     hk1ActiveSet.add(entry.studentId);
 
     const ws = startOfWeekIso(entry.date);
     const wAgg = hk1WeekMap.get(ws) ?? { speeches: 0, points: 0 };
     wAgg.speeches += count;
-    wAgg.points += pts;
+    wAgg.points = roundPoints(wAgg.points + pts);
     hk1WeekMap.set(ws, wAgg);
 
     let stuAgg = hk1StudentAgg.get(entry.studentId);
@@ -611,7 +611,7 @@ export function buildStudyParticipationStats(params: {
       hk1StudentAgg.set(entry.studentId, stuAgg);
     }
     stuAgg.speeches += count;
-    stuAgg.points += pts;
+    stuAgg.points = roundPoints(stuAgg.points + pts);
     stuAgg.bySubject[subj] = (stuAgg.bySubject[subj] ?? 0) + count;
   }
 
@@ -627,7 +627,7 @@ export function buildStudyParticipationStats(params: {
       weekStart,
       label: formatDayMonth(weekStart),
       speeches: agg.speeches,
-      points: agg.points,
+      points: roundPoints(agg.points),
     }));
 
   const avgSpeechesPerStudent =
@@ -653,10 +653,10 @@ export function buildStudyParticipationStats(params: {
       studentCode: stu.code,
       group: stu.group,
       weeklySpeeches: wAgg?.speeches ?? 0,
-      weeklyPoints: wAgg?.points ?? 0,
+      weeklyPoints: roundPoints(wAgg?.points ?? 0),
       weeklyTopSubject,
       hk1Speeches: hAgg?.speeches ?? 0,
-      hk1Points: hAgg?.points ?? 0,
+      hk1Points: roundPoints(hAgg?.points ?? 0),
       topSubject: subjectEntries[0]?.[0] ?? weeklyTopSubject,
       bySubject,
     };
@@ -682,7 +682,7 @@ export function buildStudyParticipationStats(params: {
     availableWeeks,
     weekly: {
       totalSpeeches: weekSpeeches,
-      totalPoints: weekPoints,
+      totalPoints: roundPoints(weekPoints),
       totalEntries: weekEntries.length,
       activeStudents: weekActiveSet.size,
       bySubject: aggregateBySubject(weekEntries),
@@ -694,7 +694,7 @@ export function buildStudyParticipationStats(params: {
       end: hk1.end,
       label: hk1.label,
       totalSpeeches: hk1Speeches,
-      totalPoints: hk1Points,
+      totalPoints: roundPoints(hk1Points),
       totalEntries: hk1Entries.length,
       activeStudents: hk1ActiveSet.size,
       avgSpeechesPerStudent,

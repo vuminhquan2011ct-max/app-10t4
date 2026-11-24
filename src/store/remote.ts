@@ -11,6 +11,7 @@
  * - Device-local view fields (`role`, `currentStudentId`) are NEVER synced.
  */
 
+import { roundPoints } from '@/constants/entry-meta';
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
 import {
   formatPositionsDisplay,
@@ -403,12 +404,15 @@ function mergeEntries(
         !isTombstoned(deletedStudentIds, e.studentId, e.updatedAt, e.createdAt),
     )
     .map((e) => {
-      if (!e.proofUrl) return e;
-      const proofDriveId = extractDriveFileIdFromUrl(e.proofUrl);
-      if (isDriveFileTombstoned(deletedDriveFileIds, proofDriveId)) {
-        return { ...e, proofUrl: null };
+      const safePoints = roundPoints(e.points);
+      let nextEntry = safePoints !== e.points ? { ...e, points: safePoints } : e;
+      if (nextEntry.proofUrl) {
+        const proofDriveId = extractDriveFileIdFromUrl(nextEntry.proofUrl);
+        if (isDriveFileTombstoned(deletedDriveFileIds, proofDriveId)) {
+          nextEntry = { ...nextEntry, proofUrl: null };
+        }
       }
-      return e;
+      return nextEntry;
     })
     .sort((a, b) => ts(b.createdAt) - ts(a.createdAt));
 }

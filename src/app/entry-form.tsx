@@ -41,8 +41,11 @@ import {
   GROUP_BONUS_PRESETS,
   GROUP_PRESETS,
   STUDY_SPEECH_PRESETS,
+  STUDY_STAMP_POINTS,
   STUDY_SUBJECT_PRESETS,
   VIOLATION_PRESETS,
+  formatPoints,
+  roundPoints,
 } from '@/constants/entry-meta';
 import { Radius, Spacing } from '@/constants/theme';
 import { ENTRY_TEMPLATES, type EntryTemplate } from '@/data/seed-extras';
@@ -125,6 +128,8 @@ export default function EntryFormScreen() {
     canRecordStudyForStudent,
     canRecordBonusForStudent,
     canRecordViolationForStudent,
+    canDeleteStudyStamp,
+    deleteStudyStamp,
   } = useClassStore();
   const theme = useTheme();
   const decor = useDecor();
@@ -265,9 +270,6 @@ export default function EntryFormScreen() {
       ? existing.subject
       : '',
   );
-  const [speechCount, setSpeechCount] = useState<number>(
-    existing?.kind === 'study' ? Math.max(1, Math.round(existing.speechCount ?? 1)) : 1,
-  );
   const [level, setLevel] = useState<EntryLevel>(
     existing?.level ??
       (initialMode === 'violation' || initialMode === 'study' || isGroupLeaderOnly
@@ -281,7 +283,7 @@ export default function EntryFormScreen() {
         (initialMode === 'violation'
           ? -5
           : initialMode === 'study'
-            ? 2
+            ? STUDY_STAMP_POINTS
             : isGroupLeaderOnly
               ? 5
               : suggestedPoints('school')),
@@ -462,7 +464,7 @@ export default function EntryFormScreen() {
   const availableModes = useMemo<{ key: RecordMode; label: string; icon: keyof typeof Ionicons.glyphMap; tone: 'success' | 'accent' | 'danger' }[]>(() => {
     const list: { key: RecordMode; label: string; icon: keyof typeof Ionicons.glyphMap; tone: 'success' | 'accent' | 'danger' }[] = [];
     if (allowStudyMode) {
-      list.push({ key: 'study', label: 'Học tập · Phát biểu', icon: 'book', tone: 'success' });
+      list.push({ key: 'study', label: 'Stamp phát biểu', icon: 'book', tone: 'success' });
     }
     if (allowBonusMode) {
       list.push({ key: 'bonus', label: 'Thành tích / HĐ', icon: 'trophy', tone: 'accent' });
@@ -481,8 +483,8 @@ export default function EntryFormScreen() {
       setKind('violation');
       setCategory('other');
       setLevel('class');
-      const n = Number.parseInt(points, 10);
-      setPoints(String(Number.isFinite(n) && n < 0 ? n : -5));
+      const n = Number.parseFloat(points.replace(',', '.'));
+      setPoints(String(Number.isFinite(n) && n < 0 ? roundPoints(n) : -5));
       if (!violationCandidates.some((s) => s.id === owner)) {
         setOwner(violationCandidates[0]?.id ?? null);
       }
@@ -490,7 +492,7 @@ export default function EntryFormScreen() {
       setKind('study');
       setCategory('study');
       setLevel('class');
-      setPoints(String(Math.max(1, speechCount) * 2));
+      setPoints(String(STUDY_STAMP_POINTS));
       if (canRecordStudy) {
         if (!studyCandidates.some((s) => s.id === owner)) {
           setOwner(studyCandidates[0]?.id ?? null);
@@ -501,8 +503,8 @@ export default function EntryFormScreen() {
     } else {
       setKind((prev) => (prev === 'violation' || prev === 'study' ? 'achievement' : prev));
       setCategory((prev) => (prev === 'study' || prev === 'other' ? 'academic' : prev));
-      const n = Number.parseInt(points, 10);
-      setPoints(String(Number.isFinite(n) && n > 0 ? n : suggestedPoints('school')));
+      const n = Number.parseFloat(points.replace(',', '.'));
+      setPoints(String(Number.isFinite(n) && n >= 1 ? roundPoints(n) : suggestedPoints('school')));
       if (canRecordBonus) {
         if (!bonusCandidates.some((s) => s.id === owner)) {
           setOwner(bonusCandidates[0]?.id ?? null);
@@ -510,14 +512,6 @@ export default function EntryFormScreen() {
       } else {
         setOwner(currentStudent?.id ?? null);
       }
-    }
-  };
-
-  const changeSpeechCount = (nextCount: number) => {
-    const safe = Math.max(1, Math.min(20, nextCount));
-    setSpeechCount(safe);
-    if (!existing) {
-      setPoints(String(safe * 2));
     }
   };
 
@@ -549,8 +543,7 @@ export default function EntryFormScreen() {
     setKind('study');
     setCategory('study');
     setLevel('class');
-    setSpeechCount(preset.speechCount);
-    setPoints(String(preset.points));
+    setPoints(String(STUDY_STAMP_POINTS));
     setError(null);
   };
 
@@ -597,7 +590,7 @@ export default function EntryFormScreen() {
     const effectiveTitle =
       title.trim() ||
       (isStudyMode
-        ? `Phát biểu môn ${effectiveStudySubject.trim()} (${speechCount} lượt)`
+        ? `Phát biểu môn ${effectiveStudySubject.trim()} (1 stamp)`
         : '');
 
     if (!effectiveTitle) {
@@ -632,10 +625,12 @@ export default function EntryFormScreen() {
       return;
     }
 
-    const numeric = Number.parseInt(points, 10);
-    const finalPoints = isViolationMode
-      ? -Math.max(1, Math.abs(Number.isFinite(numeric) ? numeric : 5))
-      : Math.max(0, Number.isFinite(numeric) ? numeric : 0);
+    const numeric = Number.parseFloat(points.replace(',', '.'));
+    const finalPoints = isStudyMode
+      ? STUDY_STAMP_POINTS
+      : isViolationMode
+        ? -Math.max(0.25, roundPoints(Math.abs(Number.isFinite(numeric) ? numeric : 5)))
+        : Math.max(0, roundPoints(Number.isFinite(numeric) ? numeric : 0));
     const finalKind: EntryKind = isViolationMode
       ? 'violation'
       : isStudyMode
@@ -656,7 +651,7 @@ export default function EntryFormScreen() {
       proofUrl,
       points: finalPoints,
       subject: isStudyMode ? effectiveStudySubject.trim() : null,
-      speechCount: isStudyMode ? Math.max(1, Math.round(speechCount)) : undefined,
+      speechCount: isStudyMode ? 1 : undefined,
     };
 
     try {
@@ -674,18 +669,18 @@ export default function EntryFormScreen() {
         decor.recordMissionProgress('submit_entry', 1);
         if (isViolationMode) {
           showToast(
-            `Đã ghi nhận vi phạm (${finalPoints}đ) cho ${selectedTarget?.name ?? 'học sinh'}!`,
+            `Đã ghi nhận vi phạm (${formatPoints(finalPoints)}đ) cho ${selectedTarget?.name ?? 'học sinh'}!`,
             'warning',
           );
         } else if (isStudyMode) {
           showToast(
             isOfficerModeForTarget
-              ? `Đã ghi ${speechCount} lượt phát biểu môn ${effectiveStudySubject} (+${finalPoints}đ) cho ${selectedTarget?.name ?? 'học sinh'}! 📚`
-              : `Đã gửi ${speechCount} lượt phát biểu môn ${effectiveStudySubject} lên chờ GVCN duyệt!`,
+              ? `Đã ghi 1 stamp phát biểu môn ${effectiveStudySubject} (+${formatPoints(STUDY_STAMP_POINTS)}đ) cho ${selectedTarget?.name ?? 'học sinh'}! 📚`
+              : `Đã gửi 1 stamp phát biểu môn ${effectiveStudySubject} (+${formatPoints(STUDY_STAMP_POINTS)}đ) lên chờ GVCN duyệt!`,
           );
         } else if (isOfficerModeForTarget) {
           showToast(
-            `Đã ghi thành tích / điểm cộng (+${finalPoints}đ) cho ${selectedTarget?.name ?? 'học sinh'}! ⚡`,
+            `Đã ghi thành tích / điểm cộng (+${formatPoints(finalPoints)}đ) cho ${selectedTarget?.name ?? 'học sinh'}! ⚡`,
           );
         } else {
           showToast('Đã gửi lên chờ GVCN duyệt!');
@@ -697,11 +692,35 @@ export default function EntryFormScreen() {
     }
   };
 
-  const remove = () => {
+  const canDeleteExistingStudyStamp = Boolean(
+    existing && existing.kind === 'study' && canDeleteStudyStamp(existing),
+  );
+  const canDeleteExisting = Boolean(
+    existing &&
+      (canDeleteExistingStudyStamp || (!readOnly && (isTeacher || existing.status === 'pending'))),
+  );
+
+  const remove = async () => {
     if (!existing) return;
     if (!confirmDelete) {
       setConfirmDelete(true);
-      showToast('Bấm lần nữa để xác nhận xóa mục này', 'warning');
+      showToast(
+        existing.kind === 'study'
+          ? 'Bấm lần nữa để xoá stamp phát biểu này'
+          : 'Bấm lần nữa để xác nhận xóa mục này',
+        'warning',
+      );
+      return;
+    }
+    if (existing.kind === 'study') {
+      const ok = await deleteStudyStamp(existing.id);
+      if (ok) {
+        showToast('Đã xoá stamp phát biểu', 'warning');
+        router.back();
+      } else {
+        showToast('Bạn không có quyền xoá stamp này', 'danger');
+        setConfirmDelete(false);
+      }
       return;
     }
     removeEntry(existing.id);
@@ -713,8 +732,8 @@ export default function EntryFormScreen() {
     ? null
     : isStudyMode
       ? isGroupLeaderOnly
-        ? `Quyền ${officerPositionLabel || 'Tổ trưởng'} · Ghi phát biểu thành viên ${currentStudent?.group || 'trong Tổ'}`
-        : `Quyền ${isTeacher ? 'GVCN' : isSubjectTeacher ? `GV ${subjectName ?? 'Bộ môn'}` : officerPositionLabel || 'Ban cán sự'} · Ghi nhận phát biểu theo môn`
+        ? `Quyền ${officerPositionLabel || 'Tổ trưởng'} · Ghi 1 Stamp phát biểu thành viên ${currentStudent?.group || 'trong Tổ'}`
+        : `Quyền ${isTeacher ? 'GVCN' : isSubjectTeacher ? `GV ${subjectName ?? 'Bộ môn'}` : officerPositionLabel || 'Ban cán sự'} · Ghi 1 Stamp phát biểu (+0,25đ)`
       : isViolationMode
         ? `Quyền ${isTeacher ? 'GVCN' : officerPositionLabel || 'Lớp phó kỷ luật'} · Ghi nhận học sinh vi phạm`
         : isGroupLeaderOnly
@@ -726,7 +745,7 @@ export default function EntryFormScreen() {
     : existing
       ? 'Sửa ghi nhận'
       : isStudyMode
-        ? 'Ghi phát biểu theo môn'
+        ? 'Ghi 1 Stamp phát biểu'
         : isViolationMode
           ? 'Ghi học sinh vi phạm'
           : isGroupLeaderOnly
@@ -734,11 +753,13 @@ export default function EntryFormScreen() {
             : 'Ghi Thành tích & Hoạt động';
 
   const headerSubtitle = readOnly
-    ? 'Chỉ xem — mục đã được xét duyệt'
+    ? canDeleteExistingStudyStamp
+      ? 'Chỉ xem · Bạn có thể xoá stamp này ở cuối trang nếu ghi nhầm'
+      : 'Chỉ xem — mục đã được xét duyệt'
     : !isOfficerModeForTarget
       ? 'Sẽ gửi lên chờ GVCN duyệt'
       : isStudyMode
-        ? 'Cập nhật ngay vào thống kê Tuần & Cộng dồn Học kỳ I'
+        ? '1 lần phát biểu = 1 Stamp (+0,25đ) · Cộng dồn Tuần & HK I'
         : isViolationMode
           ? 'Trừ điểm thi đua trực tiếp & lưu người ghi nhận'
           : 'Tách riêng với Học tập · Hỗ trợ Thành tích Học thuật';
@@ -809,7 +830,7 @@ export default function EntryFormScreen() {
                 </Text>
                 <Text style={{ color: theme.textSecondary, fontSize: 11.5, lineHeight: 16 }}>
                   {isStudyMode
-                    ? 'Tách riêng Học tập (phát biểu theo từng môn) để tự động thống kê theo Tuần và cộng dồn cuối Học kỳ I.'
+                    ? 'Quy định chuẩn: 1 lần phát biểu = 1 Stamp = +0,25 điểm · Tự động thống kê theo Tuần và cộng dồn cuối Học kỳ I.'
                     : isGroupLeaderOnly
                       ? 'Tổ trưởng chỉ chọn được học sinh trong đúng Tổ của mình và ghi điểm cộng trên lớp.'
                       : isDisciplineVPOnly
@@ -890,47 +911,20 @@ export default function EntryFormScreen() {
                 clearable
               />
 
-              {/* Speech Count Stepper */}
-              <View style={styles.stepperWrap}>
-                <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>
-                  Số lượt phát biểu
-                </Text>
-                <View style={styles.stepperRow}>
-                  <Pressable
-                    onPress={() => changeSpeechCount(speechCount - 1)}
-                    accessibilityRole="button"
-                    accessibilityLabel="Giảm số lượt phát biểu"
-                    style={[styles.stepBtn, { backgroundColor: theme.backgroundElement }]}>
-                    <Ionicons name="remove" size={18} color={theme.text} />
-                  </Pressable>
-                  {[1, 2, 3, 4, 5].map((n) => (
-                    <Pressable
-                      key={n}
-                      onPress={() => changeSpeechCount(n)}
-                      style={[
-                        styles.stepPill,
-                        {
-                          backgroundColor:
-                            speechCount === n ? theme.success : theme.backgroundElement,
-                          borderColor: speechCount === n ? theme.success : theme.border,
-                        },
-                      ]}>
-                      <Text
-                        style={[
-                          styles.stepPillText,
-                          { color: speechCount === n ? '#FFFFFF' : theme.text },
-                        ]}>
-                        {n === 5 && speechCount > 5 ? `${speechCount}` : `${n}`}
-                      </Text>
-                    </Pressable>
-                  ))}
-                  <Pressable
-                    onPress={() => changeSpeechCount(speechCount + 1)}
-                    accessibilityRole="button"
-                    accessibilityLabel="Tăng số lượt phát biểu"
-                    style={[styles.stepBtn, { backgroundColor: theme.backgroundElement }]}>
-                    <Ionicons name="add" size={18} color={theme.text} />
-                  </Pressable>
+              {/* Fixed Stamp Rule Banner (1 speech = 1 stamp = +0.25đ) */}
+              <View
+                style={[
+                  styles.stampRuleBox,
+                  { backgroundColor: theme.successSoft, borderColor: theme.success },
+                ]}>
+                <Ionicons name="checkmark-circle" size={18} color={theme.success} />
+                <View style={styles.flex}>
+                  <Text style={[styles.stampRuleTitle, { color: theme.success }]}>
+                    {`1 lần phát biểu = 1 Stamp = +${formatPoints(STUDY_STAMP_POINTS)} điểm`}
+                  </Text>
+                  <Text style={{ color: theme.textSecondary, fontSize: 11.5, lineHeight: 16 }}>
+                    Điểm cố định theo quy định lớp, tự động cộng dồn vào bảng điểm Tuần & Học kỳ I.
+                  </Text>
                 </View>
               </View>
 
@@ -953,7 +947,7 @@ export default function EntryFormScreen() {
                           pressed && styles.pressed,
                         ]}>
                         <Text style={[styles.presetText, { color: theme.success }]}>
-                          {`${preset.title} (+${preset.points}đ)`}
+                          {`${preset.title} (+${formatPoints(STUDY_STAMP_POINTS)}đ)`}
                         </Text>
                       </Pressable>
                     ))}
@@ -984,7 +978,7 @@ export default function EntryFormScreen() {
                         pressed && styles.pressed,
                       ]}>
                       <Text style={[styles.presetText, { color: theme.danger }]}>
-                        {`${preset.title} (${preset.points}đ)`}
+                        {`${preset.title} (${formatPoints(preset.points)}đ)`}
                       </Text>
                     </Pressable>
                   ))}
@@ -1014,12 +1008,12 @@ export default function EntryFormScreen() {
                             pressed && styles.pressed,
                           ]}>
                           <Text style={[styles.presetText, { color: theme.gold }]}>
-                            {`${preset.title} (+${preset.points}đ)`}
+                            {`${preset.title} (+${formatPoints(preset.points)}đ)`}
                           </Text>
                         </Pressable>
                       ))
                     : null}
-                  {GROUP_BONUS_PRESETS.map((preset) => (
+                  {GROUP_BONUS_PRESETS.filter((preset) => preset.kind !== 'study').map((preset) => (
                     <Pressable
                       key={preset.title}
                       onPress={() => applyBonusPreset(preset)}
@@ -1029,7 +1023,7 @@ export default function EntryFormScreen() {
                         pressed && styles.pressed,
                       ]}>
                       <Text style={[styles.presetText, { color: theme.success }]}>
-                        {`${preset.title} (+${preset.points}đ)`}
+                        {`${preset.title} (+${formatPoints(preset.points)}đ)`}
                       </Text>
                     </Pressable>
                   ))}
@@ -1147,7 +1141,7 @@ export default function EntryFormScreen() {
             <View style={styles.lockedKindRow}>
               <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>Phân loại</Text>
               <Badge
-                label={`Học tập · Phát biểu (${speechCount} lượt)`}
+                label={`Học tập · 1 Stamp (+${formatPoints(STUDY_STAMP_POINTS)}đ)`}
                 color={'success'}
                 soft={'successSoft'}
                 icon={'book'}
@@ -1169,7 +1163,7 @@ export default function EntryFormScreen() {
           <TextField
             label={
               isStudyMode
-                ? 'Nội dung phát biểu (để trống sẽ tự điền theo môn & số lượt)'
+                ? 'Nội dung phát biểu (để trống sẽ tự điền theo môn)'
                 : isViolationMode
                   ? 'Nội dung vi phạm / nhắc nhở'
                   : isGroupLeaderOnly
@@ -1229,28 +1223,22 @@ export default function EntryFormScreen() {
 
           <DatePickerField label={'Ngày diễn ra'} value={date} onChange={setDate} />
 
-          <TextField
-            label={
-              isViolationMode
-                ? 'Điểm trừ kỷ luật (số âm)'
-                : isStudyMode
-                  ? 'Điểm học tập (+)'
-                  : 'Điểm thi đua (+)'
-            }
-            icon={isViolationMode ? 'remove-circle-outline' : 'ribbon-outline'}
-            value={points}
-            onChangeText={setPoints}
-            keyboardType={isViolationMode ? 'numbers-and-punctuation' : 'number-pad'}
-            hint={
-              isViolationMode
-                ? 'Tự động lưu dưới dạng điểm trừ (ví dụ -5đ) và hiển thị rõ trên nhật ký lớp.'
-                : isStudyMode
-                  ? 'Mặc định +2đ mỗi lượt phát biểu, cộng dồn vào thống kê Tuần & Học kỳ I.'
+          {!isStudyMode ? (
+            <TextField
+              label={isViolationMode ? 'Điểm trừ kỷ luật (số âm)' : 'Điểm thi đua (+)'}
+              icon={isViolationMode ? 'remove-circle-outline' : 'ribbon-outline'}
+              value={points}
+              onChangeText={setPoints}
+              keyboardType={isViolationMode ? 'numbers-and-punctuation' : 'decimal-pad'}
+              hint={
+                isViolationMode
+                  ? 'Tự động lưu dưới dạng điểm trừ (ví dụ -5đ) và hiển thị rõ trên nhật ký lớp.'
                   : isGroupLeader || isDisciplineVP || isClassMonitor
                     ? 'Điểm cộng do Ban cán sự ghi nhận sẽ cập nhật ngay vào bảng điểm.'
                     : 'Gợi ý theo cấp độ, giáo viên có thể điều chỉnh khi duyệt.'
-            }
-          />
+              }
+            />
+          ) : null}
 
           <TextField
             label={'Mô tả / Ghi chú chi tiết'}
@@ -1345,8 +1333,8 @@ export default function EntryFormScreen() {
                   ? 'Lưu thay đổi'
                   : isStudyMode
                     ? isOfficerModeForTarget
-                      ? `Lưu ${speechCount} lượt phát biểu ngay`
-                      : 'Gửi lượt phát biểu lên GVCN'
+                      ? `Lưu 1 Stamp (+${formatPoints(STUDY_STAMP_POINTS)}đ) ngay`
+                      : `Gửi 1 Stamp (+${formatPoints(STUDY_STAMP_POINTS)}đ) lên GVCN`
                     : isViolationMode
                       ? 'Ghi nhận vi phạm'
                       : isOfficerModeForTarget
@@ -1360,12 +1348,22 @@ export default function EntryFormScreen() {
               onPress={save}
             />
           ) : null}
-          {existing && !readOnly && (isTeacher || existing.status === 'pending') ? (
+          {canDeleteExisting && existing ? (
             <Button
-              label={confirmDelete ? 'Bấm lần nữa để xoá vĩnh viễn' : 'Xoá mục này'}
+              label={
+                confirmDelete
+                  ? existing.kind === 'study'
+                    ? 'Bấm lần nữa để xoá stamp này'
+                    : 'Bấm lần nữa để xoá vĩnh viễn'
+                  : existing.kind === 'study'
+                    ? 'Xoá stamp phát biểu'
+                    : 'Xoá mục này'
+              }
               variant={'danger'}
               icon={'trash-outline'}
-              onPress={remove}
+              onPress={() => {
+                void remove();
+              }}
             />
           ) : null}
         </ScrollView>
@@ -1417,24 +1415,15 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 6,
   },
-  stepperWrap: { gap: Spacing.one + 2 },
-  stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  stepBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: Radius.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stepPill: {
-    flex: 1,
-    height: 38,
-    borderRadius: Radius.sm,
+  stampRuleBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.two,
+    padding: Spacing.two + 2,
+    borderRadius: Radius.md,
     borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  stepPillText: { fontSize: 14, fontWeight: '900' },
+  stampRuleTitle: { fontSize: 13, fontWeight: '900', marginBottom: 2 },
   wrapChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   lockedKindRow: {
     flexDirection: 'row',

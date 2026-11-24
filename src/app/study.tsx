@@ -1,9 +1,9 @@
 /**
- * Flagship "Học tập & Phát biểu theo môn" Hub (/study).
+ * Flagship "Học tập & Stamp phát biểu theo môn" Hub (/study).
  *
- * Cleanly separates daily subject speech/participation logging from Achievements:
- * 1. Ghi phát biểu: 1-tap +1/+2/+3 speech logging by subject & student.
- * 2. Theo tuần: Weekly statistics by subject, weekday (T2-CN), group & student.
+ * Rule: 1 lần phát biểu = 1 Stamp = +0,25 điểm.
+ * 1. Ghi phát biểu: 1-tap +1 Stamp (+0,25đ) & 2-tap −1 Xoá per student + deletable stamp history.
+ * 2. Theo tuần: Weekly statistics by subject, weekday (T2-CN), group, student & deletable weekly stamps.
  * 3. Cộng dồn Học kỳ I: End-of-Semester-1 cumulative ledger across all weeks & subjects,
  *    with 1-tap Excel (.csv) export and Zalo text report sharing.
  */
@@ -12,7 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { PageHeader } from '@/components/page-header';
@@ -31,7 +31,10 @@ import { useToast } from '@/components/ui/toast';
 import {
   GROUP_PRESETS,
   STUDY_SPEECH_PRESETS,
+  STUDY_STAMP_POINTS,
   STUDY_SUBJECT_PRESETS,
+  formatPoints,
+  formatSignedPoints,
 } from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
@@ -44,9 +47,10 @@ import {
 } from '@/lib/export';
 import { stripVietnamese } from '@/lib/intelligence';
 import { useClassStore } from '@/store/class-store';
-import type { PublicStudentRosterItem } from '@/types/models';
+import type { Entry, PublicStudentRosterItem } from '@/types/models';
 
 type StudyTab = 'record' | 'weekly' | 'semester1';
+type HistoryScope = 'subject' | 'date' | 'all';
 
 const MEDAL_COLORS = ['gold', 'silver', 'bronze'] as const;
 const MEDAL_SOFTS = ['goldSoft', 'silverSoft', 'bronzeSoft'] as const;
@@ -58,6 +62,8 @@ export default function StudyParticipationScreen() {
   }>();
   const {
     classInfo,
+    entries,
+    classRosterPublic,
     isTeacher,
     isSubjectTeacher,
     subjectName,
@@ -67,6 +73,8 @@ export default function StudyParticipationScreen() {
     currentStudent,
     canRecordStudy,
     studyTargetStudents,
+    canDeleteStudyStamp,
+    deleteStudyStamp,
     quickLogStudyParticipation,
     getStudyParticipationReport,
     updateClassInfo,
@@ -96,7 +104,11 @@ export default function StudyParticipationScreen() {
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [studentQuery, setStudentQuery] = useState<string>('');
   const [selectedPresetTitle, setSelectedPresetTitle] = useState<string>('');
-  const [loggingKey, setLoggingKey] = useState<string | null>(null);
+  const [historyScope, setHistoryScope] = useState<HistoryScope>('subject');
+  const [loggingStudentId, setLoggingStudentId] = useState<string | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [deletingEntryId, setDeletingEntryId] = useState<string | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedWeekStart, setSelectedWeekStart] = useState<string | null>(null);
 
   // GVCN custom HK1 date window editor
@@ -104,12 +116,26 @@ export default function StudyParticipationScreen() {
   const [hk1StartDraft, setHk1StartDraft] = useState<string>('');
   const [hk1EndDraft, setHk1EndDraft] = useState<string>('');
 
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current);
+        confirmTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const effectiveSubject = customSubject.trim() || selectedSubject;
   const report = getStudyParticipationReport(selectedWeekStart);
 
   const studentRowById = useMemo(
     () => new Map(report.studentRows.map((r) => [r.studentId, r])),
     [report.studentRows],
+  );
+
+  const rosterById = useMemo(
+    () => new Map(classRosterPublic.map((s) => [s.id, s])),
+    [classRosterPublic],
   );
 
   // Target list for Tab 1 (strictly scoped by store RBAC; regular student sees self)
@@ -151,6 +177,59 @@ export default function StudyParticipationScreen() {
       .sort((a, b) => a.name.localeCompare(b.name, 'vi'));
   }, [recordCandidates, groupFilter, studentQuery]);
 
+  // All study stamp entries sorted newest first
+  const allStudyStamps = useMemo(
+    () =>
+      entries
+        .filter((e) => e.kind === 'study')
+        .sort(
+          (a, b) =>
+            b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt),
+        ),
+    [entries],
+  );
+
+  // Latest deletable stamp per student for the currently selected subject
+  const latestDeletableByStudent = useMemo(() => {
+    const map = new Map<string, Entry>();
+    const targetSubKey = effectiveSubject.trim().toLowerCase();
+    for (const e of allStudyStamps) {
+      if (map.has(e.studentId)) continue;
+      if ((e.subject?.trim() || '').toLowerCase() !== targetSubKey) continue;
+      if (!canDeleteStudyStamp(e)) continue;
+      map.set(e.studentId, e);
+    }
+    return map;
+  }, [allStudyStamps, effectiveSubject, canDeleteStudyStamp]);
+
+  // Tab 1 stamp history filtered by selected scope
+  const historyStamps = useMemo(() => {
+    const targetSubKey = effectiveSubject.trim().toLowerCase();
+    return allStudyStamps
+      .filter((e) => {
+        if (historyScope === 'subject') {
+          return (e.subject?.trim() || '').toLowerCase() === targetSubKey;
+        }
+        if (historyScope === 'date') {
+          return e.date === recordDate;
+        }
+        return true;
+      })
+      .slice(0, 30);
+  }, [allStudyStamps, historyScope, effectiveSubject, recordDate]);
+
+  // Tab 2 weekly stamps (within selectedWeekStart .. selectedWeekEnd)
+  const weeklyStamps = useMemo(
+    () =>
+      allStudyStamps
+        .filter(
+          (e) =>
+            e.date >= report.selectedWeekStart && e.date <= report.selectedWeekEnd,
+        )
+        .slice(0, 40),
+    [allStudyStamps, report.selectedWeekStart, report.selectedWeekEnd],
+  );
+
   const weeklySortedRows = useMemo(
     () =>
       [...report.studentRows]
@@ -175,31 +254,22 @@ export default function StudyParticipationScreen() {
     [report.studentRows],
   );
 
-  const handleQuickLog = async (
-    student: PublicStudentRosterItem,
-    speechCount: number,
-    customPoints?: number,
-    presetLabel?: string,
-  ) => {
+  const handleLogOneStamp = async (student: PublicStudentRosterItem) => {
     const sub = effectiveSubject.trim();
     if (!sub) {
-      showToast('Hãy chọn hoặc nhập tên môn học trước khi ghi nhận!', 'warning');
+      showToast('Hãy chọn hoặc nhập tên môn học trước khi ghi stamp!', 'warning');
       return;
     }
-    const key = `${student.id}:${speechCount}`;
-    if (loggingKey) return;
-    setLoggingKey(key);
+    if (loggingStudentId || deletingEntryId) return;
+    setLoggingStudentId(student.id);
     try {
-      const pts = customPoints ?? speechCount * 2;
       const resolvedTitle =
-        presetLabel?.trim() ||
-        selectedPresetTitle.trim() ||
-        `Phát biểu môn ${sub} (${speechCount} lượt)`;
+        selectedPresetTitle.trim() || `Phát biểu môn ${sub} (1 stamp)`;
       await quickLogStudyParticipation({
         studentId: student.id,
         subject: sub,
-        speechCount,
-        points: pts,
+        speechCount: 1,
+        points: STUDY_STAMP_POINTS,
         date: recordDate,
         title: resolvedTitle,
       });
@@ -208,13 +278,54 @@ export default function StudyParticipationScreen() {
       }
       showToast(
         canRecordStudy
-          ? `Đã ghi +${speechCount} lượt môn ${sub} (+${pts}đ) cho ${student.name}! 📚`
-          : `Đã gửi +${speechCount} lượt môn ${sub} lên chờ GVCN duyệt!`,
+          ? `Đã đóng +1 Stamp (+${formatPoints(STUDY_STAMP_POINTS)}đ) môn ${sub} cho ${student.name}! 🔖`
+          : `Đã gửi +1 Stamp (+${formatPoints(STUDY_STAMP_POINTS)}đ) môn ${sub} lên chờ GVCN duyệt!`,
       );
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Không thể ghi nhận phát biểu', 'danger');
+      showToast(err instanceof Error ? err.message : 'Không thể ghi nhận stamp', 'danger');
     } finally {
-      setLoggingKey(null);
+      setLoggingStudentId(null);
+    }
+  };
+
+  const handleDeleteStamp = async (entry: Entry, confirmKey: string, studentName: string) => {
+    if (deletingEntryId || loggingStudentId) return;
+    if (confirmDeleteKey !== confirmKey) {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      setConfirmDeleteKey(confirmKey);
+      confirmTimerRef.current = setTimeout(() => {
+        confirmTimerRef.current = null;
+        setConfirmDeleteKey(null);
+      }, 3_500);
+      showToast(
+        `Bấm lần nữa để xác nhận xoá 1 stamp (-${formatPoints(entry.points)}đ) của ${studentName}`,
+        'warning',
+      );
+      return;
+    }
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
+    }
+    setConfirmDeleteKey(null);
+    setDeletingEntryId(entry.id);
+    try {
+      const ok = await deleteStudyStamp(entry.id);
+      if (ok) {
+        if (Platform.OS !== 'web') {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+        }
+        showToast(
+          `Đã xoá 1 stamp (-${formatPoints(entry.points)}đ) của ${studentName}`,
+          'info',
+        );
+      } else {
+        showToast('Bạn không có quyền xoá stamp này hoặc stamp không còn tồn tại.', 'warning');
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Không thể xoá stamp', 'danger');
+    } finally {
+      setDeletingEntryId(null);
     }
   };
 
@@ -223,13 +334,13 @@ export default function StudyParticipationScreen() {
       const csv = buildStudyParticipationExcelCsv(report, mode);
       const safeName =
         mode === 'weekly'
-          ? `phat-bieu-tuan-${report.selectedWeekStart}-${classInfo.name}.csv`
-          : `phat-bieu-cong-don-hk1-${classInfo.name}.csv`;
+          ? `stamp-phat-bieu-tuan-${report.selectedWeekStart}-${classInfo.name}.csv`
+          : `stamp-phat-bieu-cong-don-hk1-${classInfo.name}.csv`;
       await downloadOrShareExcelCsv(safeName, csv);
       showToast(
         mode === 'weekly'
-          ? 'Đã xuất file Excel (.csv) thống kê phát biểu tuần!'
-          : 'Đã xuất file Excel (.csv) cộng dồn cuối Học kỳ I!',
+          ? 'Đã xuất file Excel (.csv) thống kê stamp phát biểu tuần!'
+          : 'Đã xuất file Excel (.csv) cộng dồn stamp cuối Học kỳ I!',
       );
     } catch {
       showToast('Không thể xuất file Excel lúc này', 'danger');
@@ -240,11 +351,11 @@ export default function StudyParticipationScreen() {
     const text = buildStudyParticipationReportText(report, mode);
     const title =
       mode === 'weekly'
-        ? `Thống kê phát biểu tuần — Lớp ${classInfo.name}`
-        : `Tổng kết phát biểu Học kỳ I — Lớp ${classInfo.name}`;
+        ? `Thống kê stamp phát biểu tuần — Lớp ${classInfo.name}`
+        : `Tổng kết stamp phát biểu Học kỳ I — Lớp ${classInfo.name}`;
     const res = await shareOrCopyText(text, title);
     showToast(
-      res === 'copied' ? 'Đã sao chép báo cáo phát biểu để dán gửi Zalo!' : 'Đã mở chia sẻ báo cáo!',
+      res === 'copied' ? 'Đã sao chép báo cáo stamp để dán gửi Zalo!' : 'Đã mở chia sẻ báo cáo!',
     );
   };
 
@@ -281,18 +392,82 @@ export default function StudyParticipationScreen() {
   const activeExportMode: 'weekly' | 'semester1' = activeTab === 'weekly' ? 'weekly' : 'semester1';
 
   const authorityLabel = isTeacher
-    ? 'Quyền GVCN · Ghi nhận phát biểu toàn lớp (duyệt tức thì)'
+    ? 'Quyền GVCN · Đóng & xoá stamp phát biểu toàn lớp (duyệt tức thì)'
     : isSubjectTeacher
-      ? `Quyền GV Bộ môn ${subjectName ?? ''} · Ghi nhận phát biểu toàn lớp`
+      ? `Quyền GV Bộ môn ${subjectName ?? ''} · Đóng & xoá stamp phát biểu toàn lớp`
       : canRecordStudy
-        ? `Quyền ${officerPositionLabel || 'Ban cán sự học tập'} · Ghi nhận phát biểu trực tiếp`
-        : 'Tự ghi nhận phát biểu cá nhân (gửi chờ GVCN duyệt)';
+        ? `Quyền ${officerPositionLabel || 'Ban cán sự học tập'} · Đóng stamp phát biểu trực tiếp`
+        : 'Tự gửi stamp phát biểu cá nhân (chờ GVCN duyệt)';
+
+  const renderStampRow = (entry: Entry, prefix: string) => {
+    const stu = rosterById.get(entry.studentId);
+    const stuName =
+      stu?.name ??
+      (entry.studentId === currentStudent?.id ? currentStudent.name : 'Học sinh');
+    const deletable = canDeleteStudyStamp(entry);
+    const cKey = `${prefix}:${entry.id}`;
+    const confirming = confirmDeleteKey === cKey;
+    const busy = deletingEntryId === entry.id;
+
+    return (
+      <View
+        key={cKey}
+        style={[
+          styles.stampLogRow,
+          { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+        ]}>
+        <Avatar name={stuName} size={34} />
+        <View style={styles.flex}>
+          <Text style={[styles.stampLogName, { color: theme.text }]} numberOfLines={1}>
+            {`${stuName} · ${entry.subject || 'Học tập'}`}
+          </Text>
+          <Text style={{ color: theme.textMuted, fontSize: 11.5 }} numberOfLines={1}>
+            {[
+              formatDate(entry.date),
+              `1 stamp (${formatSignedPoints(entry.points)})`,
+              entry.status === 'pending' ? 'Chờ duyệt' : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </Text>
+        </View>
+        {deletable ? (
+          <Pressable
+            disabled={Boolean(deletingEntryId) || Boolean(loggingStudentId)}
+            onPress={() => void handleDeleteStamp(entry, cKey, stuName)}
+            accessibilityRole="button"
+            accessibilityLabel={confirming ? `Xác nhận xoá stamp của ${stuName}` : `Xoá stamp của ${stuName}`}
+            style={({ pressed }) => [
+              styles.stampDelBtn,
+              {
+                backgroundColor: confirming ? theme.danger : theme.dangerSoft,
+                borderColor: theme.danger,
+              },
+              pressed && styles.pressed,
+            ]}>
+            <Ionicons
+              name={confirming ? 'trash' : 'trash-outline'}
+              size={13}
+              color={confirming ? '#FFFFFF' : theme.danger}
+            />
+            <Text
+              style={[
+                styles.stampDelText,
+                { color: confirming ? '#FFFFFF' : theme.danger },
+              ]}>
+              {busy ? 'Đang xoá...' : confirming ? 'Xoá?' : 'Xoá'}
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  };
 
   return (
     <Screen withTabBar={false} onRefresh={pullNow}>
       <PageHeader
-        title={'Học tập & Phát biểu Môn'}
-        subtitle={`Lớp ${classInfo.name} · Thống kê theo tuần & Cộng dồn cuối Học kỳ I`}
+        title={'Học tập & Stamp Phát biểu'}
+        subtitle={`Lớp ${classInfo.name} · 1 lần phát biểu = 1 Stamp = +0,25 điểm`}
         rightIcon={'add-circle-outline'}
         rightLabel={'Ghi chi tiết'}
         onRightPress={() =>
@@ -312,8 +487,8 @@ export default function StudyParticipationScreen() {
 
           <View style={styles.heroTopRow}>
             <View style={styles.heroPill}>
-              <Ionicons name="book" size={11} color="#FDE68A" />
-              <Text style={styles.heroPillText}>HỌC TẬP · PHÁT BIỂU THEO MÔN</Text>
+              <Ionicons name="bookmark" size={11} color="#FDE68A" />
+              <Text style={styles.heroPillText}>1 PHÁT BIỂU = 1 STAMP = +0,25Đ</Text>
             </View>
             <View style={styles.heroPillDark}>
               <Ionicons name="calendar-outline" size={11} color="#A7F3D0" />
@@ -324,13 +499,17 @@ export default function StudyParticipationScreen() {
           <View style={styles.heroKpiRow}>
             <View style={styles.heroKpiBox}>
               <Text style={styles.heroKpiVal}>{report.weekly.totalSpeeches}</Text>
-              <Text style={styles.heroKpiLab}>Lượt tuần này</Text>
-              <Text style={styles.heroKpiSub}>{`+${report.weekly.totalPoints}đ`}</Text>
+              <Text style={styles.heroKpiLab}>Stamps tuần này</Text>
+              <Text style={styles.heroKpiSub}>
+                {`+${formatPoints(report.weekly.totalPoints)}đ`}
+              </Text>
             </View>
             <View style={styles.heroKpiBox}>
               <Text style={styles.heroKpiVal}>{report.semester1.totalSpeeches}</Text>
               <Text style={styles.heroKpiLab}>Cộng dồn HK I</Text>
-              <Text style={styles.heroKpiSub}>{`+${report.semester1.totalPoints}đ`}</Text>
+              <Text style={styles.heroKpiSub}>
+                {`+${formatPoints(report.semester1.totalPoints)}đ`}
+              </Text>
             </View>
             <View style={styles.heroKpiBox}>
               <Text style={styles.heroKpiVal}>{report.semester1.activeStudents}</Text>
@@ -343,7 +522,7 @@ export default function StudyParticipationScreen() {
             <Pressable
               onPress={() => void handleExportCsv(activeExportMode)}
               accessibilityRole="button"
-              accessibilityLabel="Xuất file Excel thống kê phát biểu"
+              accessibilityLabel="Xuất file Excel thống kê stamp phát biểu"
               style={({ pressed }) => [styles.heroWhiteBtn, pressed && styles.pressed]}>
               <Ionicons name="download-outline" size={16} color={gradient[0]} />
               <Text style={[styles.heroWhiteBtnText, { color: gradient[0] }]}>
@@ -353,7 +532,7 @@ export default function StudyParticipationScreen() {
             <Pressable
               onPress={() => void handleShareText(activeExportMode)}
               accessibilityRole="button"
-              accessibilityLabel="Sao chép báo cáo phát biểu gửi Zalo"
+              accessibilityLabel="Sao chép báo cáo stamp phát biểu gửi Zalo"
               style={({ pressed }) => [styles.heroGlassBtn, pressed && styles.pressed]}>
               <Ionicons name="share-social-outline" size={16} color="#FFFFFF" />
               <Text style={styles.heroGlassBtnText}>Copy báo cáo Zalo</Text>
@@ -367,7 +546,7 @@ export default function StudyParticipationScreen() {
         <View style={[styles.segTabs, { backgroundColor: theme.backgroundElement }]}>
           {(
             [
-              { key: 'record', label: 'Ghi phát biểu', icon: 'hand-left-outline' },
+              { key: 'record', label: 'Ghi phát biểu', icon: 'bookmark-outline' },
               { key: 'weekly', label: 'Theo tuần', icon: 'bar-chart-outline' },
               { key: 'semester1', label: 'Cộng dồn HK I', icon: 'ribbon-outline' },
             ] as const
@@ -400,7 +579,7 @@ export default function StudyParticipationScreen() {
         </View>
       </FadeIn>
 
-      {/* ==================== TAB 1: 1-TAP SUBJECT PARTICIPATION RECORDER ==================== */}
+      {/* ==================== TAB 1: 1-TAP STAMP RECORDER & DELETION ==================== */}
       {activeTab === 'record' ? (
         <>
           <FadeIn index={2}>
@@ -423,7 +602,7 @@ export default function StudyParticipationScreen() {
                 </View>
                 <View style={styles.flex}>
                   <Text style={[styles.cardTitle, { color: theme.text }]}>
-                    Ghi nhận phát biểu 1 chạm theo Môn học
+                    Đóng Stamp phát biểu (1 lần = 1 Stamp = +0,25đ)
                   </Text>
                   <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
                     {authorityLabel}
@@ -435,7 +614,7 @@ export default function StudyParticipationScreen() {
               <View style={styles.sectionBlock}>
                 <View style={styles.labelRow}>
                   <Text style={[styles.microLabel, { color: theme.textSecondary }]}>
-                    CHỌN MÔN HỌC ĐANG GHI NHẬN
+                    CHỌN MÔN HỌC ĐANG GHI STAMP
                   </Text>
                   <Badge
                     label={`Môn: ${effectiveSubject}`}
@@ -472,14 +651,14 @@ export default function StudyParticipationScreen() {
               {/* Optional Speech Preset & Date */}
               <View style={styles.sectionBlock}>
                 <Text style={[styles.microLabel, { color: theme.textSecondary }]}>
-                  MẪU NỘI DUNG NHANH (TUỲ CHỌN)
+                  MẪU NỘI DUNG NHANH (TUỲ CHỌN · MỖI LẦN = 1 STAMP)
                 </Text>
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.chips}>
                   <Chip
-                    label={'Tự động theo số lượt'}
+                    label={'Mặc định (1 stamp)'}
                     selected={!selectedPresetTitle}
                     onPress={() => setSelectedPresetTitle('')}
                   />
@@ -541,6 +720,11 @@ export default function StudyParticipationScreen() {
               const subSpeeches = row?.bySubject?.[effectiveSubject] ?? 0;
               const weeklySpeeches = row?.weeklySpeeches ?? 0;
               const hk1Speeches = row?.hk1Speeches ?? 0;
+              const latestDeletable = latestDeletableByStudent.get(stu.id) ?? null;
+              const delKey = `row:${stu.id}`;
+              const confirmingDel = confirmDeleteKey === delKey;
+              const isLogging = loggingStudentId === stu.id;
+              const isDeletingThis = Boolean(latestDeletable && deletingEntryId === latestDeletable.id);
 
               return (
                 <FadeIn key={stu.id} index={Math.min(idx + 3, 10)}>
@@ -556,18 +740,18 @@ export default function StudyParticipationScreen() {
                         </Text>
                         <View style={styles.studentBadges}>
                           <Badge
-                            label={`${effectiveSubject}: ${subSpeeches} lượt`}
+                            label={`${effectiveSubject}: ${subSpeeches} ${subSpeeches === 1 ? 'stamp' : 'stamps'} (${formatPoints(subSpeeches * STUDY_STAMP_POINTS)}đ)`}
                             color={'success'}
                             soft={'successSoft'}
-                            icon={'book-outline'}
+                            icon={'bookmark-outline'}
                           />
                           <Badge
-                            label={`Tuần: ${weeklySpeeches}`}
+                            label={`Tuần: ${weeklySpeeches} (${formatPoints(row?.weeklyPoints ?? 0)}đ)`}
                             color={'accentText'}
                             soft={'accentSoft'}
                           />
                           <Badge
-                            label={`HK I: ${hk1Speeches}`}
+                            label={`HK I: ${hk1Speeches} (${formatPoints(row?.hk1Points ?? 0)}đ)`}
                             color={'purple'}
                             soft={'purpleSoft'}
                           />
@@ -576,50 +760,105 @@ export default function StudyParticipationScreen() {
                     </View>
 
                     <View style={styles.tapRow}>
-                      {[
-                        { count: 1, pts: 2, label: '+1 lượt (+2đ)' },
-                        { count: 2, pts: 4, label: '+2 lượt (+4đ)' },
-                        { count: 3, pts: 6, label: '+3 lượt (+6đ)' },
-                      ].map((opt) => {
-                        const busy = loggingKey === `${stu.id}:${opt.count}`;
-                        return (
-                          <Pressable
-                            key={opt.count}
-                            disabled={Boolean(loggingKey)}
-                            onPress={() => void handleQuickLog(stu, opt.count, opt.pts)}
-                            accessibilityRole="button"
-                            accessibilityLabel={`Ghi ${opt.count} lượt phát biểu môn ${effectiveSubject} cho ${stu.name}`}
-                            style={({ pressed }) => [
-                              styles.tapBtn,
-                              {
-                                backgroundColor:
-                                  opt.count === 1 ? theme.success : theme.successSoft,
-                                borderColor: theme.success,
-                                opacity: loggingKey && !busy ? 0.55 : 1,
-                              },
-                              pressed && styles.pressed,
+                      <Pressable
+                        disabled={Boolean(loggingStudentId) || Boolean(deletingEntryId)}
+                        onPress={() => void handleLogOneStamp(stu)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Đóng 1 stamp (+0,25đ) môn ${effectiveSubject} cho ${stu.name}`}
+                        style={({ pressed }) => [
+                          styles.tapPrimaryBtn,
+                          {
+                            backgroundColor: theme.success,
+                            borderColor: theme.success,
+                            opacity:
+                              (loggingStudentId && !isLogging) || Boolean(deletingEntryId)
+                                ? 0.55
+                                : 1,
+                          },
+                          pressed && styles.pressed,
+                        ]}>
+                        <Ionicons name="bookmark" size={14} color="#FFFFFF" />
+                        <Text style={styles.tapPrimaryText}>
+                          {isLogging ? 'Đang lưu...' : '+1 Stamp (+0,25đ)'}
+                        </Text>
+                      </Pressable>
+
+                      {latestDeletable ? (
+                        <Pressable
+                          disabled={Boolean(loggingStudentId) || Boolean(deletingEntryId)}
+                          onPress={() => void handleDeleteStamp(latestDeletable, delKey, stu.name)}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            confirmingDel
+                              ? `Xác nhận xoá 1 stamp của ${stu.name}`
+                              : `Xoá 1 stamp gần nhất của ${stu.name}`
+                          }
+                          style={({ pressed }) => [
+                            styles.tapUndoBtn,
+                            {
+                              backgroundColor: confirmingDel ? theme.danger : theme.dangerSoft,
+                              borderColor: theme.danger,
+                            },
+                            pressed && styles.pressed,
+                          ]}>
+                          <Ionicons
+                            name={confirmingDel ? 'trash' : 'remove-circle-outline'}
+                            size={14}
+                            color={confirmingDel ? '#FFFFFF' : theme.danger}
+                          />
+                          <Text
+                            style={[
+                              styles.tapUndoText,
+                              { color: confirmingDel ? '#FFFFFF' : theme.danger },
                             ]}>
-                            <Ionicons
-                              name="hand-left"
-                              size={12}
-                              color={opt.count === 1 ? '#FFFFFF' : theme.success}
-                            />
-                            <Text
-                              style={[
-                                styles.tapBtnText,
-                                { color: opt.count === 1 ? '#FFFFFF' : theme.success },
-                              ]}>
-                              {busy ? 'Đang lưu...' : opt.label}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
+                            {isDeletingThis ? 'Đang xoá...' : confirmingDel ? 'Xoá?' : '−1 Xoá'}
+                          </Text>
+                        </Pressable>
+                      ) : null}
                     </View>
                   </Card>
                 </FadeIn>
               );
             })
           )}
+
+          {/* Deletable Stamp History Section on Tab 1 */}
+          <SectionHeader
+            title={'Lịch sử Stamp phát biểu (Có thể xoá)'}
+            subtitle={'Bấm 2 lần vào nút Xoá để gỡ stamp ghi nhầm (-0,25đ)'}
+          />
+          <Card style={styles.sectionCard}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chips}>
+              <Chip
+                label={`Môn ${effectiveSubject}`}
+                selected={historyScope === 'subject'}
+                onPress={() => setHistoryScope('subject')}
+              />
+              <Chip
+                label={`Ngày ${formatDate(recordDate)}`}
+                selected={historyScope === 'date'}
+                onPress={() => setHistoryScope('date')}
+              />
+              <Chip
+                label={'Tất cả gần đây'}
+                selected={historyScope === 'all'}
+                onPress={() => setHistoryScope('all')}
+              />
+            </ScrollView>
+
+            {historyStamps.length === 0 ? (
+              <Text style={{ color: theme.textMuted, fontSize: 12.5 }}>
+                Chưa có stamp phát biểu nào trong bộ lọc này.
+              </Text>
+            ) : (
+              <View style={styles.stampLogList}>
+                {historyStamps.map((entry) => renderStampRow(entry, 'hist'))}
+              </View>
+            )}
+          </Card>
         </>
       ) : null}
 
@@ -630,7 +869,7 @@ export default function StudyParticipationScreen() {
           <FadeIn index={2}>
             <Card style={styles.sectionCard}>
               <Text style={[styles.microLabel, { color: theme.textSecondary }]}>
-                CHỌN TUẦN HỌC ĐỂ XEM THỐNG KÊ
+                CHỌN TUẦN HỌC ĐỂ XEM THỐNG KÊ STAMP
               </Text>
               <ScrollView
                 horizontal
@@ -639,7 +878,7 @@ export default function StudyParticipationScreen() {
                 {report.availableWeeks.map((w) => (
                   <Chip
                     key={w.weekStart}
-                    label={`${w.label} · ${w.speeches} lượt`}
+                    label={`${w.label} · ${w.speeches} stamps`}
                     icon={'calendar-outline'}
                     selected={report.selectedWeekStart === w.weekStart}
                     onPress={() => setSelectedWeekStart(w.weekStart)}
@@ -652,9 +891,9 @@ export default function StudyParticipationScreen() {
           {/* Weekly KPI Grid */}
           <FadeIn index={3} style={styles.kpiGrid}>
             <Card style={styles.kpiCard}>
-              <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>TỔNG LƯỢT TUẦN</Text>
+              <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>TỔNG STAMP TUẦN</Text>
               <Text style={[styles.kpiBig, { color: theme.success }]}>
-                {`${report.weekly.totalSpeeches} lượt`}
+                {`${report.weekly.totalSpeeches} stamps`}
               </Text>
               <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>
                 {report.selectedWeekLabel}
@@ -663,10 +902,10 @@ export default function StudyParticipationScreen() {
             <Card style={styles.kpiCard}>
               <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>ĐIỂM HỌC TẬP TUẦN</Text>
               <Text style={[styles.kpiBig, { color: theme.accent }]}>
-                {`+${report.weekly.totalPoints}đ`}
+                {`+${formatPoints(report.weekly.totalPoints)}đ`}
               </Text>
               <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>
-                {`${report.weekly.totalEntries} lần ghi nhận`}
+                {`${report.weekly.totalEntries} stamp · 0,25đ/stamp`}
               </Text>
             </Card>
             <Card style={styles.kpiCard}>
@@ -674,7 +913,7 @@ export default function StudyParticipationScreen() {
               <Text style={[styles.kpiBig, { color: theme.purple }]}>
                 {`${report.weekly.activeStudents} HS`}
               </Text>
-              <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>Có phát biểu trong tuần</Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>Có stamp trong tuần</Text>
             </Card>
             <Card style={styles.kpiCard}>
               <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>MÔN SÔI NỔI NHẤT</Text>
@@ -682,7 +921,9 @@ export default function StudyParticipationScreen() {
                 {topWeeklySubject?.subject ?? 'Chưa có'}
               </Text>
               <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>
-                {topWeeklySubject ? `${topWeeklySubject.speeches} lượt` : 'Chưa có dữ liệu'}
+                {topWeeklySubject
+                  ? `${topWeeklySubject.speeches} stamps (${formatPoints(topWeeklySubject.points)}đ)`
+                  : 'Chưa có dữ liệu'}
               </Text>
             </Card>
           </FadeIn>
@@ -693,7 +934,7 @@ export default function StudyParticipationScreen() {
               <View style={styles.sectionTitleRow}>
                 <Ionicons name="stats-chart" size={16} color={theme.accent} />
                 <Text style={[styles.cardTitle, { color: theme.text }]}>
-                  Nhịp độ phát biểu T2 → CN
+                  Nhịp độ stamp phát biểu T2 → CN
                 </Text>
               </View>
               <View style={styles.dailyChart}>
@@ -736,12 +977,12 @@ export default function StudyParticipationScreen() {
               <View style={styles.sectionTitleRow}>
                 <Ionicons name="book" size={16} color={theme.success} />
                 <Text style={[styles.cardTitle, { color: theme.text }]}>
-                  Phân bố phát biểu theo Môn học (Tuần)
+                  Phân bố stamp theo Môn học (Tuần)
                 </Text>
               </View>
               {report.weekly.bySubject.length === 0 ? (
                 <Text style={{ color: theme.textMuted, fontSize: 12.5 }}>
-                  Tuần này chưa có lượt phát biểu nào được ghi nhận.
+                  Tuần này chưa có stamp phát biểu nào được ghi nhận.
                 </Text>
               ) : (
                 report.weekly.bySubject.map((sub) => {
@@ -756,7 +997,7 @@ export default function StudyParticipationScreen() {
                           {sub.subject}
                         </Text>
                         <Text style={[styles.progressVal, { color: theme.success }]}>
-                          {`${sub.speeches} lượt · +${sub.points}đ · ${sub.studentCount} HS`}
+                          {`${sub.speeches} stamps · +${formatPoints(sub.points)}đ · ${sub.studentCount} HS`}
                         </Text>
                       </View>
                       <View
@@ -788,7 +1029,7 @@ export default function StudyParticipationScreen() {
                 <View style={styles.sectionTitleRow}>
                   <Ionicons name="people" size={16} color={theme.purple} />
                   <Text style={[styles.cardTitle, { color: theme.text }]}>
-                    Thi đua phát biểu giữa các Tổ (Tuần)
+                    Thi đua stamp giữa các Tổ (Tuần)
                   </Text>
                 </View>
                 {report.weekly.byGroup.map((grp) => {
@@ -800,7 +1041,7 @@ export default function StudyParticipationScreen() {
                           {grp.group}
                         </Text>
                         <Text style={[styles.progressVal, { color: theme.purple }]}>
-                          {`${grp.speeches} lượt · +${grp.points}đ · ${grp.activeStudents} HS`}
+                          {`${grp.speeches} stamps · +${formatPoints(grp.points)}đ · ${grp.activeStudents} HS`}
                         </Text>
                       </View>
                       <View
@@ -827,17 +1068,17 @@ export default function StudyParticipationScreen() {
 
           {/* Weekly Student Table */}
           <SectionHeader
-            title={'Bảng chi tiết phát biểu trong tuần'}
-            subtitle={`${weeklySortedRows.length} học sinh có phát biểu · ${report.selectedWeekLabel}`}
+            title={'Bảng chi tiết stamp trong tuần'}
+            subtitle={`${weeklySortedRows.length} học sinh có stamp · ${report.selectedWeekLabel}`}
             actionLabel={'Xuất Excel'}
             onAction={() => void handleExportCsv('weekly')}
           />
 
           {weeklySortedRows.length === 0 ? (
             <EmptyState
-              icon={'book-outline'}
-              title={'Tuần này chưa có lượt phát biểu nào'}
-              message={'Chuyển sang tab “Ghi phát biểu” để bấm +1/+2/+3 lượt ngay cho từng môn học!'}
+              icon={'bookmark-outline'}
+              title={'Tuần này chưa có stamp phát biểu nào'}
+              message={'Chuyển sang tab “Ghi phát biểu” để bấm +1 Stamp (+0,25đ) ngay cho từng môn học!'}
             />
           ) : (
             weeklySortedRows.map((row, idx) => (
@@ -876,10 +1117,10 @@ export default function StudyParticipationScreen() {
                     </View>
                     <View style={styles.rightScore}>
                       <Text style={[styles.rightScoreVal, { color: theme.success }]}>
-                        {`${row.weeklySpeeches} lượt`}
+                        {`${row.weeklySpeeches} stamps`}
                       </Text>
                       <Text style={{ color: theme.textMuted, fontSize: 11, fontWeight: '700' }}>
-                        {`+${row.weeklyPoints}đ`}
+                        {`+${formatPoints(row.weeklyPoints)}đ`}
                       </Text>
                     </View>
                   </View>
@@ -887,6 +1128,21 @@ export default function StudyParticipationScreen() {
               </FadeIn>
             ))
           )}
+
+          {/* Weekly Deletable Stamp List */}
+          {weeklyStamps.length > 0 ? (
+            <>
+              <SectionHeader
+                title={'Các stamp trong tuần (Xoá nếu ghi nhầm)'}
+                subtitle={`${weeklyStamps.length} stamp · ${report.selectedWeekLabel}`}
+              />
+              <Card style={styles.sectionCard}>
+                <View style={styles.stampLogList}>
+                  {weeklyStamps.map((entry) => renderStampRow(entry, 'wk'))}
+                </View>
+              </Card>
+            </>
+          ) : null}
         </>
       ) : null}
 
@@ -905,7 +1161,7 @@ export default function StudyParticipationScreen() {
                     {`Số liệu cộng dồn cuối ${report.semester1.label}`}
                   </Text>
                   <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
-                    {`Từ ${formatDate(report.semester1.start)} đến ${formatDate(report.semester1.end)}`}
+                    {`Từ ${formatDate(report.semester1.start)} đến ${formatDate(report.semester1.end)} · 1 stamp = 0,25đ`}
                   </Text>
                 </View>
                 {isTeacher ? (
@@ -944,32 +1200,32 @@ export default function StudyParticipationScreen() {
           {/* HK1 Cumulative KPI Grid */}
           <FadeIn index={3} style={styles.kpiGrid}>
             <Card style={styles.kpiCard}>
-              <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>TỔNG LƯỢT HK I</Text>
+              <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>TỔNG STAMP HK I</Text>
               <Text style={[styles.kpiBig, { color: theme.success }]}>
-                {`${report.semester1.totalSpeeches} lượt`}
+                {`${report.semester1.totalSpeeches} stamps`}
               </Text>
               <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>
-                {`${report.semester1.totalEntries} lần ghi nhận`}
+                {`${report.semester1.totalEntries} lần đóng stamp`}
               </Text>
             </Card>
             <Card style={styles.kpiCard}>
               <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>ĐIỂM CỘNG DỒN HK I</Text>
               <Text style={[styles.kpiBig, { color: theme.accent }]}>
-                {`+${report.semester1.totalPoints}đ`}
+                {`+${formatPoints(report.semester1.totalPoints)}đ`}
               </Text>
-              <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>Điểm học tập HK I</Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>0,25đ / stamp</Text>
             </Card>
             <Card style={styles.kpiCard}>
               <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>TRUNG BÌNH / HS</Text>
               <Text style={[styles.kpiBig, { color: theme.purple }]}>
-                {`${report.semester1.avgSpeechesPerStudent.toFixed(1)} lượt`}
+                {`${report.semester1.avgSpeechesPerStudent.toFixed(1)} stamps`}
               </Text>
               <Text style={{ color: theme.textSecondary, fontSize: 11.5 }}>
                 {`${report.semester1.activeStudents} HS tham gia`}
               </Text>
             </Card>
             <Card style={styles.kpiCard}>
-              <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>SỐ MÔN PHÁT BIỂU</Text>
+              <Text style={[styles.kpiMicro, { color: theme.textMuted }]}>SỐ MÔN CÓ STAMP</Text>
               <Text style={[styles.kpiBig, { color: theme.warning }]}>
                 {`${report.semester1.bySubject.length} môn`}
               </Text>
@@ -984,7 +1240,7 @@ export default function StudyParticipationScreen() {
                 <View style={styles.sectionTitleRow}>
                   <Ionicons name="trending-up" size={16} color={theme.accent} />
                   <Text style={[styles.cardTitle, { color: theme.text }]}>
-                    Xu hướng phát biểu qua các tuần Học kỳ I
+                    Xu hướng stamp qua các tuần Học kỳ I
                   </Text>
                 </View>
                 <ScrollView
@@ -1041,7 +1297,7 @@ export default function StudyParticipationScreen() {
               </View>
               {report.semester1.bySubject.length === 0 ? (
                 <Text style={{ color: theme.textMuted, fontSize: 12.5 }}>
-                  Chưa có lượt phát biểu nào trong Học kỳ I.
+                  Chưa có stamp phát biểu nào trong Học kỳ I.
                 </Text>
               ) : (
                 report.semester1.bySubject.map((sub) => {
@@ -1053,7 +1309,7 @@ export default function StudyParticipationScreen() {
                           {sub.subject}
                         </Text>
                         <Text style={[styles.progressVal, { color: theme.success }]}>
-                          {`${sub.speeches} lượt · +${sub.points}đ · ${sub.studentCount} HS`}
+                          {`${sub.speeches} stamps · +${formatPoints(sub.points)}đ · ${sub.studentCount} HS`}
                         </Text>
                       </View>
                       <View
@@ -1090,7 +1346,7 @@ export default function StudyParticipationScreen() {
             <EmptyState
               icon={'ribbon-outline'}
               title={'Chưa có dữ liệu tổng kết Học kỳ I'}
-              message={'Bắt đầu ghi nhận lượt phát biểu theo môn để bảng cộng dồn cuối kỳ tự động tổng hợp.'}
+              message={'Bắt đầu đóng stamp phát biểu theo môn để bảng cộng dồn cuối kỳ tự động tổng hợp.'}
             />
           ) : (
             hk1SortedRows.map((row, idx) => {
@@ -1142,7 +1398,7 @@ export default function StudyParticipationScreen() {
                           {[
                             row.studentCode,
                             row.group || 'Chưa phân tổ',
-                            `Tuần: ${row.weeklySpeeches} lượt`,
+                            `Tuần: ${row.weeklySpeeches} stamps`,
                             row.topSubject ? `Mạnh: ${row.topSubject}` : null,
                           ]
                             .filter(Boolean)
@@ -1151,10 +1407,10 @@ export default function StudyParticipationScreen() {
                       </View>
                       <View style={styles.rightScore}>
                         <Text style={[styles.rightScoreVal, { color: theme.success }]}>
-                          {`${row.hk1Speeches} lượt`}
+                          {`${row.hk1Speeches} stamps`}
                         </Text>
                         <Text style={{ color: theme.accentText, fontSize: 11, fontWeight: '800' }}>
-                          {`+${row.hk1Points}đ`}
+                          {`+${formatPoints(row.hk1Points)}đ`}
                         </Text>
                       </View>
                     </View>
@@ -1164,7 +1420,7 @@ export default function StudyParticipationScreen() {
                         {subjectBreakdown.map(([sub, count]) => (
                           <Badge
                             key={sub}
-                            label={`${sub}: ${count}`}
+                            label={`${sub}: ${count} (${formatPoints(count * STUDY_STAMP_POINTS)}đ)`}
                             color={'success'}
                             soft={'successSoft'}
                           />
@@ -1326,19 +1582,50 @@ const styles = StyleSheet.create({
   studentHead: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
   studentName: { fontSize: 14.5, fontWeight: '800' },
   studentBadges: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 4 },
-  tapRow: { flexDirection: 'row', gap: 6 },
-  tapBtn: {
+  tapRow: { flexDirection: 'row', gap: Spacing.two },
+  tapPrimaryBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
-    paddingVertical: 9,
-    paddingHorizontal: 6,
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     borderRadius: Radius.sm,
     borderWidth: 1,
   },
-  tapBtnText: { fontSize: 11.5, fontWeight: '900' },
+  tapPrimaryText: { color: '#FFFFFF', fontSize: 13, fontWeight: '900' },
+  tapUndoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+  },
+  tapUndoText: { fontSize: 12, fontWeight: '900' },
+  stampLogList: { gap: Spacing.two },
+  stampLogRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    padding: Spacing.two + 2,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  stampLogName: { fontSize: 13.5, fontWeight: '800' },
+  stampDelBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  stampDelText: { fontSize: 11.5, fontWeight: '800' },
   kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   kpiCard: { width: '48%', flexGrow: 1, minWidth: 148, gap: 3 },
   kpiMicro: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },

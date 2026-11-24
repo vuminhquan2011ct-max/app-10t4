@@ -19,6 +19,7 @@ import { Screen } from '@/components/ui/screen';
 import { SectionHeader } from '@/components/ui/section-header';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
+import { formatPoints } from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { shareOrCopyText } from '@/lib/export';
@@ -195,10 +196,10 @@ export default function InsightsScreen() {
                 icon={'book-outline'}
               />
               <Text style={[styles.alertTitle, { color: theme.text }]}>
-                Phát biểu theo Môn & Thành tích Học thuật
+                Stamp phát biểu theo Môn & Thành tích Học thuật
               </Text>
               <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 2 }}>
-                {`Tuần này: ${studyReport.weekly.totalSpeeches} lượt (+${studyReport.weekly.totalPoints}đ) · Cộng dồn HK I: ${studyReport.semester1.totalSpeeches} lượt · 🎓 ${academicAchCount} thành tích Học thuật`}
+                {`Tuần này: ${studyReport.weekly.totalSpeeches} stamps (+${formatPoints(studyReport.weekly.totalPoints)}đ) · Cộng dồn HK I: ${studyReport.semester1.totalSpeeches} stamps (+${formatPoints(studyReport.semester1.totalPoints)}đ) · 0,25đ/stamp · 🎓 ${academicAchCount} thành tích Học thuật`}
               </Text>
             </View>
           </View>

@@ -8,6 +8,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Card } from '@/components/ui/card';
+import { formatPoints } from '@/constants/entry-meta';
 import { Radius, Spacing } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import type { GroupStat } from '@/lib/stats';
@@ -54,11 +55,11 @@ export function GroupBattle({ groups }: GroupBattleProps) {
                   )}
                   <Text style={[styles.groupName, { color: theme.text }]}>{item.group}</Text>
                   <Text style={[styles.members, { color: theme.textMuted }]}>
-                    {item.students + ' bạn · TB ' + item.avgPoints + 'đ'}
+                    {`${item.students} bạn · TB ${formatPoints(item.avgPoints)}đ`}
                   </Text>
                 </View>
                 <Text style={[styles.pts, { color: isLeader ? theme.gold : theme.accentText }]}>
-                  {item.points + ' đ'}
+                  {`${formatPoints(item.points)} đ`}
                 </Text>
               </View>
               <View style={[styles.track, { backgroundColor: theme.backgroundElement }]}>

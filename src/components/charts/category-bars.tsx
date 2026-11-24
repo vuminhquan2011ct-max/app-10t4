@@ -7,7 +7,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Card } from '@/components/ui/card';
-import { ENTRY_CATEGORIES } from '@/constants/entry-meta';
+import { ENTRY_CATEGORIES, formatPoints } from '@/constants/entry-meta';
 import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import type { CategoryStat } from '@/lib/stats';
@@ -53,7 +53,7 @@ export function CategoryBars({
                 <View style={styles.labelRow}>
                   <Text style={[styles.label, { color: theme.text }]}>{meta.label}</Text>
                   <Text style={[styles.value, { color: theme.textSecondary }]}>
-                    {item.count + ' mục · ' + item.points + ' đ'}
+                    {`${item.count} mục · ${formatPoints(item.points)} đ`}
                   </Text>
                 </View>
                 <View style={[styles.track, { backgroundColor: theme.backgroundElement }]}>

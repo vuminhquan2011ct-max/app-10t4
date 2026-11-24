@@ -3,7 +3,7 @@
  * concurrency-safe and React Compiler friendly.
  */
 
-import { GROUP_PRESETS } from '@/constants/entry-meta';
+import { GROUP_PRESETS, formatSignedPoints } from '@/constants/entry-meta';
 import { formatDate, todayIso } from '@/lib/date';
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
 import {
@@ -426,10 +426,10 @@ export function createActions(
 
     addEntry: (input: EntryInput) => {
       const entry = buildEntry(input);
-      const signedPoints = `${entry.points > 0 ? '+' : ''}${entry.points}đ`;
+      const signedPoints = formatSignedPoints(entry.points);
       const logAction =
         entry.kind === 'study'
-          ? `Ghi nhận ${entry.speechCount ?? 1} lượt phát biểu${entry.subject ? ` môn ${entry.subject}` : ''} (${signedPoints})`
+          ? `Ghi 1 stamp phát biểu (${signedPoints})${entry.subject ? ` môn ${entry.subject}` : ''}`
           : `Ghi mục "${entry.title}" (${signedPoints})`;
       mutate((prev) => ({
         ...prev,
@@ -462,7 +462,11 @@ export function createActions(
         return {
           ...prev,
           entries: [entry, ...prev.entries],
-          activityLog: appendLog(prev, actorName(), `Thưởng +${points}đ cho ${studentName}`),
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Thưởng ${formatSignedPoints(entry.points)} cho ${studentName}`,
+          ),
         };
       }),
 
@@ -477,6 +481,10 @@ export function createActions(
         const now = new Date().toISOString();
         const target = prev.entries.find((e) => e.id === id);
         const proofDriveId = extractDriveFileIdFromUrl(target?.proofUrl);
+        const removeLogAction =
+          target?.kind === 'study'
+            ? `Xoá 1 stamp phát biểu${target.subject ? ` môn ${target.subject}` : ''} (-0,25đ)`
+            : 'Xoá một mục thành tích';
         return {
           ...prev,
           entries: prev.entries.filter((e) => e.id !== id),
@@ -484,7 +492,7 @@ export function createActions(
           deletedDriveFileIds: proofDriveId
             ? stampDeletedDriveFiles(prev, [proofDriveId], now)
             : prev.deletedDriveFileIds,
-          activityLog: appendLog(prev, actorName(), 'Xoá một mục thành tích', actorStudentId()),
+          activityLog: appendLog(prev, actorName(), removeLogAction, actorStudentId()),
         };
       }),
 

@@ -27,7 +27,7 @@ import {
 } from 'react';
 import { Platform } from 'react-native';
 
-import { GROUP_PRESETS } from '@/constants/entry-meta';
+import { GROUP_PRESETS, STUDY_STAMP_POINTS, roundPoints } from '@/constants/entry-meta';
 import { currentSchoolWeekday, todayIso } from '@/lib/date';
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
 import {
@@ -403,6 +403,8 @@ export type ClassStore = BaseActions & {
     title?: string;
     note?: string;
   }) => Promise<void>;
+  canDeleteStudyStamp: (entry: Entry) => boolean;
+  deleteStudyStamp: (entryId: string) => Promise<boolean>;
   getStudyParticipationReport: (selectedWeekStart?: string | null) => StudyParticipationReport;
   updateEntry: (id: string, patch: Partial<EntryInput>) => void;
   removeEntry: (id: string) => void;
@@ -1353,6 +1355,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (canViewAll) {
         finalInput = {
           ...input,
+          ...(isStudy ? { speechCount: 1, points: STUDY_STAMP_POINTS, category: 'study' } : {}),
           status: input.status ?? 'approved',
           submittedBy: 'teacher',
           recordedByName: input.recordedByName ?? actorLabel,
@@ -1388,7 +1391,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
             kind: 'study',
             category: 'study',
             subject: input.subject?.trim() || (isSubjectTeacher ? subjectName : null),
-            speechCount: Math.max(1, Math.round(input.speechCount ?? 1)),
+            speechCount: 1,
+            points: STUDY_STAMP_POINTS,
             status: 'approved',
             submittedBy: 'teacher',
             recordedByName: actorLabel,
@@ -1407,7 +1411,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
             studentId: enforcedStudentId,
             kind: 'study',
             category: 'study',
-            speechCount: Math.max(1, Math.round(input.speechCount ?? 1)),
+            speechCount: 1,
+            points: STUDY_STAMP_POINTS,
             submittedBy: canEditClass ? 'teacher' : 'student',
             status: canEditClass ? 'approved' : 'pending',
             source: canEditClass ? 'study_participation' : 'self',
@@ -1485,13 +1490,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (!targetStudent) {
         throw new Error('Không tìm thấy học sinh để ghi nhận phát biểu.');
       }
-      const speechCount = Math.max(1, Math.round(input.speechCount ?? 1));
-      const points = Math.max(
-        0,
-        Math.round(input.points !== undefined ? input.points : speechCount * 2),
-      );
-      const title =
-        input.title?.trim() || `Phát biểu môn ${cleanSubject} (${speechCount} lượt)`;
+      const speechCount = 1;
+      const points = STUDY_STAMP_POINTS;
+      const title = input.title?.trim() || `Phát biểu môn ${cleanSubject} (1 stamp)`;
       const date = input.date?.trim() || todayIso();
 
       const isAuthorized = officerPermissions.canRecordStudyForStudent(targetStudent);
@@ -1728,6 +1729,57 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       }
     },
     [actions, flushCloud],
+  );
+
+  const canDeleteStudyStamp = useCallback(
+    (entry: Entry): boolean => {
+      if (!entry || entry.kind !== 'study') return false;
+      if (
+        isTeacher ||
+        officerPermissions.isClassMonitor ||
+        canEditClass ||
+        hasFullCoordination
+      ) {
+        return true;
+      }
+      const targetStudent =
+        state.students.find((s) => s.id === entry.studentId) ?? {
+          id: entry.studentId,
+          group: null,
+        };
+      if (officerPermissions.canRecordStudyForStudent(targetStudent)) {
+        return true;
+      }
+      if (effectiveStudentId !== null && entry.recordedByStudentId === effectiveStudentId) {
+        return true;
+      }
+      if (
+        effectiveStudentId !== null &&
+        entry.studentId === effectiveStudentId &&
+        entry.status === 'pending'
+      ) {
+        return true;
+      }
+      return false;
+    },
+    [
+      isTeacher,
+      officerPermissions,
+      canEditClass,
+      hasFullCoordination,
+      state.students,
+      effectiveStudentId,
+    ],
+  );
+
+  const deleteStudyStamp = useCallback(
+    async (entryId: string): Promise<boolean> => {
+      const entry = stateRef.current.entries.find((e) => e.id === entryId);
+      if (!entry || !canDeleteStudyStamp(entry)) return false;
+      removeEntry(entryId);
+      return true;
+    },
+    [canDeleteStudyStamp, removeEntry],
   );
 
   const clearEntryProof = useCallback(
@@ -2473,7 +2525,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       entries: visibleEntries.length,
       pending,
       approved,
-      points,
+      points: roundPoints(points),
     };
   }, [visibleStudents.length, visibleEntries]);
 
@@ -2633,6 +2685,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       suggestNextStudentCode,
       addEntry,
       quickLogStudyParticipation,
+      canDeleteStudyStamp,
+      deleteStudyStamp,
       getStudyParticipationReport,
       removeStudent,
       saveStudentPrivate,
@@ -2775,6 +2829,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       suggestNextStudentCode,
       addEntry,
       quickLogStudyParticipation,
+      canDeleteStudyStamp,
+      deleteStudyStamp,
       getStudyParticipationReport,
       removeStudent,
       saveStudentPrivate,

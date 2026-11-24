@@ -6,7 +6,13 @@ import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { Platform, Share } from 'react-native';
 
-import { ENTRY_CATEGORIES, ENTRY_LEVELS } from '@/constants/entry-meta';
+import {
+  ENTRY_CATEGORIES,
+  ENTRY_LEVELS,
+  formatPoints,
+  formatSignedPoints,
+  roundPoints,
+} from '@/constants/entry-meta';
 import { formatDate, todayIso } from '@/lib/date';
 import { formatPositionsDisplay } from '@/lib/officer-roles';
 import type { StudyParticipationReport } from '@/lib/stats';
@@ -39,7 +45,10 @@ export function buildClassSummaryReport(params: {
   const { classInfo, totals, ranking, fundBalance, streak } = params;
   const topLines = ranking
     .slice(0, 5)
-    .map((r) => `  ${r.rank}. ${r.student.name} (${r.student.group ?? 'Chưa phân tổ'}) — ${r.points} điểm`)
+    .map(
+      (r) =>
+        `  ${r.rank}. ${r.student.name} (${r.student.group ?? 'Chưa phân tổ'}) — ${formatPoints(r.points)} điểm`,
+    )
     .join('\n');
 
   return [
@@ -50,7 +59,7 @@ export function buildClassSummaryReport(params: {
     '',
     '✨ CHỈ SỐ CHUNG',
     `• Sĩ số: ${totals.students} học sinh`,
-    `• Tổng điểm thi đua: ${totals.points} điểm`,
+    `• Tổng điểm thi đua: ${formatPoints(totals.points)} điểm`,
     `• Thành tích & hoạt động: ${totals.approved} đã duyệt / ${totals.pending} chờ duyệt`,
     `• Chuỗi hoạt động liên tiếp: ${streak} ngày`,
     `• Số dư quỹ lớp: ${formatVnd(fundBalance)}`,
@@ -76,10 +85,10 @@ export function buildStudentReportCard(params: {
     .map((e) => {
       const catLabel = ENTRY_CATEGORIES[e.category]?.label ?? 'Khác';
       const levelLabel = ENTRY_LEVELS[e.level]?.label ?? 'Cấp lớp';
-      const signedPts = `${e.points > 0 ? '+' : ''}${e.points}đ`;
+      const signedPts = formatSignedPoints(e.points);
       const extra =
         e.kind === 'study' && e.subject
-          ? `${e.subject} · ${e.speechCount ?? 1} lượt`
+          ? `${e.subject} · ${e.speechCount ?? 1} stamp`
           : `${catLabel} · ${levelLabel}`;
       return `  • ${e.title} (${extra} · ${signedPts} · ${formatDate(e.date)})`;
     })
@@ -94,9 +103,9 @@ export function buildStudentReportCard(params: {
     `GVCN: ${classInfo.teacherName} · ${classInfo.school}`,
     '',
     '📈 TỔNG HỢP',
-    `• Điểm thi đua: ${stats.points} điểm${rank ? ` (Hạng #${rank})` : ''}`,
+    `• Điểm thi đua: ${formatPoints(stats.points)} điểm${rank ? ` (Hạng #${rank})` : ''}`,
     `• Thành tích: ${stats.achievements} (Học thuật: ${stats.academicAchievements}) · Hoạt động: ${stats.activities}`,
-    `• Học tập · Phát biểu: ${stats.studySpeeches} lượt (${stats.studyPoints}đ)`,
+    `• Học tập · Stamp phát biểu: ${stats.studySpeeches} stamps (${formatPoints(stats.studyPoints)}đ · 0,25đ/stamp)`,
     attendance.total > 0 || attendance.dutyTotal > 0
       ? `• Chuyên cần: ${attendance.diligenceScore ?? attendance.rate ?? 100}% (${attendance.present} có mặt, ${attendance.late} muộn, trực nhật ${attendance.dutyCompleted} HT / ${attendance.dutyMissed} chưa HT)`
       : '• Chuyên cần: Chưa có dữ liệu điểm danh',
@@ -379,15 +388,15 @@ export function buildClassRecordsExcelCsv(params: {
       : entry.studentId;
     const sectionLabel =
       entry.kind === 'study'
-        ? `Học tập · Phát biểu${entry.subject ? ` (${entry.subject})` : ''}`
+        ? `Học tập · Stamp phát biểu${entry.subject ? ` (${entry.subject})` : ''}`
         : entry.kind === 'violation' || entry.points < 0
           ? 'Vi phạm / Nhắc nhở'
           : entry.category === 'academic'
             ? 'Thành tích Học thuật'
             : 'Thành tích / Hoạt động';
-    const signedPts = `${entry.points > 0 ? '+' : ''}${entry.points}đ`;
+    const signedPts = formatSignedPoints(entry.points);
     const speechNote =
-      entry.kind === 'study' ? ` · ${entry.speechCount ?? 1} lượt` : '';
+      entry.kind === 'study' ? ` · ${entry.speechCount ?? 1} stamp` : '';
     rows.push(
       toCsvLine([
         seq++,
@@ -520,16 +529,16 @@ export function buildStudyParticipationExcelCsv(
   const lines: string[] = [
     toCsvLine([
       isWeekly
-        ? `THỐNG KÊ PHÁT BIỂU HỌC TẬP THEO TUẦN — ${periodLabel}`
-        : `TỔNG HỢP CỘNG DỒN PHÁT BIỂU HỌC TẬP — ${periodLabel}`,
+        ? `THỐNG KÊ STAMP PHÁT BIỂU HỌC TẬP THEO TUẦN (0,25đ/stamp) — ${periodLabel}`
+        : `TỔNG HỢP CỘNG DỒN STAMP PHÁT BIỂU HỌC TẬP (0,25đ/stamp) — ${periodLabel}`,
     ]),
     toCsvLine([
       'Ngày xuất',
       formatDate(todayIso()),
-      'Tổng lượt phát biểu',
+      'Tổng Stamps',
       isWeekly ? report.weekly.totalSpeeches : report.semester1.totalSpeeches,
-      'Tổng điểm học tập',
-      isWeekly ? report.weekly.totalPoints : report.semester1.totalPoints,
+      'Tổng điểm học tập (0,25đ/stamp)',
+      roundPoints(isWeekly ? report.weekly.totalPoints : report.semester1.totalPoints),
       'HS tham gia',
       isWeekly ? report.weekly.activeStudents : report.semester1.activeStudents,
     ]),
@@ -543,9 +552,9 @@ export function buildStudyParticipationExcelCsv(
         'Họ và tên',
         'Mã HS',
         'Tổ',
-        'Lượt phát biểu (Tuần)',
+        'Stamps (Tuần)',
         'Điểm học tập (Tuần)',
-        'Lượt cộng dồn HK1',
+        'Stamps cộng dồn HK1',
         'Điểm cộng dồn HK1',
         'Môn nổi bật (Tuần)',
       ]),
@@ -565,9 +574,9 @@ export function buildStudyParticipationExcelCsv(
           row.studentCode,
           row.group ?? '',
           row.weeklySpeeches,
-          row.weeklyPoints,
+          roundPoints(row.weeklyPoints),
           row.hk1Speeches,
-          row.hk1Points,
+          roundPoints(row.hk1Points),
           row.weeklyTopSubject ?? '',
         ]),
       );
@@ -579,9 +588,9 @@ export function buildStudyParticipationExcelCsv(
         'Họ và tên',
         'Mã HS',
         'Tổ',
-        'Tổng lượt phát biểu HK1',
-        'Tổng điểm HK1',
-        'Lượt tuần đang xem',
+        'Tổng Stamps HK1',
+        'Tổng điểm HK1 (0,25đ/stamp)',
+        'Stamps tuần đang xem',
         'Môn nổi bật',
         ...hk1Subjects.map((s) => `Môn: ${s}`),
       ]),
@@ -594,7 +603,7 @@ export function buildStudyParticipationExcelCsv(
           row.studentCode,
           row.group ?? '',
           row.hk1Speeches,
-          row.hk1Points,
+          roundPoints(row.hk1Points),
           row.weeklySpeeches,
           row.topSubject ?? '',
           ...hk1Subjects.map((s) => row.bySubject[s] ?? 0),
@@ -604,8 +613,8 @@ export function buildStudyParticipationExcelCsv(
   }
 
   lines.push('');
-  lines.push(toCsvLine(['TỔNG HỢP PHÁT BIỂU THEO MÔN HỌC', periodLabel]));
-  lines.push(toCsvLine(['STT', 'Môn học', 'Số lượt phát biểu', 'Số bản ghi', 'Tổng điểm', 'Số HS phát biểu']));
+  lines.push(toCsvLine(['TỔNG HỢP STAMP PHÁT BIỂU THEO MÔN HỌC (0,25đ/stamp)', periodLabel]));
+  lines.push(toCsvLine(['STT', 'Môn học', 'Số Stamps', 'Số bản ghi', 'Tổng điểm', 'Số HS tham gia']));
   const subjectStats = isWeekly ? report.weekly.bySubject : report.semester1.bySubject;
   if (subjectStats.length > 0) {
     subjectStats.forEach((item, idx) => {
@@ -615,13 +624,13 @@ export function buildStudyParticipationExcelCsv(
           item.subject,
           item.speeches,
           item.entries,
-          item.points,
+          roundPoints(item.points),
           item.studentCount,
         ]),
       );
     });
   } else if (subjects.length === 0) {
-    lines.push(toCsvLine(['', 'Chưa có lượt phát biểu nào trong khoảng thời gian này']));
+    lines.push(toCsvLine(['', 'Chưa có stamp phát biểu nào trong khoảng thời gian này']));
   }
 
   return `\uFEFF${lines.join('\r\n')}`;
@@ -638,15 +647,18 @@ export function buildStudyParticipationReportText(
   const isWeekly = mode === 'weekly';
   const scope = isWeekly ? report.weekly : report.semester1;
   const heading = isWeekly
-    ? `📚 THỐNG KÊ PHÁT BIỂU HỌC TẬP THEO TUẦN`
-    : `📊 BẢNG CỘNG DỒN PHÁT BIỂU CUỐI HỌC KỲ I`;
+    ? `📚 THỐNG KÊ STAMP PHÁT BIỂU THEO TUẦN (0,25đ/stamp)`
+    : `📊 BẢNG CỘNG DỒN STAMP PHÁT BIỂU CUỐI HỌC KỲ I (0,25đ/stamp)`;
   const subheading = isWeekly
     ? `📅 ${report.selectedWeekLabel}`
     : `📅 ${report.semester1.label}`;
 
   const topSubjects = scope.bySubject
     .slice(0, 6)
-    .map((s, idx) => `  ${idx + 1}. ${s.subject}: ${s.speeches} lượt (+${s.points}đ · ${s.studentCount} bạn)`)
+    .map(
+      (s, idx) =>
+        `  ${idx + 1}. ${s.subject}: ${s.speeches} stamps (+${formatPoints(s.points)}đ · ${s.studentCount} bạn)`,
+    )
     .join('\n');
 
   const rankedStudents = (isWeekly
@@ -662,38 +674,43 @@ export function buildStudyParticipationReportText(
     .slice(0, 10)
     .map((r, idx) =>
       isWeekly
-        ? `  ${idx + 1}. ${r.studentName}${r.group ? ` (${r.group})` : ''} — ${r.weeklySpeeches} lượt (+${r.weeklyPoints}đ) · Cộng dồn HK1: ${r.hk1Speeches} lượt`
-        : `  ${idx + 1}. ${r.studentName}${r.group ? ` (${r.group})` : ''} — ${r.hk1Speeches} lượt HK1 (+${r.hk1Points}đ)${r.topSubject ? ` · Mạnh: ${r.topSubject}` : ''}`,
+        ? `  ${idx + 1}. ${r.studentName}${r.group ? ` (${r.group})` : ''} — ${r.weeklySpeeches} stamps (+${formatPoints(r.weeklyPoints)}đ) · Cộng dồn HK1: ${r.hk1Speeches} stamps (${formatPoints(r.hk1Points)}đ)`
+        : `  ${idx + 1}. ${r.studentName}${r.group ? ` (${r.group})` : ''} — ${r.hk1Speeches} stamps HK1 (+${formatPoints(r.hk1Points)}đ)${r.topSubject ? ` · Mạnh: ${r.topSubject}` : ''}`,
     )
     .join('\n');
 
   const groupLines = scope.byGroup
-    .map((g, idx) => `  ${idx + 1}. ${g.group}: ${g.speeches} lượt (+${g.points}đ · ${g.activeStudents} bạn)`)
+    .map(
+      (g, idx) =>
+        `  ${idx + 1}. ${g.group}: ${g.speeches} stamps (+${formatPoints(g.points)}đ · ${g.activeStudents} bạn)`,
+    )
     .join('\n');
 
   const lines = [
     heading,
     subheading,
     '',
-    '✨ TỔNG QUAN',
-    `• Tổng lượt phát biểu: ${scope.totalSpeeches} lượt (${scope.totalEntries} bản ghi)`,
-    `• Tổng điểm học tập: +${scope.totalPoints} điểm`,
+    '✨ TỔNG QUAN (1 phát biểu = 1 stamp = +0,25đ)',
+    `• Tổng số Stamps: ${scope.totalSpeeches} stamps (${scope.totalEntries} bản ghi)`,
+    `• Tổng điểm học tập: +${formatPoints(scope.totalPoints)} điểm`,
     `• Số học sinh phát biểu: ${scope.activeStudents} bạn`,
   ];
 
   if (!isWeekly) {
-    lines.push(`• Trung bình cộng dồn HK1: ${report.semester1.avgSpeechesPerStudent} lượt / HS`);
+    lines.push(
+      `• Trung bình cộng dồn HK1: ${formatPoints(report.semester1.avgSpeechesPerStudent)} stamps / HS`,
+    );
   }
 
   lines.push(
     '',
-    '📖 PHÂN BỐ THEO MÔN HỌC',
-    topSubjects || '  (Chưa có dữ liệu phát biểu)',
+    '📖 PHÂN BỐ STAMP THEO MÔN HỌC',
+    topSubjects || '  (Chưa có stamp phát biểu nào)',
     '',
     '🏆 TOP HỌC SINH TÍCH CỰC PHÁT BIỂU',
-    rankedStudents || '  (Chưa có lượt phát biểu nào)',
+    rankedStudents || '  (Chưa có stamp phát biểu nào)',
     '',
-    '🔥 THI ĐUA PHÁT BIỂU THEO TỔ',
+    '🔥 THI ĐUA STAMP THEO TỔ',
     groupLines || '  (Chưa có dữ liệu tổ)',
   );
 

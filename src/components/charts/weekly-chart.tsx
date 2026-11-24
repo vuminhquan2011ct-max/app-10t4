@@ -6,6 +6,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import Svg, { Defs, LinearGradient as SvgGradient, Rect, Stop } from 'react-native-svg';
 
 import { Card } from '@/components/ui/card';
+import { formatPoints, roundPoints } from '@/constants/entry-meta';
 import { Spacing } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import type { DailyBar } from '@/lib/stats';
@@ -21,7 +22,7 @@ export function WeeklyChart({ data }: WeeklyChartProps) {
   const gradient = useBrandGradient();
 
   const maxPoints = Math.max(1, ...data.map((d) => d.points));
-  const weekTotal = data.reduce((sum, d) => sum + d.points, 0);
+  const weekTotal = roundPoints(data.reduce((sum, d) => sum + d.points, 0));
   const weekCount = data.reduce((sum, d) => sum + d.count, 0);
 
   return (
@@ -30,7 +31,7 @@ export function WeeklyChart({ data }: WeeklyChartProps) {
         <View>
           <Text style={[styles.title, { color: theme.text }]}>Nhịp độ 7 ngày qua</Text>
           <Text style={[styles.sub, { color: theme.textSecondary }]}>
-            {weekCount + ' hoạt động · +' + weekTotal + ' điểm thi đua'}
+            {`${weekCount} hoạt động · +${formatPoints(weekTotal)} điểm thi đua`}
           </Text>
         </View>
         <View style={[styles.badge, { backgroundColor: theme.accentSoft }]}>
@@ -49,7 +50,7 @@ export function WeeklyChart({ data }: WeeklyChartProps) {
                   styles.val,
                   { color: bar.points > 0 ? theme.text : theme.textMuted },
                 ]}>
-                {bar.points > 0 ? bar.points : '·'}
+                {bar.points > 0 ? formatPoints(bar.points) : '·'}
               </Text>
               <View style={styles.barTrack}>
                 <Svg width={24} height={BAR_MAX_H}>

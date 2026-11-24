@@ -11,6 +11,7 @@
 
 import type { Ionicons } from '@expo/vector-icons';
 
+import { formatPoints } from '@/constants/entry-meta';
 import type { ThemeColor } from '@/constants/theme';
 import { PERIOD_CLOCK, SCHOOL_WEEKDAYS } from '@/constants/utilities-meta';
 import { currentSchoolWeekday, daysSince, formatDate, relativeDay, todayIso } from '@/lib/date';
@@ -419,11 +420,11 @@ export function computeClassHealth(ctx: IntelligenceContext): ClassHealthReport 
       title:
         gap === 0
           ? `${groupStats[0].group} và ${groupStats[1].group} đang hoà điểm kịch tính!`
-          : `${groupStats[0].group} dẫn đầu với ${groupStats[0].points} điểm`,
+          : `${groupStats[0].group} dẫn đầu với ${formatPoints(groupStats[0].points)} điểm`,
       detail:
         gap === 0
-          ? 'Chỉ cần thêm 1 điểm phát biểu là sẽ đổi ngôi đầu bảng!'
-          : `${groupStats[1].group} đang bám đuổi sát nút, chỉ còn cách ${gap} điểm.`,
+          ? 'Chỉ cần thêm 1 stamp phát biểu (+0,25đ) là sẽ đổi ngôi đầu bảng!'
+          : `${groupStats[1].group} đang bám đuổi sát nút, chỉ còn cách ${formatPoints(gap)} điểm.`,
       actionLabel: 'Xem BXH',
       route: '/students',
       icon: 'trophy',
@@ -473,11 +474,11 @@ export function computeClassHealth(ctx: IntelligenceContext): ClassHealthReport 
     alerts.push({
       id: 'study-participation-pulse',
       severity: 'celebrate',
-      title: `Học tập tuần này: ${studyReport.weekly.totalSpeeches} lượt phát biểu (HK1: ${studyReport.semester1.totalSpeeches} lượt)`,
+      title: `Học tập tuần này: ${studyReport.weekly.totalSpeeches} stamps (+${formatPoints(studyReport.weekly.totalPoints)}đ · HK1: ${studyReport.semester1.totalSpeeches} stamps)`,
       detail: topSubj
-        ? `Môn sôi nổi nhất: ${topSubj.subject} (${topSubj.speeches} lượt · ${topSubj.studentCount} học sinh tham gia).`
-        : 'Theo dõi bảng thống kê phát biểu theo tuần và cộng dồn cuối Học kỳ I.',
-      actionLabel: 'Mở Học tập & Phát biểu',
+        ? `Môn sôi nổi nhất: ${topSubj.subject} (${topSubj.speeches} stamps · +${formatPoints(topSubj.points)}đ · ${topSubj.studentCount} HS).`
+        : 'Quy đổi 1 phát biểu = 1 stamp = +0,25đ. Theo dõi bảng tuần & cộng dồn cuối Học kỳ I.',
+      actionLabel: 'Mở Học tập & Stamp',
       route: '/study',
       icon: 'book',
     });
@@ -572,8 +573,8 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
           .filter(Boolean)
           .join(' · '),
         bullets: [
-          `Điểm thi đua: ${stats.points} điểm (${stats.approved} đã duyệt, ${stats.pending} chờ duyệt)`,
-          `Phát biểu học tập: ${stats.studySpeeches} lượt (+${stats.studyPoints}đ) · Thành tích Học thuật: ${stats.academicAchievements}`,
+          `Điểm thi đua: ${formatPoints(stats.points)} điểm (${stats.approved} đã duyệt, ${stats.pending} chờ duyệt)`,
+          `Stamp phát biểu: ${stats.studySpeeches} stamps (+${formatPoints(stats.studyPoints)}đ · 0,25đ/stamp) · Thành tích Học thuật: ${stats.academicAchievements}`,
           `Chuyên cần: ${(att.diligenceScore ?? att.rate) !== null ? `${att.diligenceScore ?? att.rate}% (${att.present} có mặt, ${att.late} muộn)` : 'Chưa có lịch sử điểm danh'}`,
           `Vị trí chỗ ngồi: ${seat ? seat.label : 'Chưa xếp chỗ'}`,
           `Lời khen Kudos đã nhận: ${stuKudos.length} lời khen`,
@@ -588,6 +589,7 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
   // 1b. Study Participation (Weekly & Cumulative HK1) & Academic Achievements
   if (
     q.includes('phat bieu') ||
+    q.includes('stamp') ||
     q.includes('hoc ky') ||
     q.includes('hk1') ||
     q.includes('hoc thuat') ||
@@ -608,20 +610,20 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
     const topSubjs = studyReport.semester1.bySubject.slice(0, 3);
     const topStu = studyReport.studentRows.filter((r) => r.hk1Speeches > 0).slice(0, 3);
     return {
-      title: `Học tập & Phát biểu theo môn — ${classInfo.name}`,
-      badge: `Tuần: ${studyReport.weekly.totalSpeeches} · HK1: ${studyReport.semester1.totalSpeeches} lượt`,
-      summary: `${studyReport.semester1.label} · ${academicCount} thành tích Học thuật đã duyệt.`,
+      title: `Học tập & Stamp phát biểu — ${classInfo.name}`,
+      badge: `Tuần: ${studyReport.weekly.totalSpeeches} · HK1: ${studyReport.semester1.totalSpeeches} stamps`,
+      summary: `${studyReport.semester1.label} · 1 phát biểu = 1 stamp = +0,25đ · ${academicCount} thành tích Học thuật.`,
       bullets: [
-        `Tuần hiện tại (${studyReport.selectedWeekLabel}): ${studyReport.weekly.totalSpeeches} lượt phát biểu (+${studyReport.weekly.totalPoints}đ · ${studyReport.weekly.activeStudents} bạn tham gia)`,
-        `Cộng dồn cuối Học kỳ I: ${studyReport.semester1.totalSpeeches} lượt (+${studyReport.semester1.totalPoints}đ · TB ${studyReport.semester1.avgSpeechesPerStudent} lượt/HS)`,
+        `Tuần hiện tại (${studyReport.selectedWeekLabel}): ${studyReport.weekly.totalSpeeches} stamps (+${formatPoints(studyReport.weekly.totalPoints)}đ · ${studyReport.weekly.activeStudents} bạn tham gia)`,
+        `Cộng dồn cuối Học kỳ I: ${studyReport.semester1.totalSpeeches} stamps (+${formatPoints(studyReport.semester1.totalPoints)}đ · TB ${formatPoints(studyReport.semester1.avgSpeechesPerStudent)} stamps/HS)`,
         topSubjs.length > 0
-          ? `Môn sôi nổi HK1: ${topSubjs.map((s) => `${s.subject} (${s.speeches})`).join(', ')}`
-          : 'Chưa có lượt phát biểu nào theo môn trong Học kỳ I.',
+          ? `Môn sôi nổi HK1: ${topSubjs.map((s) => `${s.subject} (${s.speeches} stamps · +${formatPoints(s.points)}đ)`).join(', ')}`
+          : 'Chưa có stamp phát biểu nào theo môn trong Học kỳ I.',
         topStu.length > 0
-          ? `Top phát biểu HK1: ${topStu.map((r, i) => `#${i + 1} ${r.studentName} (${r.hk1Speeches} lượt)`).join(', ')}`
-          : 'Mở mục Học tập & Phát biểu để ghi nhận nhanh 1 chạm theo từng môn!',
+          ? `Top phát biểu HK1: ${topStu.map((r, i) => `#${i + 1} ${r.studentName} (${r.hk1Speeches} stamps · +${formatPoints(r.hk1Points)}đ)`).join(', ')}`
+          : 'Mở mục Học tập & Stamp để ghi nhận nhanh +1 stamp (+0,25đ) theo từng môn!',
       ],
-      actionLabel: 'Mở Thống kê Học tập & HK1',
+      actionLabel: 'Mở Thống kê Stamp & HK1',
       actionRoute: '/study',
     };
   }
@@ -672,14 +674,14 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
     const top = ranking.slice(0, 5);
     return {
       title: `Top thi đua lớp ${classInfo.name}`,
-      badge: `Tổng ${totals.points} điểm`,
+      badge: `Tổng ${formatPoints(totals.points)} điểm`,
       summary:
         top.length > 0
-          ? `${top[0].student.name} đang giữ vị trí #1 với ${top[0].points} điểm thi đua.`
+          ? `${top[0].student.name} đang giữ vị trí #1 với ${formatPoints(top[0].points)} điểm thi đua.`
           : 'Chưa có dữ liệu xếp hạng.',
       bullets: top.map(
         (r) =>
-          `#${r.rank} ${r.student.name} (${r.student.group ?? 'Chưa phân tổ'}) — ${r.points} điểm`,
+          `#${r.rank} ${r.student.name} (${r.student.group ?? 'Chưa phân tổ'}) — ${formatPoints(r.points)} điểm`,
       ),
       actionLabel: 'Xem danh sách Học sinh',
       actionRoute: '/students',
@@ -693,11 +695,11 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
       badge: groupStats[0] ? `${groupStats[0].group} #1` : undefined,
       summary:
         groupStats.length >= 2
-          ? `${groupStats[0].group} dẫn đầu (${groupStats[0].points}đ), hơn ${groupStats[1].group} ${groupStats[0].points - groupStats[1].points} điểm.`
+          ? `${groupStats[0].group} dẫn đầu (${formatPoints(groupStats[0].points)}đ), hơn ${groupStats[1].group} ${formatPoints(groupStats[0].points - groupStats[1].points)} điểm.`
           : 'Thống kê điểm thi đua theo tổ.',
       bullets: groupStats.map(
         (g, idx) =>
-          `#${idx + 1} ${g.group}: ${g.points} điểm (${g.students} bạn · TB ${g.avgPoints}đ/bạn)`,
+          `#${idx + 1} ${g.group}: ${formatPoints(g.points)} điểm (${g.students} bạn · TB ${formatPoints(g.avgPoints)}đ/bạn)`,
       ),
       actionLabel: 'Xem Sơ đồ chỗ ngồi',
       actionRoute: '/seating',
@@ -853,7 +855,7 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
     badge: `Hạng ${health.grade} · ${health.score}/100`,
     summary: health.headline,
     bullets: [
-      `Sĩ số: ${totals.students} bạn · Tổng điểm: ${totals.points}/${classInfo.goalPoints ?? 200} điểm`,
+      `Sĩ số: ${totals.students} bạn · Tổng điểm: ${formatPoints(totals.points)}/${classInfo.goalPoints ?? 200} điểm`,
       `Quỹ lớp: ${formatVnd(fundSummary.balance)} (${fundSummary.paidCount}/${students.length} bạn đã đóng)`,
       `Trực nhật hôm nay: ${todayDutyGroup} · Chuỗi hoạt động: ${ctx.classStreak} ngày`,
       `Gợi ý: Bạn có thể hỏi tên bất kỳ học sinh nào, hoặc "Hôm nay học gì?", "Quỹ lớp", "Deadline"...`,

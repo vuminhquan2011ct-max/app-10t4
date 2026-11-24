@@ -25,6 +25,7 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { StatCard } from '@/components/ui/stat-card';
 import { useToast } from '@/components/ui/toast';
 import { MASCOTS, STICKER_MAP } from '@/constants/decor-meta';
+import { formatPoints } from '@/constants/entry-meta';
 import { STUDENT_MISSIONS } from '@/constants/rewards-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { ANNOUNCEMENT_TAGS, KUDOS_STICKERS, MEMBER_ROLES } from '@/constants/utilities-meta';
@@ -826,7 +827,7 @@ export default function DashboardScreen() {
               </View>
               <View style={styles.goalStatsRight}>
                 <Text style={styles.goalValue}>
-                  {`${totals.points} / ${goalPoints} điểm`}
+                  {`${formatPoints(totals.points)} / ${formatPoints(goalPoints)} điểm`}
                 </Text>
                 <View style={styles.goalPctPill}>
                   <Text style={styles.goalPctText}>{`${goalPercent}%`}</Text>
@@ -1030,7 +1031,7 @@ export default function DashboardScreen() {
             <View style={styles.flex}>
               <View style={styles.officerBadgeRow}>
                 <Text style={[styles.officerHubEyebrow, { color: theme.success }]}>
-                  HỌC TẬP · PHÁT BIỂU THEO MÔN
+                  HỌC TẬP · STAMP PHÁT BIỂU (0,25Đ/STAMP)
                 </Text>
                 <Badge
                   label={studyReport.semester1.label}
@@ -1040,10 +1041,10 @@ export default function DashboardScreen() {
                 />
               </View>
               <Text style={[styles.officerHubTitle, { color: theme.text }]}>
-                {`Tuần này: ${studyReport.weekly.totalSpeeches} lượt · Cộng dồn HK I: ${studyReport.semester1.totalSpeeches} lượt`}
+                {`Tuần này: ${studyReport.weekly.totalSpeeches} stamps · Cộng dồn HK I: ${studyReport.semester1.totalSpeeches} stamps`}
               </Text>
               <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
-                {`+${studyReport.semester1.totalPoints}đ học tập · ${studyReport.semester1.activeStudents} HS tham gia · ${studyReport.semester1.bySubject.length} môn có phát biểu`}
+                {`+${formatPoints(studyReport.semester1.totalPoints)}đ học tập · ${studyReport.semester1.activeStudents} HS tham gia · ${studyReport.semester1.bySubject.length} môn có stamp`}
               </Text>
             </View>
           </View>
@@ -1053,7 +1054,7 @@ export default function DashboardScreen() {
               {studyReport.semester1.bySubject.slice(0, 4).map((sub) => (
                 <Badge
                   key={sub.subject}
-                  label={`${sub.subject}: ${sub.speeches} lượt`}
+                  label={`${sub.subject}: ${sub.speeches} stamps`}
                   color={'success'}
                   soft={'successSoft'}
                 />
@@ -1063,7 +1064,7 @@ export default function DashboardScreen() {
 
           <View style={styles.officerHubBtns}>
             <Button
-              label={'Ghi phát biểu'}
+              label={'Ghi 1 Stamp (+0,25đ)'}
               icon={'hand-left-outline'}
               size={'sm'}
               style={styles.flex}
@@ -1327,7 +1328,7 @@ export default function DashboardScreen() {
               </View>
               <View style={[styles.cornerRank, { backgroundColor: theme.accentSoft }]}>
                 <Text style={[styles.cornerRankVal, { color: theme.accentText }]}>
-                  {`${myStats.points}đ`}
+                  {`${formatPoints(myStats.points)}đ`}
                 </Text>
                 <Text style={[styles.cornerRankSub, { color: theme.accentText }]}>
                   {`${myStats.total} bài`}
@@ -1619,7 +1620,7 @@ export default function DashboardScreen() {
         />
         <StatCard
           label={canViewAll ? 'Tổng điểm thi đua' : 'Điểm cá nhân'}
-          value={canViewAll ? totals.points : (myStats?.points ?? totals.points)}
+          value={formatPoints(canViewAll ? totals.points : (myStats?.points ?? totals.points))}
           icon={'ribbon'}
           tone={'success'}
           onPress={() => router.push('/students' as never)}
@@ -1776,7 +1777,7 @@ export default function DashboardScreen() {
                           <View
                             style={[styles.rankPtsPill, { backgroundColor: theme.accentSoft }]}>
                             <Text style={[styles.rankPts, { color: theme.accentText }]}>
-                              {row.points + ' đ'}
+                              {`${formatPoints(row.points)} đ`}
                             </Text>
                           </View>
                         </Pressable>

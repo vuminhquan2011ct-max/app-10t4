@@ -1,8 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Linking,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import { CategoryBars } from '@/components/charts/category-bars';
 import { EntryCard } from '@/components/entry-card';
@@ -19,6 +27,7 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { StatCard } from '@/components/ui/stat-card';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
+import { STUDY_STAMP_POINTS, formatPoints, formatSignedPoints } from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { KUDOS_STICKERS } from '@/constants/utilities-meta';
 import { ENTRY_TEMPLATES } from '@/data/seed-extras';
@@ -33,6 +42,7 @@ import {
 } from '@/lib/officer-roles';
 import { buildCategoryStats } from '@/lib/stats';
 import { useClassStore } from '@/store/class-store';
+import type { Entry } from '@/types/models';
 
 export default function StudentDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -58,6 +68,8 @@ export default function StudentDetailScreen() {
     canViewNotes,
     canManagePrivate,
     canViewPrivateOf,
+    canDeleteStudyStamp,
+    deleteStudyStamp,
     currentStudentId,
   } = useClassStore();
   const theme = useTheme();
@@ -70,6 +82,47 @@ export default function StudentDetailScreen() {
   const [emailDraft, setEmailDraft] = useState('');
   const [addressDraft, setAddressDraft] = useState('');
   const [updatingPosition, setUpdatingPosition] = useState(false);
+  const [confirmStampId, setConfirmStampId] = useState<string | null>(null);
+  const [deletingStampId, setDeletingStampId] = useState<string | null>(null);
+  const stampTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (stampTimerRef.current) {
+        clearTimeout(stampTimerRef.current);
+        stampTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleDeleteStudyStamp = async (entry: Entry) => {
+    if (deletingStampId) return;
+    if (confirmStampId !== entry.id) {
+      if (stampTimerRef.current) clearTimeout(stampTimerRef.current);
+      setConfirmStampId(entry.id);
+      stampTimerRef.current = setTimeout(() => {
+        stampTimerRef.current = null;
+        setConfirmStampId(null);
+      }, 3_500);
+      showToast('Bấm lại lần nữa để xoá stamp phát biểu này', 'warning');
+      return;
+    }
+    if (stampTimerRef.current) {
+      clearTimeout(stampTimerRef.current);
+      stampTimerRef.current = null;
+    }
+    setConfirmStampId(null);
+    setDeletingStampId(entry.id);
+    try {
+      const ok = await deleteStudyStamp(entry.id);
+      showToast(
+        ok ? 'Đã xoá stamp phát biểu!' : 'Bạn không có quyền xoá stamp này',
+        ok ? 'info' : 'danger',
+      );
+    } finally {
+      setDeletingStampId(null);
+    }
+  };
 
   if (!student) {
     return (
@@ -112,6 +165,10 @@ export default function StudentDetailScreen() {
   const studySubjectPills = Object.entries(studyRow?.bySubject ?? {})
     .filter(([, cnt]) => cnt > 0)
     .sort((a, b) => b[1] - a[1]);
+  const recentStudyStamps = entries
+    .filter((e) => e.kind === 'study')
+    .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 8);
 
   const canSeePrivate = canViewPrivateOf(student.id);
   const isOwnProfile = currentStudentId !== null && currentStudentId === student.id;
@@ -344,7 +401,12 @@ export default function StudentDetailScreen() {
 
       {/* Metrics */}
       <FadeIn index={3} style={styles.grid}>
-        <StatCard label={'Điểm thi đua'} value={stats.points} icon={'ribbon'} tone={'success'} />
+        <StatCard
+          label={'Điểm thi đua'}
+          value={formatPoints(stats.points)}
+          icon={'ribbon'}
+          tone={'success'}
+        />
         <StatCard
           label={'Thành tích'}
           value={stats.achievements}
@@ -359,11 +421,11 @@ export default function StudentDetailScreen() {
       </FadeIn>
       <FadeIn index={4} style={styles.grid}>
         <StatCard
-          label={'Phát biểu HK I'}
-          value={`${studyRow?.hk1Speeches ?? stats.studySpeeches} lượt`}
+          label={'Stamp phát biểu HK I'}
+          value={`${studyRow?.hk1Speeches ?? stats.studySpeeches} stamps`}
           icon={'book'}
           tone={'purple'}
-          hint={`Tuần này: ${studyRow?.weeklySpeeches ?? 0} lượt · +${studyRow?.hk1Points ?? stats.studyPoints}đ`}
+          hint={`Tuần này: ${studyRow?.weeklySpeeches ?? 0} stamps · +${formatPoints(studyRow?.hk1Points ?? stats.studyPoints)}đ`}
         />
         <StatCard
           label={'Điểm chuyên cần'}
@@ -398,10 +460,10 @@ export default function StudentDetailScreen() {
             </View>
             <View style={styles.flex}>
               <Text style={[styles.cardLabel, { color: theme.text }]}>
-                Học tập & Phát biểu theo môn (Tuần & Cộng dồn HK I)
+                Học tập & Stamp phát biểu (0,25đ/stamp)
               </Text>
               <Text style={{ color: theme.textMuted, fontSize: 11.5 }}>
-                {`Tuần này: ${studyRow?.weeklySpeeches ?? 0} lượt · Cộng dồn ${studyReport.semester1.label}: ${studyRow?.hk1Speeches ?? stats.studySpeeches} lượt (+${studyRow?.hk1Points ?? stats.studyPoints}đ)`}
+                {`Tuần này: ${studyRow?.weeklySpeeches ?? 0} stamps · Cộng dồn ${studyReport.semester1.label}: ${studyRow?.hk1Speeches ?? stats.studySpeeches} stamps (+${formatPoints(studyRow?.hk1Points ?? stats.studyPoints)}đ)`}
               </Text>
             </View>
             <Pressable onPress={() => router.push('/study' as never)} hitSlop={8}>
@@ -428,12 +490,78 @@ export default function StudentDetailScreen() {
             {studySubjectPills.map(([sub, cnt]) => (
               <Badge
                 key={sub}
-                label={`${sub}: ${cnt} lượt`}
+                label={`${sub}: ${cnt} (${formatPoints(cnt * STUDY_STAMP_POINTS)}đ)`}
                 color={'success'}
                 soft={'successSoft'}
               />
             ))}
           </View>
+
+          {recentStudyStamps.length > 0 ? (
+            <View style={[styles.stampHistoryWrap, { borderColor: theme.border }]}>
+              <Text style={[styles.stampHistoryTitle, { color: theme.textSecondary }]}>
+                {`Stamp phát biểu gần đây (${recentStudyStamps.length})`}
+              </Text>
+              {recentStudyStamps.map((stamp) => {
+                const deletable = canDeleteStudyStamp(stamp);
+                const confirming = confirmStampId === stamp.id;
+                const deleting = deletingStampId === stamp.id;
+                return (
+                  <View
+                    key={stamp.id}
+                    style={[
+                      styles.stampHistoryRow,
+                      { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                    ]}>
+                    <View style={styles.flex}>
+                      <Text style={[styles.stampSubjectText, { color: theme.text }]} numberOfLines={1}>
+                        {`${stamp.subject || 'Học tập'} · ${formatDate(stamp.date)}`}
+                      </Text>
+                      <Text style={{ color: theme.textMuted, fontSize: 11.5 }} numberOfLines={1}>
+                        {`1 stamp (${formatSignedPoints(stamp.points)})${stamp.recordedByName ? ` · Ghi bởi ${stamp.recordedByName}` : ''}`}
+                      </Text>
+                    </View>
+                    {deletable ? (
+                      <Pressable
+                        disabled={deleting}
+                        onPress={() => {
+                          void handleDeleteStudyStamp(stamp);
+                        }}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          confirming ? 'Xác nhận xoá stamp phát biểu' : 'Xoá stamp phát biểu'
+                        }
+                        style={[
+                          styles.stampDelBtn,
+                          {
+                            backgroundColor: confirming ? theme.danger : theme.dangerSoft,
+                            borderColor: theme.danger,
+                          },
+                        ]}>
+                        {deleting ? (
+                          <ActivityIndicator size="small" color={theme.danger} />
+                        ) : (
+                          <Ionicons
+                            name={confirming ? 'trash' : 'trash-outline'}
+                            size={12}
+                            color={confirming ? '#FFFFFF' : theme.danger}
+                          />
+                        )}
+                        <Text
+                          style={[
+                            styles.stampDelText,
+                            { color: confirming ? '#FFFFFF' : theme.danger },
+                          ]}>
+                          {deleting ? 'Xoá...' : confirming ? 'Xoá?' : 'Xoá'}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : null}
         </Card>
       </FadeIn>
 
@@ -606,6 +734,7 @@ export default function StudentDetailScreen() {
             entry={entry}
             onPress={
               canEditClass ||
+              (entry.kind === 'study' && canDeleteStudyStamp(entry)) ||
               (currentStudentId !== null &&
                 entry.studentId === currentStudentId &&
                 entry.status === 'pending')
@@ -696,6 +825,37 @@ const styles = StyleSheet.create({
   honourCard: { gap: Spacing.two },
   cardLabel: { fontSize: 14, fontWeight: '800' },
   honourList: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  stampHistoryWrap: {
+    gap: 6,
+    paddingTop: Spacing.two,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  stampHistoryTitle: {
+    fontSize: 11.5,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  stampHistoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.two + 2,
+    paddingVertical: 8,
+    borderRadius: Radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  stampSubjectText: { fontSize: 12.5, fontWeight: '800' },
+  stampDelBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+  },
+  stampDelText: { fontSize: 11, fontWeight: '800' },
   grid: { flexDirection: 'row', gap: Spacing.three },
   rewardCard: { gap: Spacing.two },
   rewardHead: { flexDirection: 'row', alignItems: 'center', gap: 6 },

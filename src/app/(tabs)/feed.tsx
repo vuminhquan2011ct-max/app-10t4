@@ -30,6 +30,7 @@ import {
   ENTRY_KINDS,
   ENTRY_LEVELS,
   ENTRY_STATUSES,
+  formatSignedPoints,
 } from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
@@ -43,7 +44,7 @@ import {
 } from '@/lib/drive';
 import { stripVietnamese } from '@/lib/intelligence';
 import { useClassStore } from '@/store/class-store';
-import type { EntryCategory, EntryStatus } from '@/types/models';
+import type { Entry, EntryCategory, EntryStatus } from '@/types/models';
 
 function FeedProofPreview({
   proofUrl,
@@ -117,7 +118,7 @@ const FILTERS: { value: Filter; label: string; icon: keyof typeof Ionicons.glyph
 
 const KIND_FILTERS: { value: KindFilter; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: 'all', label: 'Tất cả', icon: 'apps-outline' },
-  { value: 'study', label: '📚 Phát biểu', icon: 'book-outline' },
+  { value: 'study', label: '📚 Stamp phát biểu', icon: 'book-outline' },
   { value: 'achievement', label: '🏆 Thành tích', icon: 'trophy-outline' },
   { value: 'academic', label: '🎓 Học thuật', icon: 'school-outline' },
   { value: 'violation', label: '⚠️ Vi phạm', icon: 'alert-circle-outline' },
@@ -135,6 +136,8 @@ export default function FeedScreen() {
     canRecordStudy,
     canRecordBonus,
     canRecordViolation,
+    canDeleteStudyStamp,
+    deleteStudyStamp,
     classRosterPublic,
     currentStudentId,
     getStudent,
@@ -152,7 +155,10 @@ export default function FeedScreen() {
   const [catFilter, setCatFilter] = useState<CatFilter>('all');
   const [confirmProofEntryId, setConfirmProofEntryId] = useState<string | null>(null);
   const [deletingProofEntryId, setDeletingProofEntryId] = useState<string | null>(null);
+  const [confirmStampEntryId, setConfirmStampEntryId] = useState<string | null>(null);
+  const [deletingStampEntryId, setDeletingStampEntryId] = useState<string | null>(null);
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stampConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const rosterById = useMemo(
     () => new Map(classRosterPublic.map((s) => [s.id, s])),
@@ -164,6 +170,10 @@ export default function FeedScreen() {
       if (confirmTimerRef.current) {
         clearTimeout(confirmTimerRef.current);
         confirmTimerRef.current = null;
+      }
+      if (stampConfirmTimerRef.current) {
+        clearTimeout(stampConfirmTimerRef.current);
+        stampConfirmTimerRef.current = null;
       }
     };
   }, []);
@@ -268,6 +278,35 @@ export default function FeedScreen() {
       showToast('Đã xoá tệp minh chứng khỏi bài đăng, Drive & Excel!', 'info');
     } finally {
       setDeletingProofEntryId(null);
+    }
+  };
+
+  const handleDeleteStudyStamp = async (entry: Entry) => {
+    if (deletingStampEntryId) return;
+    if (confirmStampEntryId !== entry.id) {
+      if (stampConfirmTimerRef.current) clearTimeout(stampConfirmTimerRef.current);
+      setConfirmStampEntryId(entry.id);
+      stampConfirmTimerRef.current = setTimeout(() => {
+        stampConfirmTimerRef.current = null;
+        setConfirmStampEntryId(null);
+      }, 3_500);
+      showToast('Bấm lại lần nữa để xoá stamp phát biểu này', 'warning');
+      return;
+    }
+    if (stampConfirmTimerRef.current) {
+      clearTimeout(stampConfirmTimerRef.current);
+      stampConfirmTimerRef.current = null;
+    }
+    setConfirmStampEntryId(null);
+    setDeletingStampEntryId(entry.id);
+    try {
+      const ok = await deleteStudyStamp(entry.id);
+      showToast(
+        ok ? 'Đã xoá stamp phát biểu!' : 'Bạn không có quyền xoá stamp này',
+        ok ? 'info' : 'danger',
+      );
+    } finally {
+      setDeletingStampEntryId(null);
     }
   };
 
@@ -517,8 +556,11 @@ export default function FeedScreen() {
           const pubStudent = rosterById.get(entry.studentId);
           const studentName = student?.name ?? pubStudent?.name ?? 'Học sinh';
           const studentGroup = student?.group ?? pubStudent?.group ?? null;
+          const canDeleteStamp = isStudy && canDeleteStudyStamp(entry);
           const canOpenForm =
-            canEditClass || (entry.status === 'pending' && entry.studentId === currentStudentId);
+            canEditClass ||
+            canDeleteStamp ||
+            (entry.status === 'pending' && entry.studentId === currentStudentId);
           const canOpenStudent = canViewAll || entry.studentId === currentStudentId;
           const attributionText =
             entry.recordedByPosition && entry.recordedByName
@@ -613,8 +655,8 @@ export default function FeedScreen() {
                         ? 'Vi phạm / Nhắc nhở'
                         : isStudy
                           ? entry.subject
-                            ? `Học tập · Môn ${entry.subject} (${speechCount} lượt)`
-                            : `Học tập · Phát biểu (${speechCount} lượt)`
+                            ? `${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`} · Môn ${entry.subject}`
+                            : `Học tập · ${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`}`
                           : kind.label}
                     </Text>
                   </View>
@@ -633,7 +675,7 @@ export default function FeedScreen() {
                         color={theme[accentColor]}
                       />
                       <Text style={[styles.pointsValue, { color: theme[accentColor] }]}>
-                        {entry.points > 0 ? `+${entry.points}đ` : `${entry.points}đ`}
+                        {formatSignedPoints(entry.points)}
                       </Text>
                     </View>
                   ) : null}
@@ -655,20 +697,12 @@ export default function FeedScreen() {
                 {/* Badges Row */}
                 <View style={styles.badges}>
                   {isStudy ? (
-                    <>
-                      <Badge
-                        label={entry.subject ? `Phát biểu · ${entry.subject}` : 'Học tập · Phát biểu'}
-                        color={'success'}
-                        soft={'successSoft'}
-                        icon={'book'}
-                      />
-                      <Badge
-                        label={`${speechCount} lượt`}
-                        color={'success'}
-                        soft={'successSoft'}
-                        icon={'hand-left-outline'}
-                      />
-                    </>
+                    <Badge
+                      label={`${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`} · ${entry.subject || 'Học tập'}`}
+                      color={'success'}
+                      soft={'successSoft'}
+                      icon={'book'}
+                    />
                   ) : null}
                   {isAcademic ? (
                     <Badge
@@ -793,6 +827,50 @@ export default function FeedScreen() {
                         </Pressable>
                       ) : null}
                     </>
+                  ) : null}
+                  {canDeleteStamp ? (
+                    <Pressable
+                      disabled={deletingStampEntryId === entry.id}
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        void handleDeleteStudyStamp(entry);
+                      }}
+                      hitSlop={6}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        confirmStampEntryId === entry.id
+                          ? 'Xác nhận xoá stamp phát biểu'
+                          : 'Xoá stamp phát biểu'
+                      }
+                      style={[
+                        styles.proofChip,
+                        {
+                          backgroundColor:
+                            confirmStampEntryId === entry.id ? theme.danger : theme.dangerSoft,
+                          borderColor: theme.danger,
+                        },
+                      ]}>
+                      {deletingStampEntryId === entry.id ? (
+                        <ActivityIndicator size="small" color={theme.danger} />
+                      ) : (
+                        <Ionicons
+                          name={confirmStampEntryId === entry.id ? 'trash' : 'trash-outline'}
+                          size={12}
+                          color={confirmStampEntryId === entry.id ? '#FFFFFF' : theme.danger}
+                        />
+                      )}
+                      <Text
+                        style={[
+                          styles.proofText,
+                          { color: confirmStampEntryId === entry.id ? '#FFFFFF' : theme.danger },
+                        ]}>
+                        {deletingStampEntryId === entry.id
+                          ? 'Đang xoá...'
+                          : confirmStampEntryId === entry.id
+                            ? 'Xác nhận xoá?'
+                            : 'Xoá stamp'}
+                      </Text>
+                    </Pressable>
                   ) : null}
                 </View>
 

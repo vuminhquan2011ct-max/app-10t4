@@ -16,7 +16,7 @@ import { Screen } from '@/components/ui/screen';
 import { SectionHeader } from '@/components/ui/section-header';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
-import { GROUP_PRESETS } from '@/constants/entry-meta';
+import { GROUP_PRESETS, formatPoints } from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { stripVietnamese } from '@/lib/intelligence';
@@ -474,7 +474,7 @@ export default function StudentsScreen() {
                   <View style={styles.myStatIconCircle}>
                     <Ionicons name="trophy" size={13} color="#FDE68A" />
                   </View>
-                  <Text style={styles.myStatVal}>{myStats.points}</Text>
+                  <Text style={styles.myStatVal}>{formatPoints(myStats.points)}</Text>
                   <Text style={styles.myStatLab}>Điểm tích lũy</Text>
                 </View>
                 <View style={styles.myStatBox}>
@@ -712,7 +712,7 @@ export default function StudentsScreen() {
             <View style={[styles.bentoIconWrap, { backgroundColor: theme.goldSoft }]}>
               <Ionicons name="trophy" size={18} color={theme.gold} />
             </View>
-            <Text style={[styles.bentoValue, { color: theme.gold }]}>{topPoints}</Text>
+            <Text style={[styles.bentoValue, { color: theme.gold }]}>{formatPoints(topPoints)}</Text>
             <Text style={[styles.bentoLabel, { color: theme.textSecondary }]}>Điểm cao nhất</Text>
           </View>
 
@@ -1067,7 +1067,7 @@ export default function StudentsScreen() {
                           styles.points,
                           { color: medal ? theme[medal.color] : theme.accentText },
                         ]}>
-                        {row.points}
+                        {formatPoints(row.points)}
                       </Text>
                       <Text
                         style={[

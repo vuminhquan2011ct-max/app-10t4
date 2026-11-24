@@ -11,6 +11,31 @@ import type { EntryCategory, EntryKind, EntryLevel, EntryStatus, Gender } from '
 
 export type CategoryKey = EntryCategory;
 
+/** Quy đổi chuẩn: 1 lần phát biểu = 1 Stamp = +0,25 điểm thi đua. */
+export const STUDY_STAMP_POINTS = 0.25;
+
+/** Làm tròn tối đa 2 chữ số thập phân (tránh nhiễu IEEE-754 khi cộng nhiều 0,25đ và chuẩn hoá `-0`). */
+export function roundPoints(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  const rounded = Math.round(value * 100) / 100;
+  return Object.is(rounded, -0) || rounded === 0 ? 0 : rounded;
+}
+
+/** Định dạng điểm kiểu Việt Nam (`0.25` -> `'0,25'`, `0.5` -> `'0,5'`, `5` -> `'5'`, `-0.25` -> `'-0,25'`). */
+export function formatPoints(value: number): string {
+  const n = roundPoints(value);
+  if (Number.isInteger(n)) return String(n);
+  return String(n).replace('.', ',');
+}
+
+/** Định dạng điểm có dấu kèm đơn vị `đ` (`0.25` -> `'+0,25đ'`, `-5` -> `'-5đ'`, `0` -> `'0đ'`). */
+export function formatSignedPoints(value: number): string {
+  const n = roundPoints(value);
+  if (n > 0) return `+${formatPoints(n)}đ`;
+  if (n < 0) return `${formatPoints(n)}đ`;
+  return '0đ';
+}
+
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
 export type EntryKindMeta = {
@@ -42,8 +67,8 @@ export const ENTRY_KINDS: Record<EntryKind, EntryKindMeta> = {
   },
   study: {
     key: 'study',
-    label: 'Học tập · Phát biểu',
-    shortLabel: 'Phát biểu',
+    label: 'Học tập · Stamp phát biểu',
+    shortLabel: 'Stamp phát biểu',
     icon: 'book',
     color: 'success',
     soft: 'successSoft',
@@ -195,7 +220,12 @@ export const GROUP_BONUS_PRESETS: readonly {
   points: number;
   kind: EntryKind;
 }[] = [
-  { title: 'Phát biểu xây dựng bài tích cực trong giờ', category: 'study', points: 5, kind: 'study' },
+  {
+    title: 'Phát biểu xây dựng bài tích cực trong giờ',
+    category: 'study',
+    points: STUDY_STAMP_POINTS,
+    kind: 'study',
+  },
   { title: 'Đạt điểm 9–10 kiểm tra miệng / 15 phút', category: 'academic', points: 10, kind: 'achievement' },
   { title: 'Hỗ trợ bạn cùng tổ học tập tiến bộ', category: 'volunteer', points: 5, kind: 'activity' },
   { title: 'Hoàn thành xuất sắc nhiệm vụ nhóm / thuyết trình', category: 'skill', points: 8, kind: 'achievement' },
@@ -221,16 +251,16 @@ export const STUDY_SUBJECT_PRESETS = [
   'HĐ Trải nghiệm',
 ] as const;
 
-/** Mẫu ghi nhận phát biểu nhanh 1 chạm (Học tập · Phát biểu theo môn). */
+/** Mẫu ghi nhận phát biểu nhanh 1 chạm (1 phát biểu = 1 Stamp = +0,25đ). */
 export const STUDY_SPEECH_PRESETS: readonly {
   title: string;
   speechCount: number;
   points: number;
 }[] = [
-  { title: 'Phát biểu xây dựng bài tích cực', speechCount: 1, points: 2 },
-  { title: 'Phát biểu sôi nổi nhiều lượt trong tiết', speechCount: 2, points: 4 },
-  { title: 'Phát biểu & giải quyết bài tập nâng cao', speechCount: 3, points: 6 },
-  { title: 'Lên bảng chữa bài / thuyết trình bài học xuất sắc', speechCount: 2, points: 5 },
+  { title: 'Phát biểu xây dựng bài', speechCount: 1, points: STUDY_STAMP_POINTS },
+  { title: 'Trả lời câu hỏi trên lớp', speechCount: 1, points: STUDY_STAMP_POINTS },
+  { title: 'Lên bảng chữa bài / giải bài', speechCount: 1, points: STUDY_STAMP_POINTS },
+  { title: 'Đóng góp thảo luận nhóm xuất sắc', speechCount: 1, points: STUDY_STAMP_POINTS },
 ] as const;
 
 /** Mẫu Thành tích Học thuật nổi bật (tách riêng với phát biểu hàng ngày). */
