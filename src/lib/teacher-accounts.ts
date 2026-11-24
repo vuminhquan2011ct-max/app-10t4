@@ -37,6 +37,7 @@ import {
   parseState,
 } from '@/store/persist';
 import {
+  ACCOUNTS_RESET_EPOCH,
   fetchAuthRegistryRemote,
   findAuthRegistryAccountRemote,
   mergeClassStates,
@@ -51,6 +52,7 @@ import type { RegisteredTeacherPublic } from '@/types/models';
 export { isEmailTaken, normalizeEmail, validateEmail };
 
 export const TEACHER_ACCOUNTS_KEY = 'class10t4:teacher-accounts:v1';
+const APPLIED_ACCOUNTS_RESET_KEY = 'class10t4:applied-accounts-reset:v1';
 export const MIN_TEACHER_PASSWORD_LENGTH = 4;
 
 export type TeacherRole = 'teacher' | 'subject_teacher';
@@ -92,7 +94,7 @@ export type TeacherAccountChangeEvent =
       account: TeacherAccountRecord;
       publicTeacher: RegisteredTeacherPublic;
     }
-  | { type: 'removed'; teacherId: string }
+  | { type: 'removed'; teacherId: string; resetAt?: string }
   | { type: 'synced' };
 
 type TeacherAccountListener = (event: TeacherAccountChangeEvent) => void;
@@ -294,15 +296,47 @@ function mergeTeacherRecords(
   return Array.from(byId.values());
 }
 
+function parseIsoMs(iso?: string | null): number {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+let latestKnownResetMs = parseIsoMs(ACCOUNTS_RESET_EPOCH);
+
+function trackKnownResetMs(ms: number): void {
+  if (ms > latestKnownResetMs) {
+    latestKnownResetMs = ms;
+  }
+}
+
+function safePostResetNowIso(): string {
+  return new Date(Math.max(Date.now(), latestKnownResetMs + 1)).toISOString();
+}
+
+function isBeforeResetEpoch(
+  updatedAt: string | undefined,
+  createdAt: string | undefined,
+  resetMs: number,
+): boolean {
+  if (resetMs <= 0) return false;
+  const latestMs = Math.max(parseIsoMs(updatedAt), parseIsoMs(createdAt));
+  return latestMs < resetMs;
+}
+
 async function readLocalTeacherAccounts(): Promise<TeacherAccountRecord[]> {
   try {
     const raw = await AsyncStorage.getItem(TEACHER_ACCOUNTS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
+    const effectiveResetMs = Math.max(parseIsoMs(ACCOUNTS_RESET_EPOCH), latestKnownResetMs);
     return parsed
       .map(parseTeacherRecord)
-      .filter((item): item is TeacherAccountRecord => item !== null);
+      .filter(
+        (item): item is TeacherAccountRecord =>
+          item !== null && !isBeforeResetEpoch(item.updatedAt, item.createdAt, effectiveResetMs),
+      );
   } catch {
     return [];
   }
@@ -350,15 +384,23 @@ export async function syncTeacherAccountsFromRemote(
       lastRemoteTeacherSyncAt = Date.now();
       if (!remote || !Array.isArray(remote.teachers)) return local;
 
+      const effectiveResetMs = Math.max(
+        parseIsoMs(ACCOUNTS_RESET_EPOCH),
+        parseIsoMs(remote.accountsResetAt),
+        latestKnownResetMs,
+      );
+      trackKnownResetMs(effectiveResetMs);
       const parsedRemote = remote.teachers
         .map(parseTeacherRecord)
         .filter((item): item is TeacherAccountRecord => item !== null);
       const remoteDeleted = remote.deletedTeacherIds ?? {};
       const hasTombstones = Object.keys(remoteDeleted).length > 0;
-      if (parsedRemote.length === 0 && !hasTombstones) return local;
+      if (parsedRemote.length === 0 && !hasTombstones && effectiveResetMs <= 0) return local;
 
       const merged = mergeTeacherRecords(local, parsedRemote).filter(
-        (rec) => !isTombstoned(remoteDeleted[rec.teacherId], rec.updatedAt, rec.createdAt),
+        (rec) =>
+          !isBeforeResetEpoch(rec.updatedAt, rec.createdAt, effectiveResetMs) &&
+          !isTombstoned(remoteDeleted[rec.teacherId], rec.updatedAt, rec.createdAt),
       );
       if (JSON.stringify(merged) !== JSON.stringify(local)) {
         await saveTeacherAccounts(merged);
@@ -386,27 +428,50 @@ export async function loadTeacherAccounts(options?: {
 }
 
 async function readSafePersistedState(): Promise<PersistedState> {
-  const [rawState, clearedFlag] = await Promise.all([
+  const [rawState, clearedFlag, appliedResetRaw] = await Promise.all([
     AsyncStorage.getItem(STORAGE_KEY),
     AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
+    AsyncStorage.getItem(APPLIED_ACCOUNTS_RESET_KEY),
   ]);
+  const epochMs = parseIsoMs(ACCOUNTS_RESET_EPOCH);
+  const appliedMs = parseIsoMs(appliedResetRaw);
+  const effectiveResetMs = Math.max(epochMs, appliedMs, latestKnownResetMs);
+  trackKnownResetMs(effectiveResetMs);
+  const effectiveResetIso =
+    effectiveResetMs <= 0
+      ? null
+      : appliedMs === effectiveResetMs && appliedResetRaw
+        ? appliedResetRaw
+        : epochMs === effectiveResetMs && ACCOUNTS_RESET_EPOCH
+          ? ACCOUNTS_RESET_EPOCH
+          : new Date(effectiveResetMs).toISOString();
+
   if (rawState) {
     const parsed = parseState(rawState);
-    if (!clearedFlag) {
+    const parsedResetMs = parseIsoMs(parsed.accountsResetAt);
+    if (!clearedFlag || (effectiveResetMs > 0 && parsedResetMs < effectiveResetMs)) {
       return {
         ...parsed,
         students: [],
+        registeredTeachers: [],
         entries: [],
         attendance: {},
+        dutyLogs: {},
         fundPaid: {},
         kudos: [],
-        seating: { ...parsed.seating, seats: {}, updatedAt: '' },
+        activityLog: [],
+        polls: (parsed.polls ?? []).map((p) => ({ ...p, votes: {} })),
+        seating: { ...parsed.seating, seats: {}, updatedAt: effectiveResetIso ?? '' },
         currentStudentId: null,
+        accountsResetAt: effectiveResetIso ?? parsed.accountsResetAt ?? null,
       };
     }
     return parsed;
   }
-  return freshState();
+  return {
+    ...freshState(),
+    accountsResetAt: effectiveResetIso,
+  };
 }
 
 async function persistTeacherToLocalClassState(
@@ -463,6 +528,7 @@ async function isAuthUserIdTakenForTeacher(
     return true;
   }
 
+  const epochResetMs = parseIsoMs(ACCOUNTS_RESET_EPOCH);
   try {
     const rawStudents = await AsyncStorage.getItem(STUDENT_ACCOUNTS_KEY);
     if (rawStudents) {
@@ -471,6 +537,9 @@ async function isAuthUserIdTakenForTeacher(
         for (const item of parsed) {
           if (!item || typeof item !== 'object') continue;
           const r = item as Record<string, unknown>;
+          const upd = typeof r.updatedAt === 'string' ? r.updatedAt : '';
+          const crt = typeof r.createdAt === 'string' ? r.createdAt : '';
+          if (isBeforeResetEpoch(upd, crt, epochResetMs)) continue;
           if (typeof r.authUserId === 'string' && r.authUserId.trim() === cleanId) {
             return true;
           }
@@ -485,6 +554,7 @@ async function isAuthUserIdTakenForTeacher(
     try {
       const remote = await fetchAuthRegistryRemote();
       if (remote && Array.isArray(remote.students)) {
+        const effectiveResetMs = Math.max(epochResetMs, parseIsoMs(remote.accountsResetAt));
         const deletedStudents = remote.deletedStudentIds ?? {};
         for (const item of remote.students) {
           if (!item || typeof item !== 'object') continue;
@@ -492,6 +562,7 @@ async function isAuthUserIdTakenForTeacher(
           const sid = typeof r.studentId === 'string' ? r.studentId.trim() : '';
           const upd = typeof r.updatedAt === 'string' ? r.updatedAt : '';
           const crt = typeof r.createdAt === 'string' ? r.createdAt : '';
+          if (isBeforeResetEpoch(upd, crt, effectiveResetMs)) continue;
           if (sid && isTombstoned(deletedStudents[sid], upd, crt)) continue;
           if (typeof r.authUserId === 'string' && r.authUserId.trim() === cleanId) {
             return true;
@@ -797,7 +868,7 @@ export async function registerTeacherAccount(
     };
   }
 
-  const now = new Date().toISOString();
+  const now = safePostResetNowIso();
   const providers = mergeAuthProviders(
     params.authProviders,
     password.length > 0 ? (cleanEmail ? ['email'] : ['local']) : [],
@@ -1172,6 +1243,15 @@ export async function changeOwnTeacherPassword(params: {
   }
 
   return { ok: true };
+}
+
+/** Wipes local teacher accounts cache during a full account reset without pushing to cloud. */
+export async function wipeLocalTeacherAccounts(resetAt?: string): Promise<void> {
+  trackKnownResetMs(parseIsoMs(resetAt));
+  lastRemoteTeacherSyncAt = 0;
+  inFlightTeacherSync = null;
+  await AsyncStorage.removeItem(TEACHER_ACCOUNTS_KEY).catch(() => {});
+  emitTeacherAccountsChanged({ type: 'removed', teacherId: '*', resetAt });
 }
 
 export async function removeTeacherAccount(teacherId: string): Promise<void> {

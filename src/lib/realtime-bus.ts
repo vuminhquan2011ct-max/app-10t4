@@ -22,13 +22,15 @@ export type LiveBroadcastEvent =
       senderId: string;
     }
   | { type: 'photo-added'; item: Record<string, unknown>; senderId: string }
-  | { type: 'photo-deleted'; id: string; driveFileId?: string; senderId: string };
+  | { type: 'photo-deleted'; id: string; driveFileId?: string; senderId: string }
+  | { type: 'accounts-reset'; resetAt: string; senderId: string };
 
 export type LiveBroadcastPayload =
   | { type: 'state-updated'; updatedAt: string; reason?: string }
   | { type: 'member-registered'; kind: 'student' | 'teacher'; id: string; name: string }
   | { type: 'photo-added'; item: Record<string, unknown> }
-  | { type: 'photo-deleted'; id: string; driveFileId?: string };
+  | { type: 'photo-deleted'; id: string; driveFileId?: string }
+  | { type: 'accounts-reset'; resetAt: string };
 
 type LiveBroadcastListener = (event: LiveBroadcastEvent) => void;
 
@@ -76,6 +78,8 @@ function isValidLiveEvent(value: unknown): value is LiveBroadcastEvent {
         typeof candidate.id === 'string' &&
         (candidate.driveFileId === undefined || typeof candidate.driveFileId === 'string')
       );
+    case 'accounts-reset':
+      return typeof candidate.resetAt === 'string' && candidate.resetAt.length > 0;
     default:
       return false;
   }

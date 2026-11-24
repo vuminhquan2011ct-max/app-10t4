@@ -75,6 +75,7 @@ export function freshState(): PersistedState {
     deletedTeacherIds: {},
     deletedDriveFileIds: {},
     deletedItemIds: {},
+    accountsResetAt: null,
   };
 }
 
@@ -271,6 +272,10 @@ export function hydrateState(parsed: Partial<PersistedState> | null | undefined)
     deletedTeacherIds: sanitizeTombstones(parsed.deletedTeacherIds),
     deletedDriveFileIds: sanitizeTombstones(parsed.deletedDriveFileIds),
     deletedItemIds: sanitizeTombstones(parsed.deletedItemIds),
+    accountsResetAt:
+      typeof parsed.accountsResetAt === 'string' && parsed.accountsResetAt.trim()
+        ? parsed.accountsResetAt.trim()
+        : null,
   };
 }
 

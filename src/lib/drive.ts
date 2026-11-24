@@ -116,9 +116,16 @@ export function getLocalPreviewUri(driveFileId: string): string | null {
   return localPreviewCache.get(id) ?? null;
 }
 
-/** Extract a Google Drive file ID from any common Drive sharing URL. */
-export function extractDriveFileId(rawUrl: string): string | null {
-  const input = rawUrl.trim();
+/** Remove a deleted Drive file's local preview URI from the in-memory cache. */
+export function evictLocalPreviewUri(driveFileId: string): void {
+  const id = driveFileId.trim();
+  if (!id) return;
+  localPreviewCache.delete(id);
+}
+
+/** Extract a Google Drive file ID from any common Drive / `lh3` URL or raw ID. */
+export function extractDriveFileIdFromUrl(url: string | null | undefined): string | null {
+  const input = (url ?? '').trim();
   if (!input) return null;
 
   const patterns = [
@@ -126,6 +133,7 @@ export function extractDriveFileId(rawUrl: string): string | null {
     /\/document\/d\/([a-zA-Z0-9_-]{10,})/,
     /\/spreadsheets\/d\/([a-zA-Z0-9_-]{10,})/,
     /\/presentation\/d\/([a-zA-Z0-9_-]{10,})/,
+    /lh3\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]{10,})/i,
     /[?&]id=([a-zA-Z0-9_-]{10,})/,
     /\/d\/([a-zA-Z0-9_-]{10,})/,
   ];
@@ -141,6 +149,11 @@ export function extractDriveFileId(rawUrl: string): string | null {
   }
 
   return null;
+}
+
+/** Extract a Google Drive file ID from any common Drive sharing URL. */
+export function extractDriveFileId(rawUrl: string): string | null {
+  return extractDriveFileIdFromUrl(rawUrl);
 }
 
 export function isGoogleDriveUrl(url: string | null | undefined): boolean {
@@ -237,8 +250,17 @@ export function getFileVisualMeta(fileName: string, mimeType?: string | null): {
 }
 
 const DRIVE_UPLOAD_TIMEOUT_MS = 45_000;
+const DRIVE_DELETE_TIMEOUT_MS = 20_000;
 const DRIVE_UPLOAD_MAX_ATTEMPTS = 2;
 const DRIVE_RETRY_BACKOFF_MS = 800;
+
+export type DeleteDriveFileResult = {
+  ok: boolean;
+  trashedDrive: boolean;
+  removedSheetRows: number;
+  skipped?: boolean;
+  error?: string;
+};
 
 function isTransientStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
@@ -392,6 +414,95 @@ export async function uploadFileToDrive(params: UploadToDriveParams): Promise<Up
   }
 
   throw lastError ?? new Error(`Không thể tải "${params.fileName}" lên Google Drive.`);
+}
+
+/**
+ * Request Google Apps Script (`action: 'delete'`) to move a file to Trash in
+ * Google Drive `K8T4_app` AND delete any matching row(s) in bound Google Sheets.
+ *
+ * Never throws: degrades cleanly when offline or before Apps Script is re-deployed.
+ */
+export async function deleteFileFromDrive(params: {
+  fileId?: string | null;
+  fileUrl?: string | null;
+  fileName?: string | null;
+}): Promise<DeleteDriveFileResult> {
+  const apiUrl = process.env.EXPO_PUBLIC_DRIVE_API_URL?.trim();
+  const apiKey = process.env.EXPO_PUBLIC_DRIVE_API_KEY?.trim();
+  const resolvedFileId = params.fileId?.trim() || extractDriveFileIdFromUrl(params.fileUrl);
+
+  if (!apiUrl || !apiKey || !resolvedFileId) {
+    return {
+      ok: false,
+      trashedDrive: false,
+      removedSheetRows: 0,
+      skipped: true,
+    };
+  }
+
+  try {
+    const response = await fetchWithTimeout(
+      apiUrl,
+      {
+        method: 'POST',
+        redirect: 'follow',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          action: 'delete',
+          apiKey,
+          fileId: resolvedFileId,
+          fileUrl: params.fileUrl?.trim() ?? '',
+          fileName: params.fileName?.trim() ?? '',
+          folderId: DRIVE_CONFIG.folderId,
+          folderName: DRIVE_CONFIG.folderName,
+        }),
+      },
+      DRIVE_DELETE_TIMEOUT_MS,
+    );
+
+    const rawText = await response.text();
+    let payload: {
+      ok?: boolean;
+      status?: string;
+      trashedDrive?: boolean;
+      removedSheetRows?: number;
+      message?: string;
+    } | null = null;
+
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      return {
+        ok: false,
+        trashedDrive: false,
+        removedSheetRows: 0,
+        error: `Google Drive API trả về phản hồi không hợp lệ (HTTP ${response.status}).`,
+      };
+    }
+
+    const ok =
+      response.ok &&
+      (payload?.ok === true || payload?.status === 'deleted' || payload?.status === 'success');
+    const trashedDrive = Boolean(payload?.trashedDrive);
+    const removedSheetRows =
+      typeof payload?.removedSheetRows === 'number' && Number.isFinite(payload.removedSheetRows)
+        ? Math.max(0, Math.round(payload.removedSheetRows))
+        : 0;
+
+    return {
+      ok,
+      trashedDrive,
+      removedSheetRows,
+      error: ok ? undefined : payload?.message || 'Apps Script chưa hỗ trợ lệnh xoá (action: delete).',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      trashedDrive: false,
+      removedSheetRows: 0,
+      error: err instanceof Error ? err.message : 'Không thể kết nối Google Drive API để xoá tệp.',
+    };
+  }
 }
 
 /** Upload UTF-8 text (e.g. JSON class backup) straight into Google Drive folder `K8T4_app`. */

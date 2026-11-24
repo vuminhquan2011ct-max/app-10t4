@@ -88,6 +88,10 @@ export default function MembersScreen() {
   const [resetTeacherPassDraft, setResetTeacherPassDraft] = useState('');
   const [confirmDeleteTeacherId, setConfirmDeleteTeacherId] = useState<string | null>(null);
 
+  // Full account reset confirmation (GVCN only)
+  const [confirmResetAll, setConfirmResetAll] = useState(false);
+  const [resettingAll, setResettingAll] = useState(false);
+
   const refreshAccounts = useCallback(async () => {
     const [sList, tList] = await Promise.all([
       loadStudentAccounts({ forceRemote: true }),
@@ -215,6 +219,24 @@ export default function MembersScreen() {
           b.createdAt.localeCompare(a.createdAt),
       );
   }, [combinedTeachers, teacherQuery]);
+
+  const handleResetAllAccounts = async () => {
+    if (!isTeacher || resettingAll) return;
+    setResettingAll(true);
+    try {
+      const res = await auth.resetAllAccounts();
+      if (!res.ok) {
+        showToast(res.error || 'Không thể reset toàn bộ tài khoản lúc này.', 'danger');
+        return;
+      }
+      setConfirmResetAll(false);
+      showToast('Đã xóa toàn bộ tài khoản & reset lớp về ban đầu!', 'success');
+    } catch {
+      showToast('Không thể reset toàn bộ tài khoản lúc này.', 'danger');
+    } finally {
+      setResettingAll(false);
+    }
+  };
 
   const handleResetStudentPassword = async (studentId: string, studentName: string) => {
     const clean = resetPassDraft.trim();
@@ -1105,6 +1127,69 @@ export default function MembersScreen() {
           ))}
         </Card>
       )}
+
+      {/* GVCN-Only Danger Zone: Full Account Reset */}
+      {isTeacher ? (
+        <Card style={[styles.dangerCard, { borderColor: theme.danger }]}>
+          <View style={styles.dangerHead}>
+            <View style={[styles.iconBox, { backgroundColor: theme.dangerSoft }]}>
+              <Ionicons name={'nuclear-outline'} size={22} color={theme.danger} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={[styles.dangerTitle, { color: theme.danger }]}>
+                Reset toàn bộ tài khoản về ban đầu
+              </Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 18 }}>
+                Xóa sạch tất cả tài khoản học sinh & giáo viên, đăng xuất mọi thiết bị để đăng ký lại
+                từ đầu. Lịch học, thời khóa biểu, thông báo, tài liệu & ảnh lớp vẫn được giữ nguyên.
+              </Text>
+            </View>
+          </View>
+
+          {confirmResetAll ? (
+            <View
+              style={[
+                styles.dangerConfirmBox,
+                { backgroundColor: theme.dangerSoft, borderColor: theme.danger },
+              ]}>
+              <Text style={[styles.dangerConfirmTitle, { color: theme.danger }]}>
+                ⚠️ Xác nhận hành động không thể hoàn tác
+              </Text>
+              <Text style={{ color: theme.text, fontSize: 12, lineHeight: 18 }}>
+                Toàn bộ tài khoản học sinh, tài khoản giáo viên, điểm thi đua, điểm danh, trực nhật
+                và chỗ ngồi sẽ bị xóa khỏi máy chủ và mọi thiết bị đang mở sẽ tự động đăng xuất về màn
+                hình đăng ký mới.
+              </Text>
+              <View style={styles.quickRow}>
+                <Button
+                  label={resettingAll ? 'Đang reset...' : 'Xác nhận xóa hết & Reset'}
+                  variant={'danger'}
+                  size={'sm'}
+                  icon={'trash-outline'}
+                  style={styles.flex}
+                  disabled={resettingAll}
+                  onPress={() => void handleResetAllAccounts()}
+                />
+                <Button
+                  label={'Hủy'}
+                  variant={'soft'}
+                  size={'sm'}
+                  disabled={resettingAll}
+                  onPress={() => setConfirmResetAll(false)}
+                />
+              </View>
+            </View>
+          ) : (
+            <Button
+              label={'Reset toàn bộ tài khoản về ban đầu'}
+              variant={'danger'}
+              size={'sm'}
+              icon={'warning-outline'}
+              onPress={() => setConfirmResetAll(true)}
+            />
+          )}
+        </Card>
+      ) : null}
     </Screen>
   );
 }
@@ -1172,4 +1257,28 @@ const styles = StyleSheet.create({
   },
   logDot: { width: 8, height: 8, borderRadius: 4, marginTop: 6 },
   logText: { fontSize: 13, lineHeight: 18 },
+  dangerCard: {
+    gap: Spacing.three,
+    borderWidth: 1,
+  },
+  dangerHead: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.two + 2,
+  },
+  dangerTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  dangerConfirmBox: {
+    gap: Spacing.two + 2,
+    padding: Spacing.three,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  dangerConfirmTitle: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
 });

@@ -40,6 +40,8 @@ import type { PersistedState, StudentInput } from './types';
 
 export const REMOTE_ROW_ID = 'class10t4';
 export const AUTH_REGISTRY_ROW_ID = 'class10t4_accounts_v1';
+/** Global account reset epoch — matches the exact `accountsResetAt` written to live Supabase. */
+export const ACCOUNTS_RESET_EPOCH = '2026-11-24T01:54:00.000Z';
 
 export function isRemoteEnabled(): boolean {
   return isSupabaseConfigured;
@@ -92,6 +94,7 @@ function getLegacyTemplate(): PersistedState {
       deletedTeacherIds: {},
       deletedDriveFileIds: {},
       deletedItemIds: {},
+      accountsResetAt: null,
       seating: { ...base.seating, seats: {}, updatedAt: '' },
     };
   }
@@ -145,6 +148,7 @@ export function stripForSharedSync(state: PersistedState): Record<string, unknow
     deletedTeacherIds: state.deletedTeacherIds ?? {},
     deletedDriveFileIds: state.deletedDriveFileIds ?? {},
     deletedItemIds: state.deletedItemIds ?? {},
+    accountsResetAt: state.accountsResetAt ?? null,
   };
 }
 
@@ -890,26 +894,79 @@ export function mergeClassStates(
   const r = hydrateState(remote);
   const prefer = options?.prefer ?? 'remote';
 
+  const remoteResetMs = ts(r.accountsResetAt);
+  const localResetMs = ts(l.accountsResetAt);
+  const effectiveResetMs = Math.max(remoteResetMs, localResetMs);
+  const effectiveResetAt =
+    effectiveResetMs > 0
+      ? remoteResetMs >= localResetMs
+        ? (r.accountsResetAt ?? null)
+        : (l.accountsResetAt ?? null)
+      : null;
+
+  const remoteResetNewer = remoteResetMs > localResetMs;
+  const localResetNewer = localResetMs > remoteResetMs;
+
   const deletedStudentIds = mergeTombstones(r.deletedStudentIds, l.deletedStudentIds);
   const deletedTeacherIds = mergeTombstones(r.deletedTeacherIds, l.deletedTeacherIds);
   const deletedDriveFileIds = mergeTombstones(r.deletedDriveFileIds, l.deletedDriveFileIds);
   const deletedItemIds = mergeTombstones(r.deletedItemIds, l.deletedItemIds);
 
-  const students = mergeStudents(r.students, l.students, deletedStudentIds, prefer);
-  const registeredTeachers = mergeRegisteredTeachers(
-    r.registeredTeachers ?? [],
-    l.registeredTeachers ?? [],
+  // When one side has a strictly newer `accountsResetAt`, discard the older side's
+  // stale account-scoped slices so pre-reset accounts/entries/votes can NEVER resurrect.
+  const rStudentsIn = localResetNewer ? [] : r.students;
+  const lStudentsIn = remoteResetNewer ? [] : l.students;
+  const rTeachersIn = localResetNewer ? [] : (r.registeredTeachers ?? []);
+  const lTeachersIn = remoteResetNewer ? [] : (l.registeredTeachers ?? []);
+  const rEntriesIn = localResetNewer ? [] : r.entries;
+  const lEntriesIn = remoteResetNewer ? [] : l.entries;
+  const rAttendanceIn = localResetNewer ? {} : r.attendance;
+  const lAttendanceIn = remoteResetNewer ? {} : l.attendance;
+  const rDutyLogsIn = localResetNewer ? {} : (r.dutyLogs ?? {});
+  const lDutyLogsIn = remoteResetNewer ? {} : (l.dutyLogs ?? {});
+  const rFundPaidIn = localResetNewer ? {} : r.fundPaid;
+  const lFundPaidIn = remoteResetNewer ? {} : l.fundPaid;
+  const rKudosIn = localResetNewer ? [] : r.kudos;
+  const lKudosIn = remoteResetNewer ? [] : l.kudos;
+  const rPollsIn = localResetNewer ? r.polls.map((p) => ({ ...p, votes: {} })) : r.polls;
+  const lPollsIn = remoteResetNewer ? l.polls.map((p) => ({ ...p, votes: {} })) : l.polls;
+
+  const mergedStudents = mergeStudents(rStudentsIn, lStudentsIn, deletedStudentIds, prefer);
+  const students =
+    effectiveResetMs > 0
+      ? mergedStudents.filter(
+          (s) => Math.max(ts(s.updatedAt), ts(s.createdAt)) >= effectiveResetMs,
+        )
+      : mergedStudents;
+
+  const mergedTeachers = mergeRegisteredTeachers(
+    rTeachersIn,
+    lTeachersIn,
     deletedTeacherIds,
     prefer,
   );
-  const entries = mergeEntries(
-    r.entries,
-    l.entries,
+  const registeredTeachers =
+    effectiveResetMs > 0
+      ? mergedTeachers.filter(
+          (t) => Math.max(ts(t.updatedAt), ts(t.createdAt)) >= effectiveResetMs,
+        )
+      : mergedTeachers;
+
+  const mergedEntries = mergeEntries(
+    rEntriesIn,
+    lEntriesIn,
     deletedStudentIds,
     deletedItemIds,
     deletedDriveFileIds,
     prefer,
   );
+  const entries =
+    effectiveResetMs > 0
+      ? mergedEntries.filter(
+          (e) => Math.max(ts(e.updatedAt), ts(e.createdAt)) >= effectiveResetMs,
+        )
+      : mergedEntries;
+
   const announcements = mergeAnnouncements(
     r.announcements,
     l.announcements,
@@ -917,9 +974,13 @@ export function mergeClassStates(
     deletedDriveFileIds,
     prefer,
   );
-  const polls = mergePolls(r.polls, l.polls, deletedItemIds, prefer);
+  const polls = mergePolls(rPollsIn, lPollsIn, deletedItemIds, prefer);
   const tasks = mergeTasks(r.tasks, l.tasks, deletedItemIds, deletedDriveFileIds, prefer);
-  const kudos = mergeKudos(r.kudos, l.kudos, deletedStudentIds, deletedItemIds, prefer);
+  const mergedKudos = mergeKudos(rKudosIn, lKudosIn, deletedStudentIds, deletedItemIds, prefer);
+  const kudos =
+    effectiveResetMs > 0
+      ? mergedKudos.filter((k) => ts(k.createdAt) >= effectiveResetMs)
+      : mergedKudos;
   const resources = mergeResources(
     r.resources,
     l.resources,
@@ -934,9 +995,16 @@ export function mergeClassStates(
     deletedItemIds,
     prefer,
   );
-  const activityLog = mergeActivityLog(r.activityLog, l.activityLog);
-  const attendance = mergeAttendance(r.attendance, l.attendance, deletedStudentIds, prefer);
-  const dutyLogs = mergeDutyLogs(r.dutyLogs ?? {}, l.dutyLogs ?? {}, deletedStudentIds, prefer);
+  const mergedActivityLog = mergeActivityLog(
+    localResetNewer ? [] : r.activityLog,
+    remoteResetNewer ? [] : l.activityLog,
+  );
+  const activityLog =
+    effectiveResetMs > 0
+      ? mergedActivityLog.filter((item) => ts(item.createdAt) >= effectiveResetMs)
+      : mergedActivityLog;
+  const attendance = mergeAttendance(rAttendanceIn, lAttendanceIn, deletedStudentIds, prefer);
+  const dutyLogs = mergeDutyLogs(rDutyLogsIn, lDutyLogsIn, deletedStudentIds, prefer);
 
   // Reconcile duty_diligence entries against the winning `dutyLogs` so concurrent
   // grading on two devices never leaves an orphaned duplicate entry, and unassigning
@@ -950,10 +1018,13 @@ export function mergeClassStates(
     return rec.entryId === entry.id;
   });
 
-  const fundPaidRaw =
-    prefer === 'local'
-      ? { ...r.fundPaid, ...l.fundPaid }
-      : { ...l.fundPaid, ...r.fundPaid };
+  const fundPaidRaw = remoteResetNewer
+    ? { ...rFundPaidIn }
+    : localResetNewer
+      ? { ...lFundPaidIn }
+      : prefer === 'local'
+        ? { ...rFundPaidIn, ...lFundPaidIn }
+        : { ...lFundPaidIn, ...rFundPaidIn };
   const fundPaid: Record<string, boolean> = {};
   for (const [sid, paid] of Object.entries(fundPaidRaw)) {
     if (paid && !deletedStudentIds[sid]) {
@@ -965,10 +1036,13 @@ export function mergeClassStates(
   const rSeatCount = Object.keys(r.seating.seats).length;
   const lSeatTime = ts(l.seating.updatedAt);
   const rSeatTime = ts(r.seating.updatedAt);
-  const keepRemoteSeating =
-    (lSeatCount === 0 && rSeatCount > 0 && (lSeatTime <= 0 || prefer === 'remote')) ||
-    rSeatTime > lSeatTime ||
-    (rSeatTime === lSeatTime && prefer === 'remote');
+  const keepRemoteSeating = remoteResetNewer
+    ? true
+    : localResetNewer
+      ? false
+      : (lSeatCount === 0 && rSeatCount > 0 && (lSeatTime <= 0 || prefer === 'remote')) ||
+        rSeatTime > lSeatTime ||
+        (rSeatTime === lSeatTime && prefer === 'remote');
   const chosenSeating = keepRemoteSeating ? r.seating : l.seating;
   const cleanSeats: Record<string, string> = {};
   for (const [seatKey, sid] of Object.entries(chosenSeating.seats)) {
@@ -1003,7 +1077,7 @@ export function mergeClassStates(
     students,
     entries: reconciledEntries,
     role: l.role,
-    currentStudentId: l.currentStudentId,
+    currentStudentId: remoteResetNewer ? null : l.currentStudentId,
     attendance,
     announcements,
     fundTransactions,
@@ -1028,6 +1102,7 @@ export function mergeClassStates(
     deletedTeacherIds,
     deletedDriveFileIds,
     deletedItemIds,
+    accountsResetAt: effectiveResetAt,
   };
 }
 
@@ -1116,12 +1191,17 @@ export async function upsertRegisteredMemberToCloud(
       const remote = await fetchClassStateRemote();
       const base = remote?.state ?? getLegacyTemplate();
       const now = new Date().toISOString();
+      const effectiveResetMs = Math.max(ts(ACCOUNTS_RESET_EPOCH), ts(base.accountsResetAt));
 
       let nextState: PersistedState;
       let memberId: string;
       let memberName: string;
 
       if (member.kind === 'student') {
+        const incomingTime = Math.max(ts(member.student.updatedAt), ts(member.student.createdAt));
+        if (effectiveResetMs > 0 && incomingTime > 0 && incomingTime < effectiveResetMs) {
+          return base;
+        }
         const stu: Student = {
           ...member.student,
           updatedAt: member.student.updatedAt || now,
@@ -1169,6 +1249,10 @@ export async function upsertRegisteredMemberToCloud(
           activityLog: [logItem, ...base.activityLog].slice(0, 40),
         };
       } else {
+        const incomingTime = Math.max(ts(member.teacher.updatedAt), ts(member.teacher.createdAt));
+        if (effectiveResetMs > 0 && incomingTime > 0 && incomingTime < effectiveResetMs) {
+          return base;
+        }
         const teacher: RegisteredTeacherPublic = {
           ...member.teacher,
           updatedAt: member.teacher.updatedAt || now,
@@ -1324,6 +1408,8 @@ type AuthRegistryDoc = {
   teachers?: Record<string, unknown>[];
   deletedStudentIds?: Record<string, string>;
   deletedTeacherIds?: Record<string, string>;
+  accountsResetAt?: string | null;
+  updatedAt?: string;
 };
 
 function recordIdOf(rec: Record<string, unknown>, primaryField: string): string {
@@ -1446,6 +1532,7 @@ export async function fetchAuthRegistryRemote(): Promise<{
   teachers: Record<string, unknown>[];
   deletedStudentIds: Record<string, string>;
   deletedTeacherIds: Record<string, string>;
+  accountsResetAt: string | null;
   updatedAt: string;
 } | null> {
   if (!isSupabaseConfigured) return null;
@@ -1462,12 +1549,21 @@ export async function fetchAuthRegistryRemote(): Promise<{
     const doc = data.data;
     const delStudents = mergeTombstones(doc.deletedStudentIds, undefined);
     const delTeachers = mergeTombstones(doc.deletedTeacherIds, undefined);
+    const accountsResetAt = nonEmptyStr(doc.accountsResetAt);
+    const effectiveResetMs = Math.max(ts(ACCOUNTS_RESET_EPOCH), ts(accountsResetAt));
 
     const students = Array.isArray(doc.students)
       ? doc.students.filter((item): item is Record<string, unknown> => {
           if (!item || typeof item !== 'object') return false;
           const id = recordIdOf(item, 'studentId');
-          return Boolean(id) && !isTombstoned(delStudents, id, item.updatedAt as string | undefined, item.createdAt as string | undefined);
+          if (!id) return false;
+          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
+          return !isTombstoned(
+            delStudents,
+            id,
+            item.updatedAt as string | undefined,
+            item.createdAt as string | undefined,
+          );
         })
       : [];
 
@@ -1475,7 +1571,14 @@ export async function fetchAuthRegistryRemote(): Promise<{
       ? doc.teachers.filter((item): item is Record<string, unknown> => {
           if (!item || typeof item !== 'object') return false;
           const id = recordIdOf(item, 'teacherId');
-          return Boolean(id) && !isTombstoned(delTeachers, id, item.updatedAt as string | undefined, item.createdAt as string | undefined);
+          if (!id) return false;
+          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
+          return !isTombstoned(
+            delTeachers,
+            id,
+            item.updatedAt as string | undefined,
+            item.createdAt as string | undefined,
+          );
         })
       : [];
 
@@ -1484,6 +1587,7 @@ export async function fetchAuthRegistryRemote(): Promise<{
       teachers,
       deletedStudentIds: delStudents,
       deletedTeacherIds: delTeachers,
+      accountsResetAt,
       updatedAt: data.updated_at || new Date().toISOString(),
     };
   } catch {
@@ -1514,6 +1618,12 @@ export async function upsertAuthRegistryRemote(patch: {
 
       const existing = existingRow?.data ?? {};
       const now = new Date().toISOString();
+      const existingResetAt = nonEmptyStr(existing.accountsResetAt);
+      const existingResetMs = ts(existingResetAt);
+      const epochResetMs = ts(ACCOUNTS_RESET_EPOCH);
+      const effectiveResetMs = Math.max(epochResetMs, existingResetMs);
+      const accountsResetAt =
+        existingResetAt && existingResetMs >= epochResetMs ? existingResetAt : ACCOUNTS_RESET_EPOCH;
 
       const delStudents: Record<string, string> = { ...(existing.deletedStudentIds ?? {}) };
       const delTeachers: Record<string, string> = { ...(existing.deletedTeacherIds ?? {}) };
@@ -1521,6 +1631,7 @@ export async function upsertAuthRegistryRemote(patch: {
       const studentMap = new Map<string, Record<string, unknown>>();
       for (const item of Array.isArray(existing.students) ? existing.students : []) {
         if (!item || typeof item !== 'object') continue;
+        if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) continue;
         const id = recordIdOf(item, 'studentId');
         if (id) studentMap.set(id, item);
       }
@@ -1528,6 +1639,7 @@ export async function upsertAuthRegistryRemote(patch: {
       const teacherMap = new Map<string, Record<string, unknown>>();
       for (const item of Array.isArray(existing.teachers) ? existing.teachers : []) {
         if (!item || typeof item !== 'object') continue;
+        if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) continue;
         const id = recordIdOf(item, 'teacherId');
         if (id) teacherMap.set(id, item);
       }
@@ -1549,6 +1661,7 @@ export async function upsertAuthRegistryRemote(patch: {
       const applyStudentUpsert = (incoming: Record<string, unknown>) => {
         const id = recordIdOf(incoming, 'studentId');
         if (!id) return;
+        if (effectiveResetMs > 0 && recordUpdatedAtOf(incoming) < effectiveResetMs) return;
         delete delStudents[id];
         const prev = studentMap.get(id);
         studentMap.set(id, mergeAuthAccountRecord(prev, incoming));
@@ -1570,7 +1683,7 @@ export async function upsertAuthRegistryRemote(patch: {
 
       if (patch.teacher) {
         const id = recordIdOf(patch.teacher, 'teacherId');
-        if (id) {
+        if (id && (effectiveResetMs <= 0 || recordUpdatedAtOf(patch.teacher) >= effectiveResetMs)) {
           delete delTeachers[id];
           const prev = teacherMap.get(id);
           teacherMap.set(id, mergeAuthAccountRecord(prev, patch.teacher));
@@ -1580,14 +1693,28 @@ export async function upsertAuthRegistryRemote(patch: {
       const nextDoc: AuthRegistryDoc = {
         students: Array.from(studentMap.values()).filter((item) => {
           const id = recordIdOf(item, 'studentId');
-          return !isTombstoned(delStudents, id, item.updatedAt as string | undefined, item.createdAt as string | undefined);
+          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
+          return !isTombstoned(
+            delStudents,
+            id,
+            item.updatedAt as string | undefined,
+            item.createdAt as string | undefined,
+          );
         }),
         teachers: Array.from(teacherMap.values()).filter((item) => {
           const id = recordIdOf(item, 'teacherId');
-          return !isTombstoned(delTeachers, id, item.updatedAt as string | undefined, item.createdAt as string | undefined);
+          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
+          return !isTombstoned(
+            delTeachers,
+            id,
+            item.updatedAt as string | undefined,
+            item.createdAt as string | undefined,
+          );
         }),
         deletedStudentIds: delStudents,
         deletedTeacherIds: delTeachers,
+        accountsResetAt,
+        updatedAt: now,
       };
 
       const { error: writeErr } = await supabase
@@ -1601,6 +1728,203 @@ export async function upsertAuthRegistryRemote(patch: {
     });
   } catch {
     return false;
+  }
+}
+
+/**
+ * Wipe all registered student & teacher accounts and account-bound class data
+ * across both `class10t4_accounts_v1` and `class10t4`, stamp tombstones +
+ * `accountsResetAt` so offline devices can never resurrect old accounts, and
+ * broadcast an immediate `accounts-reset` event across all connected devices.
+ */
+export async function resetAllAccountsRemote(customResetAt?: string): Promise<{
+  ok: boolean;
+  resetAt: string;
+  clearedStudents: number;
+  clearedTeachers: number;
+  error?: string;
+}> {
+  const resetAt = customResetAt?.trim() || new Date().toISOString();
+  if (!isSupabaseConfigured) {
+    return { ok: true, resetAt, clearedStudents: 0, clearedTeachers: 0 };
+  }
+
+  try {
+    return await enqueueAuthRegistryWrite(() =>
+      enqueueClassStateWrite(async () => {
+        const [registryRes, classRes] = await Promise.all([
+          supabase
+            .from('class_state')
+            .select('data')
+            .eq('id', AUTH_REGISTRY_ROW_ID)
+            .maybeSingle<{ data: AuthRegistryDoc | null }>(),
+          supabase
+            .from('class_state')
+            .select('data')
+            .eq('id', REMOTE_ROW_ID)
+            .maybeSingle<ClassStateRow>(),
+        ]);
+
+        if (registryRes.error) {
+          return {
+            ok: false,
+            resetAt,
+            clearedStudents: 0,
+            clearedTeachers: 0,
+            error: registryRes.error.message,
+          };
+        }
+        if (classRes.error) {
+          return {
+            ok: false,
+            resetAt,
+            clearedStudents: 0,
+            clearedTeachers: 0,
+            error: classRes.error.message,
+          };
+        }
+
+        const existingRegistry = registryRes.data?.data ?? {};
+        const baseState = classRes.data?.data
+          ? hydrateRemotePayload(classRes.data.data)
+          : getLegacyTemplate();
+
+        const clearedStudentIds = new Set<string>();
+        const clearedTeacherIds = new Set<string>();
+
+        for (const item of Array.isArray(existingRegistry.students)
+          ? existingRegistry.students
+          : []) {
+          if (!item || typeof item !== 'object') continue;
+          const id = recordIdOf(item, 'studentId');
+          if (id) clearedStudentIds.add(id);
+        }
+        for (const s of baseState.students) {
+          if (s?.id) clearedStudentIds.add(s.id);
+        }
+
+        for (const item of Array.isArray(existingRegistry.teachers)
+          ? existingRegistry.teachers
+          : []) {
+          if (!item || typeof item !== 'object') continue;
+          const id = recordIdOf(item, 'teacherId');
+          if (id) clearedTeacherIds.add(id);
+        }
+        for (const t of baseState.registeredTeachers ?? []) {
+          if (t?.id) clearedTeacherIds.add(t.id);
+        }
+
+        const deletedStudentIds = mergeTombstones(
+          existingRegistry.deletedStudentIds,
+          baseState.deletedStudentIds,
+        );
+        for (const id of clearedStudentIds) {
+          deletedStudentIds[id] = resetAt;
+        }
+
+        const deletedTeacherIds = mergeTombstones(
+          existingRegistry.deletedTeacherIds,
+          baseState.deletedTeacherIds,
+        );
+        for (const id of clearedTeacherIds) {
+          deletedTeacherIds[id] = resetAt;
+        }
+
+        const nextRegistryDoc: AuthRegistryDoc = {
+          students: [],
+          teachers: [],
+          deletedStudentIds,
+          deletedTeacherIds,
+          accountsResetAt: resetAt,
+          updatedAt: resetAt,
+        };
+
+        const { error: regWriteErr } = await supabase
+          .from('class_state')
+          .upsert(
+            { id: AUTH_REGISTRY_ROW_ID, data: nextRegistryDoc, updated_at: resetAt },
+            { onConflict: 'id' },
+          );
+
+        if (regWriteErr) {
+          return {
+            ok: false,
+            resetAt,
+            clearedStudents: 0,
+            clearedTeachers: 0,
+            error: regWriteErr.message,
+          };
+        }
+
+        const resetLog: ActivityLogItem = {
+          id: createId('log'),
+          actor: 'Hệ thống',
+          actorStudentId: null,
+          action: 'Đã reset và xóa toàn bộ tài khoản về trạng thái ban đầu',
+          createdAt: resetAt,
+        };
+
+        const nextClassState: PersistedState = {
+          ...baseState,
+          students: [],
+          registeredTeachers: [],
+          entries: [],
+          attendance: {},
+          dutyLogs: {},
+          fundPaid: {},
+          kudos: [],
+          polls: baseState.polls.map((poll) => ({ ...poll, votes: {} })),
+          seating: { ...baseState.seating, seats: {}, updatedAt: resetAt },
+          currentStudentId: null,
+          activityLog: [resetLog],
+          deletedStudentIds,
+          deletedTeacherIds,
+          accountsResetAt: resetAt,
+        };
+
+        const { error: stateWriteErr } = await supabase
+          .from('class_state')
+          .upsert(
+            { id: REMOTE_ROW_ID, data: stripForSharedSync(nextClassState), updated_at: resetAt },
+            { onConflict: 'id' },
+          );
+
+        if (stateWriteErr) {
+          return {
+            ok: false,
+            resetAt,
+            clearedStudents: 0,
+            clearedTeachers: 0,
+            error: stateWriteErr.message,
+          };
+        }
+
+        emitLiveBroadcast({
+          type: 'accounts-reset',
+          resetAt,
+        });
+        emitLiveBroadcast({
+          type: 'state-updated',
+          updatedAt: resetAt,
+          reason: 'accounts-reset',
+        });
+
+        return {
+          ok: true,
+          resetAt,
+          clearedStudents: clearedStudentIds.size,
+          clearedTeachers: clearedTeacherIds.size,
+        };
+      }),
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      resetAt,
+      clearedStudents: 0,
+      clearedTeachers: 0,
+      error: err instanceof Error ? err.message : 'Không thể reset tài khoản trên đám mây.',
+    };
   }
 }
 

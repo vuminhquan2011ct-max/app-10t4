@@ -82,6 +82,8 @@ export type PersistedState = {
   deletedDriveFileIds?: Record<string, string>;
   /** Dấu thời gian ISO ghi nhận các mục lớp (thành tích, thông báo, nhiệm vụ, tài liệu...) đã xoá. */
   deletedItemIds?: Record<string, string>;
+  /** Dấu thời gian ISO lần reset toàn bộ tài khoản gần nhất (ngăn tài khoản cũ hồi sinh từ thiết bị khác). */
+  accountsResetAt?: string | null;
 };
 
 export type StudentInput = {

@@ -51,6 +51,7 @@ import {
   validateLoginId,
   verifyStudentLogin,
   verifyStudentPassword,
+  wipeLocalStudentAccounts,
   type StudentAccountRecord,
 } from '@/lib/student-accounts';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
@@ -84,6 +85,7 @@ import {
   updateTeacherAccount,
   validateTeacherLoginId,
   verifyTeacherLogin,
+  wipeLocalTeacherAccounts,
   type TeacherAccountRecord,
   type TeacherRole,
 } from '@/lib/teacher-accounts';
@@ -101,6 +103,13 @@ import type {
 } from '@/types/auth';
 import type { Gender } from '@/types/models';
 
+import { CLEAR_STUDENTS_MIGRATION_KEY, STORAGE_KEY, parseState } from './persist';
+import {
+  ACCOUNTS_RESET_EPOCH,
+  fetchAuthRegistryRemote,
+  resetAllAccountsRemote,
+} from './remote';
+
 export const APP_ACCESS_PASSWORD = 'vuquan';
 export const TEACHER_ACCESS_PASSWORD = 'K8T4';
 const MIN_EMAIL_PASSWORD_LENGTH = 6;
@@ -111,6 +120,7 @@ const PASS_AUTH_KEY = 'class10t4:pass-auth:v1';
 const LEGACY_OFFLINE_KEY = 'class10t4:offline-demo:v1';
 const NEW_ACCOUNT_WELCOME_PENDING_KEY = 'class10t4:new-account-welcome-pending:v1';
 const PENDING_OAUTH_LINK_KEY = 'class10t4:pending-oauth-link:v1';
+const APPLIED_ACCOUNTS_RESET_KEY = 'class10t4:applied-accounts-reset:v1';
 const PENDING_OAUTH_LINK_TTL_MS = 10 * 60 * 1000;
 
 type StoredPassSession = {
@@ -418,6 +428,8 @@ export type AuthStore = {
   updateSubjectProfile: (subjectName: string, displayName?: string) => Promise<void>;
   verifyTeacherPassword: (password: string) => boolean;
   signOut: () => Promise<void>;
+  applyAccountsResetIfNeeded: (resetAt: string) => Promise<boolean>;
+  resetAllAccounts: () => Promise<{ ok: boolean; error?: string }>;
   refreshProfile: () => Promise<void>;
   renameMe: (displayName: string) => Promise<boolean>;
   fetchMembers: () => Promise<Profile[]>;
@@ -474,6 +486,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const inFlightResolveRef = useRef<Promise<'entered' | 'onboarding' | 'linked' | 'error'> | null>(
     null,
   );
+  const inFlightResetRef = useRef<Promise<boolean> | null>(null);
   const unlockedRef = useRef(false);
   const activeSessionRef = useRef<{
     accountRole: AccountRole;
@@ -527,6 +540,142 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTeacherAccountCount(list.length);
     setTeacherAccountsVersion((v) => v + 1);
   }, []);
+
+  /**
+   * Idempotently enforces a full account reset epoch (`targetResetAt`) on this device:
+   * wipes local sessions, cached accounts, pre-reset class_state account slices,
+   * signs out Supabase Auth (unless preserving an active initial OAuth/recovery callback),
+   * and lands cleanly on fresh `AuthGate`.
+   */
+  const applyAccountsResetInternal = useCallback(
+    async (
+      targetResetAt: string,
+      options?: { preserveSupabaseSession?: boolean },
+    ): Promise<boolean> => {
+      const targetMs = Date.parse(targetResetAt);
+      if (!Number.isFinite(targetMs) || targetMs <= 0) return false;
+      const preserveSupabaseSession = Boolean(options?.preserveSupabaseSession);
+
+      const run = async (): Promise<boolean> => {
+        try {
+          const appliedRaw = await AsyncStorage.getItem(APPLIED_ACCOUNTS_RESET_KEY);
+          const appliedMs = appliedRaw ? Date.parse(appliedRaw) : 0;
+          if (Number.isFinite(appliedMs) && appliedMs >= targetMs) {
+            return false;
+          }
+        } catch {
+          // Proceed safely if AsyncStorage read fails.
+        }
+
+        signingOutRef.current = true;
+        try {
+          await Promise.all([
+            AsyncStorage.removeItem(PASS_AUTH_KEY).catch(() => {}),
+            AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {}),
+            AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {}),
+            wipeLocalStudentAccounts(targetResetAt),
+            wipeLocalTeacherAccounts(targetResetAt),
+          ]);
+
+          try {
+            const rawState = await AsyncStorage.getItem(STORAGE_KEY);
+            if (rawState) {
+              const parsed = parseState(rawState);
+              const scrubbed = {
+                ...parsed,
+                students: [],
+                registeredTeachers: [],
+                entries: [],
+                attendance: {},
+                dutyLogs: {},
+                fundPaid: {},
+                kudos: [],
+                activityLog: [],
+                polls: (parsed.polls ?? []).map((p) => ({ ...p, votes: {} })),
+                seating: { ...parsed.seating, seats: {}, updatedAt: targetResetAt },
+                currentStudentId: null,
+                accountsResetAt: targetResetAt,
+              };
+              await Promise.all([
+                AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(scrubbed)),
+                AsyncStorage.setItem(CLEAR_STUDENTS_MIGRATION_KEY, '1'),
+              ]);
+            }
+          } catch {
+            // ClassStore hydration also enforces ACCOUNTS_RESET_EPOCH cleanly.
+          }
+
+          if (isSupabaseConfigured && !preserveSupabaseSession) {
+            await supabase.auth.signOut().catch(() => {});
+          }
+
+          await AsyncStorage.setItem(APPLIED_ACCOUNTS_RESET_KEY, targetResetAt).catch(() => {});
+
+          if (!preserveSupabaseSession) {
+            passwordRecoveryRef.current = false;
+            setPasswordRecoveryPending(false);
+          }
+          unlockedRef.current = false;
+          activeSessionRef.current = {
+            accountRole: 'student',
+            studentId: null,
+            teacherId: null,
+            loginId: null,
+            subjectName: null,
+            displayName: '',
+            email: null,
+            avatarUrl: null,
+            authProviders: [],
+            authUserId: null,
+            hasAccountPassword: false,
+            createdAt: undefined,
+          };
+
+          setUnlocked(false);
+          setAccountRole('student');
+          setSubjectName(null);
+          setStudentId(null);
+          setTeacherId(null);
+          setLoginId(null);
+          setEmail(null);
+          setAvatarUrl(null);
+          setAuthProviders([]);
+          setSupabaseUserId(null);
+          setHasAccountPassword(false);
+          setProfile(null);
+          setPendingOAuthUser(null);
+          setNeedsProfileCompletion(false);
+          setPendingEmailConfirmation(null);
+          setAuthCallbackError(null);
+          setIsNewAccountWelcomePending(false);
+          setStudentAccountCount(0);
+          setTeacherAccountCount(0);
+          setStudentAccountsVersion((v) => v + 1);
+          setTeacherAccountsVersion((v) => v + 1);
+          return true;
+        } finally {
+          signingOutRef.current = false;
+        }
+      };
+
+      const prevTask = inFlightResetRef.current;
+      const nextTask = prevTask ? prevTask.then(run, run) : run();
+      inFlightResetRef.current = nextTask;
+      try {
+        return await nextTask;
+      } finally {
+        if (inFlightResetRef.current === nextTask) {
+          inFlightResetRef.current = null;
+        }
+      }
+    },
+    [],
+  );
+
+  const applyAccountsResetIfNeeded = useCallback(
+    (targetResetAt: string): Promise<boolean> => applyAccountsResetInternal(targetResetAt),
+    [applyAccountsResetInternal],
+  );
 
   const persistSession = useCallback(
     async (next: {
@@ -1028,6 +1177,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     const unsubLive = subscribeLiveBroadcast((event) => {
+      if (event.type === 'accounts-reset' && event.resetAt) {
+        void applyAccountsResetIfNeeded(event.resetAt);
+        return;
+      }
       if (event.type === 'member-registered' || event.type === 'state-updated') {
         void Promise.all([
           loadStudentAccounts({ forceRemote: true }),
@@ -1048,7 +1201,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       unsubTeachers();
       unsubLive();
     };
-  }, []);
+  }, [applyAccountsResetIfNeeded]);
 
   // Restore saved session, process OAuth/Recovery callback URLs, and subscribe to Supabase Auth events.
   useEffect(() => {
@@ -1138,9 +1291,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const init = async () => {
       try {
         await AsyncStorage.removeItem(LEGACY_OFFLINE_KEY).catch(() => {});
+
+        // Inspect initial Web URL or Native deep-link BEFORE applying reset so we never strip
+        // a live PKCE code-verifier or recovery URL on a fresh browser opening an email/OAuth link.
+        const initialUrl = isSupabaseConfigured
+          ? Platform.OS === 'web'
+            ? initialWebUrl
+            : await Linking.getInitialURL().catch(() => null)
+          : null;
+        const hasInitialCallback = Boolean(initialUrl && hasAuthCallbackMarkers(initialUrl));
+
+        // Enforce full account reset epoch BEFORE restoring any cached local or Supabase session.
+        let targetResetAt = ACCOUNTS_RESET_EPOCH;
+        if (isSupabaseConfigured) {
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          const remoteReg = await Promise.race([
+            fetchAuthRegistryRemote().catch(() => null),
+            new Promise<null>((resolve) => {
+              timer = setTimeout(() => resolve(null), 1_500);
+            }),
+          ]);
+          if (timer) clearTimeout(timer);
+          const remoteResetAt = remoteReg?.accountsResetAt ?? null;
+          if (
+            remoteResetAt &&
+            (Date.parse(remoteResetAt) || 0) > (Date.parse(targetResetAt) || 0)
+          ) {
+            targetResetAt = remoteResetAt;
+          }
+        }
+        let resetApplied = false;
+        if (targetResetAt) {
+          resetApplied = await applyAccountsResetInternal(targetResetAt, {
+            preserveSupabaseSession: hasInitialCallback,
+          });
+          if (!active) return;
+        }
+
         const [raw, pendingWelcomeAccount, localStudents, localTeachers] = await Promise.all([
-          AsyncStorage.getItem(PASS_AUTH_KEY),
-          AsyncStorage.getItem(NEW_ACCOUNT_WELCOME_PENDING_KEY),
+          resetApplied ? Promise.resolve(null) : AsyncStorage.getItem(PASS_AUTH_KEY),
+          resetApplied ? Promise.resolve(null) : AsyncStorage.getItem(NEW_ACCOUNT_WELCOME_PENDING_KEY),
           loadStudentAccounts({ localOnly: true }),
           loadTeacherAccounts({ localOnly: true }),
         ]);
@@ -1151,7 +1341,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStudentAccountCount(studentAccounts.length);
         setTeacherAccountCount(teacherAccounts.length);
 
-        // Background remote refresh so AuthGate sees cloud accounts immediately on new devices.
+        // Background remote refresh so AuthGate always sees post-reset cloud accounts immediately.
         void Promise.all([
           loadStudentAccounts({ forceRemote: true }),
           loadTeacherAccounts({ forceRemote: true }),
@@ -1168,20 +1358,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // 1. Handle initial Web URL or Native deep-link BEFORE dropping loading splash.
         let callbackUser: User | null = null;
         let handledCallback = false;
-        if (isSupabaseConfigured) {
-          const initialUrl =
-            Platform.OS === 'web'
-              ? initialWebUrl
-              : await Linking.getInitialURL().catch(() => null);
-          if (initialUrl && hasAuthCallbackMarkers(initialUrl)) {
-            const cbRes = await handleIncomingUrl(initialUrl);
-            if (!active) return;
-            handledCallback = cbRes.handled;
-            callbackUser = cbRes.user;
-            if (cbRes.isRecovery) {
-              return;
-            }
+        if (isSupabaseConfigured && hasInitialCallback && initialUrl) {
+          const cbRes = await handleIncomingUrl(initialUrl);
+          if (!active) return;
+          handledCallback = cbRes.handled;
+          callbackUser = cbRes.user;
+          if (cbRes.isRecovery) {
+            return;
           }
+        }
+
+        // If a reset was just applied on this boot, only resolve an active incoming callback user;
+        // never restore pre-reset local or Supabase sessions — land cleanly on fresh AuthGate!
+        if (resetApplied) {
+          if (isSupabaseConfigured && handledCallback && callbackUser) {
+            await resolveSupabaseUser(callbackUser, { isFreshSignIn: true });
+          }
+          return;
         }
 
         // 2. Check active Supabase session (handles OAuth return, Settings OAuth link, or returning OAuth user).
@@ -1410,7 +1603,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authSub?.data.subscription.unsubscribe();
       linkingSub?.remove();
     };
-  }, [persistSession, resolveSupabaseUser]);
+  }, [applyAccountsResetInternal, persistSession, resolveSupabaseUser]);
 
   /* ---------- OAuth (Google & GitHub) ---------- */
 
@@ -2084,16 +2277,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           });
 
           if (!supaRes.ok) {
-            const msg = supaRes.alreadyRegistered
-              ? `Gmail "${cleanEmail}" đã có tài khoản trên hệ thống! Hãy chuyển sang tab Đăng nhập hoặc bấm "Quên mật khẩu?".`
-              : (supaRes.error ?? 'Không thể đăng ký tài khoản Gmail lúc này.');
-            setError(msg);
-            return { ok: false, error: msg };
+            if (supaRes.alreadyRegistered) {
+              // Class accounts were reset while Supabase Auth `auth.users` still holds this Gmail:
+              // sign in seamlessly when password matches so the user can recreate their fresh class account.
+              const signInRes = await signInSupabaseEmail(cleanEmail, cleanPass);
+              if (signInRes.ok && signInRes.user) {
+                supaUserId = signInRes.user.id;
+                sessionActive = true;
+                needsConfirmation = false;
+                clearStalePendingRegistrationMeta(signInRes.user);
+              } else {
+                const msg =
+                  "Gmail này đã từng tồn tại trong hệ thống xác thực. Hãy nhập đúng mật khẩu Gmail cũ, bấm 'Quên mật khẩu?' để đặt lại, hoặc dùng nút Google/GitHub!";
+                setError(msg);
+                return { ok: false, error: msg };
+              }
+            } else {
+              const msg = supaRes.error ?? 'Không thể đăng ký tài khoản Gmail lúc này.';
+              setError(msg);
+              return { ok: false, error: msg };
+            }
+          } else {
+            supaUserId = supaRes.user?.id ?? null;
+            sessionActive = Boolean(supaRes.sessionActive);
+            needsConfirmation = Boolean(supaRes.needsEmailConfirmation) && !sessionActive;
           }
-
-          supaUserId = supaRes.user?.id ?? null;
-          sessionActive = Boolean(supaRes.sessionActive);
-          needsConfirmation = Boolean(supaRes.needsEmailConfirmation) && !sessionActive;
         }
 
         // 2. IMMEDIATELY create & sync the Student or Teacher account so their name appears live on the app right away!
@@ -2918,6 +3126,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshStudentAccountCount, refreshTeacherAccountCount]);
 
+  /** GVCN-only full class account reset across live Supabase + all connected devices. */
+  const resetAllAccounts = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    if (accountRole !== 'teacher') {
+      return {
+        ok: false,
+        error: 'Chỉ Giáo viên chủ nhiệm (GVCN) mới có quyền reset toàn bộ tài khoản lớp.',
+      };
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const remoteRes = isSupabaseConfigured
+        ? await resetAllAccountsRemote()
+        : {
+            ok: true,
+            resetAt: new Date().toISOString(),
+            clearedStudents: 0,
+            clearedTeachers: 0,
+          };
+      if (!remoteRes.ok) {
+        const msg =
+          remoteRes.error || 'Không thể reset toàn bộ tài khoản trên máy chủ. Vui lòng thử lại.';
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+      await applyAccountsResetIfNeeded(remoteRes.resetAt);
+      return { ok: true };
+    } catch {
+      const msg = 'Không thể reset toàn bộ tài khoản lúc này. Vui lòng thử lại.';
+      setError(msg);
+      return { ok: false, error: msg };
+    } finally {
+      setBusy(false);
+    }
+  }, [accountRole, applyAccountsResetIfNeeded]);
+
   const switchAccountRole = useCallback(
     async (
       targetRole: AccountRole,
@@ -3226,6 +3470,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       updateSubjectProfile,
       verifyTeacherPassword,
       signOut,
+      applyAccountsResetIfNeeded,
+      resetAllAccounts,
       refreshProfile,
       renameMe,
       fetchMembers,
@@ -3293,6 +3539,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       updateSubjectProfile,
       verifyTeacherPassword,
       signOut,
+      applyAccountsResetIfNeeded,
+      resetAllAccounts,
       refreshProfile,
       renameMe,
       fetchMembers,

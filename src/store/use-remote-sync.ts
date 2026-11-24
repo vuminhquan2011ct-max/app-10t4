@@ -31,6 +31,12 @@ import type { PersistedState } from './types';
 const FOREGROUND_POLL_MS = 4_000;
 const PUSH_DEBOUNCE_MS = 350;
 
+function parseIsoMs(iso?: string | null): number {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 export type SyncStatus = 'local' | 'syncing' | 'synced' | 'offline';
 
 export function useRemoteSync(options: {
@@ -40,13 +46,22 @@ export function useRemoteSync(options: {
   cloudActive: boolean;
   canEdit: boolean;
   allowAllRolesPush?: boolean;
+  onAccountsReset?: (resetAt: string) => void;
 }): {
   syncStatus: SyncStatus;
   lastSyncedAt: string | null;
   pullNow: () => Promise<void>;
   flushNow: (reason?: string, overrideState?: PersistedState) => Promise<void>;
 } {
-  const { state, commit, ready, cloudActive, canEdit, allowAllRolesPush = true } = options;
+  const {
+    state,
+    commit,
+    ready,
+    cloudActive,
+    canEdit,
+    allowAllRolesPush = true,
+    onAccountsReset,
+  } = options;
 
   const canPush = cloudActive && (allowAllRolesPush || canEdit);
 
@@ -56,9 +71,12 @@ export function useRemoteSync(options: {
   const stateRef = useRef(state);
   const commitRef = useRef(commit);
   const canPushRef = useRef(canPush);
+  const onAccountsResetRef = useRef(onAccountsReset);
+  const lastSeenResetAtRef = useRef<string | null>(state.accountsResetAt ?? null);
 
   const hasPulledOnceRef = useRef(false);
   const applyingRemoteRef = useRef(false);
+  const suppressPushUntilPullRef = useRef(false);
   const lastSyncedSigRef = useRef<string | null>(null);
   const pushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pullInFlightRef = useRef(false);
@@ -67,6 +85,9 @@ export function useRemoteSync(options: {
 
   useEffect(() => {
     stateRef.current = state;
+    if (parseIsoMs(state.accountsResetAt) > parseIsoMs(lastSeenResetAtRef.current)) {
+      lastSeenResetAtRef.current = state.accountsResetAt ?? null;
+    }
   }, [state]);
 
   useEffect(() => {
@@ -77,9 +98,17 @@ export function useRemoteSync(options: {
     canPushRef.current = canPush;
   }, [canPush]);
 
+  useEffect(() => {
+    onAccountsResetRef.current = onAccountsReset;
+  }, [onAccountsReset]);
+
   const flushNow = useCallback(
     async (reason?: string, overrideState?: PersistedState) => {
       if (!cloudActive || !canPushRef.current) return;
+      if (suppressPushUntilPullRef.current && reason === 'state-change') return;
+      if (reason !== 'state-change') {
+        suppressPushUntilPullRef.current = false;
+      }
 
       if (pushTimerRef.current) {
         clearTimeout(pushTimerRef.current);
@@ -107,6 +136,24 @@ export function useRemoteSync(options: {
         const reconciled = mergeClassStates(res.state, latestLocal, { prefer: 'local' });
         const reconciledSig = sharedSyncSignature(reconciled);
         const latestLocalSig = sharedSyncSignature(latestLocal);
+
+        const pushedResetAt = res.state.accountsResetAt ?? null;
+        const knownResetMs = Math.max(
+          parseIsoMs(lastSeenResetAtRef.current),
+          parseIsoMs(latestLocal.accountsResetAt),
+        );
+        if (pushedResetAt && parseIsoMs(pushedResetAt) > knownResetMs) {
+          if (pushTimerRef.current) {
+            clearTimeout(pushTimerRef.current);
+            pushTimerRef.current = null;
+          }
+          lastSeenResetAtRef.current = pushedResetAt;
+          lastSyncedSigRef.current = reconciledSig;
+          applyingRemoteRef.current = true;
+          commitRef.current(reconciled);
+          onAccountsResetRef.current?.(pushedResetAt);
+          return;
+        }
 
         if (reconciledSig !== latestLocalSig) {
           applyingRemoteRef.current = true;
@@ -167,9 +214,20 @@ export function useRemoteSync(options: {
               lastSyncedSigRef.current = sharedSyncSignature(current);
               setLastSyncedAt(new Date().toISOString());
             }
+            suppressPushUntilPullRef.current = false;
             setSyncStatus('synced');
           } else {
             hasPulledOnceRef.current = true;
+            const wasResetSuppressed = suppressPushUntilPullRef.current;
+            const remoteResetAt = remote.state.accountsResetAt ?? null;
+            const knownResetMs = Math.max(
+              parseIsoMs(lastSeenResetAtRef.current),
+              parseIsoMs(current.accountsResetAt),
+            );
+            const hasNewerRemoteReset = Boolean(
+              remoteResetAt && parseIsoMs(remoteResetAt) > knownResetMs,
+            );
+
             const merged = mergeClassStates(remote.state, current, { prefer: 'remote' });
             const currentSig = sharedSyncSignature(current);
             const remoteSig = sharedSyncSignature(remote.state);
@@ -178,7 +236,29 @@ export function useRemoteSync(options: {
             setSyncStatus('synced');
             setLastSyncedAt(remote.updatedAt);
 
-            if (mergedSig !== currentSig) {
+            if (hasNewerRemoteReset && remoteResetAt) {
+              if (pushTimerRef.current) {
+                clearTimeout(pushTimerRef.current);
+                pushTimerRef.current = null;
+              }
+              suppressPushUntilPullRef.current = false;
+              lastSeenResetAtRef.current = remoteResetAt;
+              applyingRemoteRef.current = true;
+              lastSyncedSigRef.current = mergedSig;
+              commitRef.current(merged);
+              onAccountsResetRef.current?.(remoteResetAt);
+            } else if (wasResetSuppressed) {
+              if (pushTimerRef.current) {
+                clearTimeout(pushTimerRef.current);
+                pushTimerRef.current = null;
+              }
+              suppressPushUntilPullRef.current = false;
+              lastSyncedSigRef.current = mergedSig;
+              if (mergedSig !== currentSig) {
+                applyingRemoteRef.current = true;
+                commitRef.current(merged);
+              }
+            } else if (mergedSig !== currentSig) {
               applyingRemoteRef.current = true;
               // If merged equals remote, record it so we don't echo-push back.
               // If merged also contains unsynced local additions (mergedSig !== remoteSig),
@@ -207,6 +287,7 @@ export function useRemoteSync(options: {
   useEffect(() => {
     if (!cloudActive) {
       hasPulledOnceRef.current = false;
+      suppressPushUntilPullRef.current = false;
       lastSyncedSigRef.current = null;
       return;
     }
@@ -225,6 +306,25 @@ export function useRemoteSync(options: {
     // 1. Sub-second cross-device & cross-tab Realtime Broadcast.
     const myClientId = getRealtimeClientId();
     const unsubBroadcast = subscribeLiveBroadcast((event) => {
+      if (event.type === 'accounts-reset') {
+        const incomingMs = parseIsoMs(event.resetAt);
+        const seenMs = Math.max(
+          parseIsoMs(lastSeenResetAtRef.current),
+          parseIsoMs(stateRef.current.accountsResetAt),
+        );
+        if (incomingMs > seenMs) {
+          if (pushTimerRef.current) {
+            clearTimeout(pushTimerRef.current);
+            pushTimerRef.current = null;
+          }
+          suppressPushUntilPullRef.current = true;
+          applyingRemoteRef.current = true;
+          lastSeenResetAtRef.current = event.resetAt;
+          onAccountsResetRef.current?.(event.resetAt);
+        }
+        void pullNow();
+        return;
+      }
       if (event.type === 'member-registered') {
         void pullNow();
         return;
@@ -299,6 +399,7 @@ export function useRemoteSync(options: {
   // Fast 350ms debounced push for local mutations (strictly guarded by pull-first).
   useEffect(() => {
     if (!cloudActive || !ready || !canPush || !hasPulledOnceRef.current) return;
+    if (suppressPushUntilPullRef.current) return;
 
     const sig = sharedSyncSignature(state);
 

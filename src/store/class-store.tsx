@@ -112,6 +112,7 @@ import { useAuth } from './auth-store';
 import { CLEAR_STUDENTS_MIGRATION_KEY, STORAGE_KEY, freshState, parseState } from './persist';
 import { buildStudent, mergeStudent } from './reducers';
 import {
+  ACCOUNTS_RESET_EPOCH,
   addResourceRemote,
   addStudentRemote,
   bulkAddStudentsRemote,
@@ -143,6 +144,30 @@ import { useRemoteSync, type SyncStatus } from './use-remote-sync';
 
 const DONE_TASKS_PREFIX = 'class10t4:done-tasks:v2:';
 const SAVED_RESOURCES_PREFIX = 'class10t4:saved-resources:v2:';
+
+function parseResetIsoMs(iso?: string | null): number {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function scrubAccountsFromState(base: PersistedState, resetAt: string): PersistedState {
+  return {
+    ...base,
+    students: [],
+    registeredTeachers: [],
+    entries: [],
+    attendance: {},
+    dutyLogs: {},
+    fundPaid: {},
+    kudos: [],
+    activityLog: [],
+    polls: (base.polls ?? []).map((p) => ({ ...p, votes: {} })),
+    seating: { ...base.seating, seats: {}, updatedAt: resetAt },
+    currentStudentId: null,
+    accountsResetAt: resetAt,
+  };
+}
 
 function resolveDriveIdFromAttachmentLike(att: {
   id?: string;
@@ -574,11 +599,24 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           }
         }
 
+        // Enforce ACCOUNTS_RESET_EPOCH before committing so stale pre-reset storage can never push to cloud.
+        const epochMs = parseResetIsoMs(ACCOUNTS_RESET_EPOCH);
+        const baseResetMs = parseResetIsoMs(base.accountsResetAt);
+        if (epochMs > 0 && baseResetMs < epochMs) {
+          base = scrubAccountsFromState(base, ACCOUNTS_RESET_EPOCH);
+        }
+        const effectiveResetMs = Math.max(epochMs, parseResetIsoMs(base.accountsResetAt));
+
         // Self-heal any locally registered students/teachers missing from persisted state.
         const deletedStudents = base.deletedStudentIds ?? {};
         const mergedStudents = [...base.students];
         const studentIds = new Set(mergedStudents.map((s) => s.id));
         for (const acc of localStudentAccs) {
+          const accLatestMs = Math.max(
+            parseResetIsoMs(acc.updatedAt),
+            parseResetIsoMs(acc.createdAt),
+          );
+          if (effectiveResetMs > 0 && accLatestMs < effectiveResetMs) continue;
           const deletedAt = deletedStudents[acc.studentId];
           if (deletedAt && deletedAt.localeCompare(acc.updatedAt) > 0) continue;
           if (!studentIds.has(acc.studentId)) {
@@ -606,6 +644,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           teacherMap.set(t.id, t);
         }
         for (const acc of localTeacherAccs) {
+          const accLatestMs = Math.max(
+            parseResetIsoMs(acc.updatedAt),
+            parseResetIsoMs(acc.createdAt),
+          );
+          if (effectiveResetMs > 0 && accLatestMs < effectiveResetMs) continue;
           const deletedAt = deletedTeachers[acc.teacherId];
           if (deletedAt && deletedAt.localeCompare(acc.updatedAt) > 0) continue;
           const pub = toPublicTeacher(acc);
@@ -714,6 +757,16 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           }));
         }
       } else if (event.type === 'removed') {
+        if (!event.studentId || event.studentId === '*') {
+          const resetAt = event.resetAt ?? ACCOUNTS_RESET_EPOCH;
+          const nextMs = parseResetIsoMs(resetAt);
+          mutate((prev) => {
+            const prevMs = parseResetIsoMs(prev.accountsResetAt);
+            if (nextMs <= 0 || nextMs <= prevMs) return prev;
+            return scrubAccountsFromState(prev, resetAt);
+          });
+          return;
+        }
         const now = new Date().toISOString();
         mutate((prev) => ({
           ...prev,
@@ -751,6 +804,16 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           };
         });
       } else if (event.type === 'removed') {
+        if (!event.teacherId || event.teacherId === '*') {
+          const resetAt = event.resetAt ?? ACCOUNTS_RESET_EPOCH;
+          const nextMs = parseResetIsoMs(resetAt);
+          mutate((prev) => {
+            const prevMs = parseResetIsoMs(prev.accountsResetAt);
+            if (nextMs <= 0 || nextMs <= prevMs) return prev;
+            return scrubAccountsFromState(prev, resetAt);
+          });
+          return;
+        }
         const now = new Date().toISOString();
         mutate((prev) => ({
           ...prev,
@@ -886,6 +949,23 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [savedKey],
   );
 
+  const applyAccountsResetIfNeeded = auth.applyAccountsResetIfNeeded;
+
+  const handleAccountsReset = useCallback(
+    (resetAt: string) => {
+      const nextMs = parseResetIsoMs(resetAt);
+      if (nextMs > 0) {
+        mutate((prev) => {
+          const prevMs = parseResetIsoMs(prev.accountsResetAt);
+          if (nextMs <= prevMs) return prev;
+          return scrubAccountsFromState(prev, resetAt);
+        });
+      }
+      void applyAccountsResetIfNeeded(resetAt);
+    },
+    [mutate, applyAccountsResetIfNeeded],
+  );
+
   const { syncStatus, lastSyncedAt, pullNow, flushNow } = useRemoteSync({
     state,
     commit,
@@ -893,6 +973,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     cloudActive: isCloudSync,
     canEdit: canEditClass,
     allowAllRolesPush: true,
+    onAccountsReset: handleAccountsReset,
   });
 
   const flushCloud = useCallback(
