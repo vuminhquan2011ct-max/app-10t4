@@ -16,7 +16,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
-import { canonicalizeOfficerPosition } from '@/lib/officer-roles';
+import {
+  formatPositionsDisplay,
+  normalizeCustomGrants,
+  normalizePositionsList,
+  type CustomOfficerGrantKey,
+} from '@/lib/officer-roles';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
 import {
@@ -63,8 +68,12 @@ export type StudentAccountRecord = {
   authProviders?: AuthProviderKind[];
   /** Optional avatar URL (e.g. from Google or GitHub OAuth). */
   avatarUrl?: string | null;
-  /** Optional class officer position assigned exclusively by GVCN (`null` = regular member). */
+  /** Optional class officer position display string (`positions.join(' · ') || null`, GVCN-only). */
   position?: string | null;
+  /** Optional multi-position list assigned exclusively by GVCN. */
+  positions?: string[];
+  /** Optional explicit custom permission grants assigned exclusively by GVCN. */
+  customPermissions?: CustomOfficerGrantKey[];
   createdAt: string;
   updatedAt: string;
 };
@@ -77,6 +86,8 @@ export type StudentAccountChangeEvent =
       name?: string;
       loginId?: string;
       position?: string | null;
+      positions?: string[];
+      customPermissions?: CustomOfficerGrantKey[];
       account?: StudentAccountRecord;
     }
   | { type: 'removed'; studentId: string; resetAt?: string }
@@ -427,9 +438,18 @@ function parseStudentRecord(item: unknown): StudentAccountRecord | null {
           : undefined;
   const avatarUrl =
     typeof r.avatarUrl === 'string' && r.avatarUrl.trim() ? r.avatarUrl.trim() : null;
-  const hasExplicitPosition = r.position !== undefined;
-  const parsedPosition =
-    typeof r.position === 'string' ? canonicalizeOfficerPosition(r.position) : null;
+  const hasExplicitPositions = r.positions !== undefined || r.position !== undefined;
+  const parsedPositions = hasExplicitPositions
+    ? normalizePositionsList(
+        Array.isArray(r.positions) ? r.positions : null,
+        typeof r.position === 'string' ? r.position : null,
+      )
+    : undefined;
+  const parsedPosition = hasExplicitPositions ? formatPositionsDisplay(parsedPositions) : undefined;
+  const hasExplicitCustomPerms = r.customPermissions !== undefined;
+  const parsedCustomPerms = hasExplicitCustomPerms
+    ? normalizeCustomGrants(Array.isArray(r.customPermissions) ? r.customPermissions : null)
+    : undefined;
 
   return {
     studentId: r.studentId.trim(),
@@ -441,7 +461,8 @@ function parseStudentRecord(item: unknown): StudentAccountRecord | null {
     ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
     ...(authProviders && authProviders.length > 0 ? { authProviders } : {}),
     ...(avatarUrl ? { avatarUrl } : {}),
-    ...(hasExplicitPosition ? { position: parsedPosition } : {}),
+    ...(hasExplicitPositions ? { position: parsedPosition, positions: parsedPositions } : {}),
+    ...(hasExplicitCustomPerms ? { customPermissions: parsedCustomPerms } : {}),
     createdAt: typeof r.createdAt === 'string' && r.createdAt ? r.createdAt : now,
     updatedAt: typeof r.updatedAt === 'string' && r.updatedAt ? r.updatedAt : now,
   };
@@ -466,12 +487,26 @@ function mergeTwoStudentRecords(
     : other.passwordHash.includes(':')
       ? other.passwordHash
       : '';
+  const winnerHasPos = winner.positions !== undefined || winner.position !== undefined;
+  const otherHasPos = other.positions !== undefined || other.position !== undefined;
+  const resolvedPositions =
+    isStrictlyDifferentTime && winnerHasPos
+      ? normalizePositionsList(winner.positions, winner.position)
+      : winnerHasPos
+        ? normalizePositionsList(winner.positions, winner.position)
+        : otherHasPos
+          ? normalizePositionsList(other.positions, other.position)
+          : undefined;
   const resolvedPosition =
-    isStrictlyDifferentTime && winner.position !== undefined
-      ? winner.position
-      : winner.position !== undefined
-        ? winner.position
-        : other.position;
+    resolvedPositions !== undefined ? formatPositionsDisplay(resolvedPositions) : undefined;
+  const resolvedCustomPerms =
+    isStrictlyDifferentTime && winner.customPermissions !== undefined
+      ? normalizeCustomGrants(winner.customPermissions)
+      : winner.customPermissions !== undefined
+        ? normalizeCustomGrants(winner.customPermissions)
+        : other.customPermissions !== undefined
+          ? normalizeCustomGrants(other.customPermissions)
+          : undefined;
 
   return {
     ...winner,
@@ -480,7 +515,10 @@ function mergeTwoStudentRecords(
     ...(authUserId ? { authUserId } : {}),
     ...(mergedProviders.length > 0 ? { authProviders: mergedProviders } : {}),
     ...(avatarUrl ? { avatarUrl } : {}),
-    ...(resolvedPosition !== undefined ? { position: resolvedPosition } : {}),
+    ...(resolvedPositions !== undefined
+      ? { position: resolvedPosition, positions: resolvedPositions }
+      : {}),
+    ...(resolvedCustomPerms !== undefined ? { customPermissions: resolvedCustomPerms } : {}),
   };
 }
 
@@ -1053,6 +1091,8 @@ export type RegisterStudentParams = {
   birthDate?: string | null;
   group?: string | null;
   position?: string | null;
+  positions?: string[];
+  customPermissions?: CustomOfficerGrantKey[];
   email?: string | null;
   authUserId?: string | null;
   authProviders?: AuthProviderKind[];
@@ -1158,7 +1198,9 @@ export async function registerStudentAccount(
   const now = safePostResetNowIso();
   const studentId = params.studentId?.trim() || createId('stu');
   // IMPORTANT: NEVER write email / authUserId / passwordHash into public `class_state` student object!
-  const cleanPosition = canonicalizeOfficerPosition(params.position);
+  const cleanPositions = normalizePositionsList(params.positions, params.position);
+  const cleanPosition = formatPositionsDisplay(cleanPositions);
+  const cleanCustomPerms = normalizeCustomGrants(params.customPermissions);
   const builtStudent = buildStudent(roster, state?.classInfo.name ?? '10T4', {
     id: studentId,
     name: cleanName,
@@ -1167,6 +1209,8 @@ export async function registerStudentAccount(
     birthDate: params.birthDate ?? null,
     group: params.group ?? null,
     position: cleanPosition,
+    positions: cleanPositions,
+    customPermissions: cleanCustomPerms,
   });
   const student: Student = {
     ...builtStudent,
@@ -1190,7 +1234,8 @@ export async function registerStudentAccount(
     ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
     ...(providers.length > 0 ? { authProviders: providers } : {}),
     ...(avatarUrl ? { avatarUrl } : {}),
-    ...(cleanPosition ? { position: cleanPosition } : {}),
+    ...(cleanPositions.length > 0 ? { position: cleanPosition, positions: cleanPositions } : {}),
+    ...(cleanCustomPerms.length > 0 ? { customPermissions: cleanCustomPerms } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -1517,17 +1562,25 @@ export async function updateStudentAccountName(
 }
 
 /**
- * Updates a student's GVCN-assigned class officer position across `STUDENT_ACCOUNTS_KEY`,
- * live in-process listeners, and Supabase auth registry (and optionally local `STORAGE_KEY`
- * + `class_state` when `options?.writeToClassState !== false`).
+ * Updates a student's GVCN-assigned class officer positions & custom permissions across
+ * `STUDENT_ACCOUNTS_KEY`, live in-process listeners, and Supabase auth registry
+ * (and optionally local `STORAGE_KEY` + `class_state` when `options?.writeToClassState !== false`).
  */
-export async function updateStudentAccountPosition(
+export async function updateStudentAccountPositions(
   studentId: string,
-  position: string | null,
+  positions: string[],
+  customPermissions?: CustomOfficerGrantKey[],
   options?: { writeToClassState?: boolean },
 ): Promise<void> {
-  const cleanPosition = canonicalizeOfficerPosition(position);
-  const now = new Date().toISOString();
+  const cleanPositions = normalizePositionsList(positions, null);
+  const cleanPosition = formatPositionsDisplay(cleanPositions);
+  const cleanCustomPerms =
+    customPermissions !== undefined
+      ? normalizeCustomGrants(customPermissions)
+      : cleanPositions.length === 0
+        ? []
+        : undefined;
+  const now = safePostResetNowIso();
   const writeToClassState = options?.writeToClassState !== false;
 
   const accounts = await loadStudentAccounts({ forceRemote: true });
@@ -1538,6 +1591,8 @@ export async function updateStudentAccountPosition(
     updatedAccount = {
       ...accounts[idx],
       position: cleanPosition,
+      positions: cleanPositions,
+      ...(cleanCustomPerms !== undefined ? { customPermissions: cleanCustomPerms } : {}),
       updatedAt: now,
     };
     await saveStudentAccounts(accounts.map((a, i) => (i === idx ? updatedAccount! : a)));
@@ -1549,7 +1604,13 @@ export async function updateStudentAccountPosition(
       const state = await readSafePersistedState();
       const existingStu = state.students.find((s) => s.id === studentId);
       if (existingStu) {
-        updatedStudent = { ...existingStu, position: cleanPosition, updatedAt: now };
+        updatedStudent = {
+          ...existingStu,
+          position: cleanPosition,
+          positions: cleanPositions,
+          ...(cleanCustomPerms !== undefined ? { customPermissions: cleanCustomPerms } : {}),
+          updatedAt: now,
+        };
         const nextState: PersistedState = {
           ...state,
           students: state.students.map((s) => (s.id === studentId ? updatedStudent! : s)),
@@ -1568,6 +1629,8 @@ export async function updateStudentAccountPosition(
     type: 'updated',
     studentId,
     position: cleanPosition,
+    positions: cleanPositions,
+    ...(cleanCustomPerms !== undefined ? { customPermissions: cleanCustomPerms } : {}),
     account: updatedAccount,
   });
 
@@ -1591,6 +1654,21 @@ export async function updateStudentAccountPosition(
       await awaitBriefly(Promise.all(tasks), 2_000);
     }
   }
+}
+
+/** Backward-compatible single-position wrapper delegating to `updateStudentAccountPositions`. */
+export async function updateStudentAccountPosition(
+  studentId: string,
+  position: string | null,
+  options?: { writeToClassState?: boolean },
+): Promise<void> {
+  const nextPositions = position ? normalizePositionsList(null, position) : [];
+  await updateStudentAccountPositions(
+    studentId,
+    nextPositions,
+    nextPositions.length === 0 ? [] : undefined,
+    options,
+  );
 }
 
 export async function updateStudentAccountCredentials(params: {

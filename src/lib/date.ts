@@ -186,3 +186,63 @@ export function formatDayMonth(value: string | null | undefined): string {
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}`;
 }
 
+/** ISO Monday (`YYYY-MM-DD`) of the week containing `dateIso` (defaults to today). */
+export function startOfWeekIso(dateIso?: string): string {
+  const base = parseIsoDate(dateIso) ?? parseIsoDate(todayIso()) ?? new Date();
+  const jsDay = base.getDay(); // 0=Sun, 1=Mon ... 6=Sat
+  const diffToMonday = jsDay === 0 ? -6 : 1 - jsDay;
+  base.setDate(base.getDate() + diffToMonday);
+  return `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`;
+}
+
+/** ISO Sunday (`YYYY-MM-DD`) of the week containing `dateIso` (defaults to today). */
+export function endOfWeekIso(dateIso?: string): string {
+  return shiftIsoDate(startOfWeekIso(dateIso), 6);
+}
+
+/** Human Vietnamese week label, e.g. `Tuần này (23/11 – 29/11)`. */
+export function formatWeekLabel(weekStartIso: string): string {
+  const normalizedStart = startOfWeekIso(weekStartIso);
+  const weekEnd = endOfWeekIso(normalizedStart);
+  const range = `${formatDayMonth(normalizedStart)} – ${formatDayMonth(weekEnd)}`;
+  const thisWeek = startOfWeekIso();
+  const lastWeek = shiftIsoDate(thisWeek, -7);
+  if (normalizedStart === thisWeek) return `Tuần này (${range})`;
+  if (normalizedStart === lastWeek) return `Tuần trước (${range})`;
+  return `Tuần ${range}`;
+}
+
+/**
+ * Resolve the Học kỳ I date window (`YYYY-MM-DD` start..end).
+ * Parses `classYear` like `'2026 - 2027'` -> `'2026-09-01'` to `'2027-01-31'`
+ * with optional GVCN custom overrides.
+ */
+export function getSemester1Window(
+  classYear?: string,
+  customStart?: string | null,
+  customEnd?: string | null,
+): { start: string; end: string; label: string } {
+  const now = new Date();
+  const fallbackStartYear = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1;
+  const yearMatch = classYear ? /(\d{4})/.exec(classYear) : null;
+  const parsedYear = yearMatch ? Number.parseInt(yearMatch[1], 10) : NaN;
+  const startYear = Number.isFinite(parsedYear) && parsedYear >= 2000 ? parsedYear : fallbackStartYear;
+
+  const cleanCustomStart = customStart?.trim() ?? '';
+  const cleanCustomEnd = customEnd?.trim() ?? '';
+  let start = isValidIsoDate(cleanCustomStart) ? cleanCustomStart : `${startYear}-09-01`;
+  let end = isValidIsoDate(cleanCustomEnd) ? cleanCustomEnd : `${startYear + 1}-01-31`;
+
+  if (start > end) {
+    const tmp = start;
+    start = end;
+    end = tmp;
+  }
+
+  return {
+    start,
+    end,
+    label: `Học kỳ I (${formatDate(start)} – ${formatDate(end)})`,
+  };
+}
+

@@ -13,16 +13,22 @@ import {
 } from 'react-native';
 
 import { ModalHeader } from '@/components/modal-header';
+import { OfficerPositionEditor } from '@/components/officer-position-editor';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { OptionPicker } from '@/components/ui/option-picker';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
-import { GENDERS, GENDER_LIST, GROUP_PRESETS, POSITION_PRESETS } from '@/constants/entry-meta';
+import { GENDERS, GENDER_LIST, GROUP_PRESETS } from '@/constants/entry-meta';
 import { Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatBirthDateForInput, normalizeBirthDateInput } from '@/lib/date';
+import {
+  formatPositionsDisplay,
+  normalizePositionsList,
+  type CustomOfficerGrantKey,
+} from '@/lib/officer-roles';
 import {
   MIN_STUDENT_PASSWORD_LENGTH,
   evaluatePasswordStrength,
@@ -43,6 +49,9 @@ export default function StudentFormScreen() {
     saveStudentNote,
     checkLoginIdTaken,
     suggestNextStudentCode,
+    customPositionPresets,
+    addCustomPositionPreset,
+    removeCustomPositionPreset,
     isTeacher,
     canAssignPositions,
     canViewAll,
@@ -70,7 +79,12 @@ export default function StudentFormScreen() {
   const [email, setEmail] = useState(existing?.email ?? '');
   const [address, setAddress] = useState(existing?.address ?? '');
   const [group, setGroup] = useState(existing?.group ?? '');
-  const [position, setPosition] = useState(existing?.position ?? '');
+  const [positions, setPositions] = useState<string[]>(
+    normalizePositionsList(existing?.positions, existing?.position),
+  );
+  const [customPermissions, setCustomPermissions] = useState<CustomOfficerGrantKey[]>(
+    existing?.customPermissions ?? [],
+  );
   const [note, setNote] = useState(existing?.note ?? '');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -164,7 +178,13 @@ export default function StudentFormScreen() {
       gender,
       birthDate,
       group,
-      ...(canAssignPositions ? { position: position.trim() || null } : {}),
+      ...(canAssignPositions
+        ? {
+            position: formatPositionsDisplay(positions),
+            positions,
+            customPermissions,
+          }
+        : {}),
     };
     let targetId = existing?.id ?? '';
 
@@ -480,27 +500,29 @@ export default function StudentFormScreen() {
             onChange={setGroup}
           />
           {canAssignPositions ? (
-            <View style={styles.fieldGroup}>
-              <OptionPicker
-                label={'Chức vụ Ban cán sự (Chỉ GVCN phân công)'}
-                layout={'row'}
-                options={POSITION_PRESETS.map((p) => ({ value: p, label: p }))}
-                value={position || null}
-                onChange={(p) => setPosition(position === p ? '' : p)}
+            <Card style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
+                Chức vụ Ban cán sự & Chức vụ tự ghi (Chỉ GVCN — được chọn nhiều)
+              </Text>
+              <OfficerPositionEditor
+                positions={positions}
+                customPermissions={customPermissions}
+                customPresets={customPositionPresets}
+                disabled={saving}
+                onChange={(nextPositions, nextCustomPermissions) => {
+                  setPositions(nextPositions);
+                  setCustomPermissions(nextCustomPermissions);
+                }}
+                onSaveCustomPreset={(preset) => {
+                  addCustomPositionPreset(preset);
+                  showToast(`Đã lưu “${preset}” vào mẫu chức vụ lớp!`, 'info');
+                }}
+                onRemoveCustomPreset={(preset) => {
+                  removeCustomPositionPreset(preset);
+                  showToast(`Đã xoá mẫu “${preset}”`, 'info');
+                }}
               />
-              {position.trim() ? (
-                <Button
-                  label={'Hủy chức vụ (Về thành viên thường)'}
-                  variant={'danger'}
-                  size={'sm'}
-                  icon={'close-circle-outline'}
-                  onPress={() => {
-                    setPosition('');
-                    showToast('Đã chọn hủy chức vụ — bấm Lưu để áp dụng', 'info');
-                  }}
-                />
-              ) : null}
-            </View>
+            </Card>
           ) : null}
 
           {canManagePrivate ? (

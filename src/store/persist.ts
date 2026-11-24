@@ -15,6 +15,11 @@ import {
   buildInitialSeating,
   buildInitialTasks,
 } from '@/data/seed-extras';
+import {
+  formatPositionsDisplay,
+  normalizeCustomGrants,
+  normalizePositionsList,
+} from '@/lib/officer-roles';
 import type {
   ActivityLogItem,
   Announcement,
@@ -188,24 +193,61 @@ export function hydrateState(parsed: Partial<PersistedState> | null | undefined)
   if (!parsed || parsed.version !== 1) return freshState();
   if (!Array.isArray(parsed.students) || !Array.isArray(parsed.entries)) return freshState();
 
+  const customPositions = Array.isArray(parsed.classInfo?.customPositions)
+    ? normalizePositionsList(parsed.classInfo.customPositions)
+    : undefined;
+  const semester1Start =
+    typeof parsed.classInfo?.semester1Start === 'string' && parsed.classInfo.semester1Start.trim()
+      ? parsed.classInfo.semester1Start.trim()
+      : null;
+  const semester1End =
+    typeof parsed.classInfo?.semester1End === 'string' && parsed.classInfo.semester1End.trim()
+      ? parsed.classInfo.semester1End.trim()
+      : null;
+  const classInfoUpdatedAt =
+    typeof parsed.classInfo?.updatedAt === 'string' && parsed.classInfo.updatedAt.trim()
+      ? parsed.classInfo.updatedAt.trim()
+      : null;
+
   const classInfo = {
     ...DEFAULT_CLASS,
     goalPoints: 200,
     ...parsed.classInfo,
     teacherName: parsed.classInfo?.teacherName?.trim() || DEFAULT_CLASS.teacherName,
+    ...(customPositions ? { customPositions } : {}),
+    ...(semester1Start ? { semester1Start } : {}),
+    ...(semester1End ? { semester1End } : {}),
+    ...(classInfoUpdatedAt ? { updatedAt: classInfoUpdatedAt } : {}),
   };
 
   return {
     version: 1,
     classInfo,
-    students: (parsed.students as Student[]).map((s) => ({
-      ...s,
-      phone: s.phone ?? null,
-      email: s.email ?? null,
-      address: s.address ?? null,
-      note: s.note ?? null,
+    students: (parsed.students as Student[]).map((s) => {
+      const positions = normalizePositionsList(s.positions, s.position);
+      const customPermissions = normalizeCustomGrants(s.customPermissions);
+      return {
+        ...s,
+        position: formatPositionsDisplay(positions),
+        positions,
+        ...(customPermissions.length > 0 ? { customPermissions } : { customPermissions: [] }),
+        phone: s.phone ?? null,
+        email: s.email ?? null,
+        address: s.address ?? null,
+        note: s.note ?? null,
+      };
+    }),
+    entries: (parsed.entries as Entry[]).map((e) => ({
+      ...e,
+      ...(typeof e.subject === 'string' && e.subject.trim()
+        ? { subject: e.subject.trim() }
+        : e.subject === null
+          ? { subject: null }
+          : {}),
+      ...(typeof e.speechCount === 'number' && Number.isFinite(e.speechCount) && e.speechCount > 0
+        ? { speechCount: Math.max(1, Math.round(e.speechCount)) }
+        : {}),
     })),
-    entries: parsed.entries as Entry[],
     role: isRole(parsed.role) ? parsed.role : 'teacher',
     currentStudentId: parsed.currentStudentId ?? null,
     attendance:

@@ -55,6 +55,7 @@ function WorkspaceStack() {
         <Stack.Screen name={'feedback'} />
         <Stack.Screen name={'members'} />
         <Stack.Screen name={'gallery'} />
+        <Stack.Screen name={'study'} options={{ headerShown: false }} />
         <Stack.Screen name={'auth-callback'} options={{ headerShown: false }} />
         <Stack.Screen name={'student-form'} options={{ presentation: 'modal' }} />
         <Stack.Screen name={'teacher-form'} options={{ presentation: 'modal' }} />

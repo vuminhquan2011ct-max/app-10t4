@@ -98,8 +98,8 @@ const QUICK_DOCK: {
   params?: Record<string, string>;
   color: ThemeColor;
   soft: ThemeColor;
-  
 }[] = [
+  { label: 'Phát biểu Môn', icon: 'book', route: '/study', color: 'success', soft: 'successSoft' },
   { label: 'Drive K8T4', icon: 'cloud-upload', route: '/gallery', color: 'accent', soft: 'accentSoft' },
   { label: 'Nhiệm vụ', icon: 'trophy', route: '/creative', params: { tab: 'missions' }, color: 'warning', soft: 'warningSoft' },
   { label: 'Kho Sticker', icon: 'sparkles', route: '/creative', params: { tab: 'vault' }, color: 'danger', soft: 'dangerSoft' },
@@ -133,8 +133,10 @@ export default function DashboardScreen() {
     canEditClass,
     isOfficer,
     officerPositionLabel,
+    officerPositionsList,
     canAssignPositions,
     canManageDuty,
+    canRecordStudy,
     canRecordBonus,
     canRecordViolation,
     canManageTasksAndEvents,
@@ -158,6 +160,7 @@ export default function DashboardScreen() {
     attendanceStatsOfStudent,
     seatOfStudent,
     kudosOfStudent,
+    getStudyParticipationReport,
     pullNow,
   } = store;
   const theme = useTheme();
@@ -175,6 +178,7 @@ export default function DashboardScreen() {
 
   const health = useMemo(() => computeClassHealth(store), [store]);
   const livePeriod = useMemo(() => getLivePeriodStatus(schedule), [schedule]);
+  const studyReport = getStudyParticipationReport();
 
   const podium = ranking.slice(0, 3);
   const rest = ranking.slice(3, 6);
@@ -1014,6 +1018,73 @@ export default function DashboardScreen() {
         </FadeIn>
       ) : null}
 
+      {/* Live Study Participation (Weekly + Cumulative HK I) Card */}
+      <FadeIn index={3}>
+        <Card
+          style={[styles.officerHubCard, { borderColor: `${theme.success}66`, borderWidth: 1.3 }]}
+          onPress={() => router.push('/study' as never)}>
+          <View style={styles.officerHubHead}>
+            <View style={[styles.officerHubIcon, { backgroundColor: theme.successSoft }]}>
+              <Ionicons name="book" size={20} color={theme.success} />
+            </View>
+            <View style={styles.flex}>
+              <View style={styles.officerBadgeRow}>
+                <Text style={[styles.officerHubEyebrow, { color: theme.success }]}>
+                  HỌC TẬP · PHÁT BIỂU THEO MÔN
+                </Text>
+                <Badge
+                  label={studyReport.semester1.label}
+                  color={'success'}
+                  soft={'successSoft'}
+                  icon={'calendar-outline'}
+                />
+              </View>
+              <Text style={[styles.officerHubTitle, { color: theme.text }]}>
+                {`Tuần này: ${studyReport.weekly.totalSpeeches} lượt · Cộng dồn HK I: ${studyReport.semester1.totalSpeeches} lượt`}
+              </Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
+                {`+${studyReport.semester1.totalPoints}đ học tập · ${studyReport.semester1.activeStudents} HS tham gia · ${studyReport.semester1.bySubject.length} môn có phát biểu`}
+              </Text>
+            </View>
+          </View>
+
+          {studyReport.semester1.bySubject.length > 0 ? (
+            <View style={styles.officerActionGrid}>
+              {studyReport.semester1.bySubject.slice(0, 4).map((sub) => (
+                <Badge
+                  key={sub.subject}
+                  label={`${sub.subject}: ${sub.speeches} lượt`}
+                  color={'success'}
+                  soft={'successSoft'}
+                />
+              ))}
+            </View>
+          ) : null}
+
+          <View style={styles.officerHubBtns}>
+            <Button
+              label={'Ghi phát biểu'}
+              icon={'hand-left-outline'}
+              size={'sm'}
+              style={styles.flex}
+              onPress={() =>
+                router.push({ pathname: '/study', params: { tab: 'record' } } as never)
+              }
+            />
+            <Button
+              label={'Xem thống kê HK I →'}
+              variant={'soft'}
+              icon={'bar-chart-outline'}
+              size={'sm'}
+              style={styles.flex}
+              onPress={() =>
+                router.push({ pathname: '/study', params: { tab: 'semester1' } } as never)
+              }
+            />
+          </View>
+        </Card>
+      </FadeIn>
+
       {/* Officer & GVCN Role Command Card ("Bảng Điều Phối Chức Vụ & Ban Cán Sự 10T4") */}
       {canAssignPositions ? (
         <FadeIn index={3}>
@@ -1030,7 +1101,7 @@ export default function DashboardScreen() {
                   {'Bảng Điều Phối Ban Cán Sự ' + classInfo.name}
                 </Text>
                 <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
-                  {`Đang hoạt động: ${students.filter((s) => Boolean(s.position?.trim())).length} cán sự lớp · Chỉ GVCN có quyền phân công hoặc hủy chức vụ.`}
+                  {`Đang hoạt động: ${students.filter((s) => Boolean(s.position?.trim() || (s.positions && s.positions.length > 0))).length} cán sự lớp · Chỉ GVCN phân công đa chức vụ & chức vụ tự ghi.`}
                 </Text>
               </View>
             </View>
@@ -1052,10 +1123,16 @@ export default function DashboardScreen() {
             </View>
           </Card>
         </FadeIn>
-      ) : isOfficer && officerPositionLabel ? (
+      ) : isOfficer && (officerPositionsList.length > 0 || officerPositionLabel) ? (
         (() => {
-          const posMeta = getOfficerPositionMeta(officerPositionLabel);
-          const tone = posMeta?.color ?? 'purple';
+          const allPositions =
+            officerPositionsList.length > 0
+              ? officerPositionsList
+              : officerPositionLabel
+                ? [officerPositionLabel]
+                : [];
+          const primaryMeta = getOfficerPositionMeta(allPositions[0]);
+          const tone = primaryMeta?.color ?? 'purple';
           const softTone = softToneOf(tone);
           return (
             <FadeIn index={3}>
@@ -1067,7 +1144,7 @@ export default function DashboardScreen() {
                 <View style={styles.officerHubHead}>
                   <View style={[styles.officerHubIcon, { backgroundColor: theme[softTone] }]}>
                     <Ionicons
-                      name={(posMeta?.icon ?? 'ribbon') as IoniconName}
+                      name={(primaryMeta?.icon ?? 'ribbon') as IoniconName}
                       size={20}
                       color={theme[tone]}
                     />
@@ -1077,22 +1154,31 @@ export default function DashboardScreen() {
                       <Text style={[styles.officerHubEyebrow, { color: theme[tone] }]}>
                         BẢNG ĐIỀU PHỐI BAN CÁN SỰ
                       </Text>
-                      <Badge
-                        label={officerPositionLabel}
-                        color={tone}
-                        soft={softTone}
-                        icon={(posMeta?.icon ?? 'star') as IoniconName}
-                      />
+                      {allPositions.map((posTitle) => {
+                        const meta = getOfficerPositionMeta(posTitle);
+                        const pTone = meta?.color ?? 'purple';
+                        return (
+                          <Badge
+                            key={posTitle}
+                            label={posTitle}
+                            color={pTone}
+                            soft={softToneOf(pTone)}
+                            icon={(meta?.icon ?? 'star') as IoniconName}
+                          />
+                        );
+                      })}
                     </View>
                     <Text style={[styles.officerHubTitle, { color: theme.text }]}>
-                      {posMeta?.summary || 'Được GVCN phân công điều phối hoạt động lớp'}
+                      {allPositions.length > 1
+                        ? `Đang kiêm nhiệm ${allPositions.length} chức vụ do GVCN phân công`
+                        : primaryMeta?.summary || 'Được GVCN phân công điều phối hoạt động lớp'}
                     </Text>
                   </View>
                 </View>
 
-                {posMeta && posMeta.permissions.length > 0 ? (
+                {primaryMeta && primaryMeta.permissions.length > 0 ? (
                   <View style={styles.officerPermList}>
-                    {posMeta.permissions.map((perm) => (
+                    {primaryMeta.permissions.map((perm) => (
                       <View key={perm} style={styles.officerPermItem}>
                         <Ionicons name="checkmark-circle" size={14} color={theme[tone]} />
                         <Text style={{ color: theme.textSecondary, fontSize: 12, flex: 1 }}>
@@ -1104,6 +1190,22 @@ export default function DashboardScreen() {
                 ) : null}
 
                 <View style={styles.officerActionGrid}>
+                  {canRecordStudy ? (
+                    <Pressable
+                      onPress={() =>
+                        router.push({ pathname: '/study', params: { tab: 'record' } } as never)
+                      }
+                      style={({ pressed }) => [
+                        styles.officerActionBtn,
+                        { backgroundColor: theme.successSoft, borderColor: theme.success },
+                        pressed && styles.pressed,
+                      ]}>
+                      <Ionicons name="book" size={15} color={theme.success} />
+                      <Text style={[styles.officerActionText, { color: theme.success }]}>
+                        Ghi phát biểu theo môn
+                      </Text>
+                    </Pressable>
+                  ) : null}
                   {canManageDuty ? (
                     <Pressable
                       onPress={() => router.push('/schedule' as never)}

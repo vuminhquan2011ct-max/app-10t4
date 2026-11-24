@@ -30,6 +30,8 @@ import { OptionPicker } from '@/components/ui/option-picker';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
 import {
+  ACHIEVEMENT_CATEGORY_LIST,
+  ACADEMIC_ACHIEVEMENT_PRESETS,
   ENTRY_CATEGORIES,
   ENTRY_CATEGORY_LIST,
   ENTRY_KINDS,
@@ -38,6 +40,8 @@ import {
   ENTRY_LEVEL_LIST,
   GROUP_BONUS_PRESETS,
   GROUP_PRESETS,
+  STUDY_SPEECH_PRESETS,
+  STUDY_SUBJECT_PRESETS,
   VIOLATION_PRESETS,
 } from '@/constants/entry-meta';
 import { Radius, Spacing } from '@/constants/theme';
@@ -66,7 +70,7 @@ import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
 import type { EntryCategory, EntryKind, EntryLevel, PublicStudentRosterItem } from '@/types/models';
 
-type RecordMode = 'bonus' | 'violation';
+type RecordMode = 'study' | 'bonus' | 'violation';
 
 function inferProofKindFromUrl(url: string): DriveMediaKind {
   const trimmed = url.trim();
@@ -82,10 +86,11 @@ function inferProofKindFromUrl(url: string): DriveMediaKind {
 }
 
 export default function EntryFormScreen() {
-  const { id, studentId, mode } = useLocalSearchParams<{
+  const { id, studentId, mode, subject: paramSubject } = useLocalSearchParams<{
     id?: string;
     studentId?: string;
-    mode?: 'bonus' | 'violation';
+    mode?: 'bonus' | 'violation' | 'study';
+    subject?: string;
   }>();
   const auth = useAuth();
   const {
@@ -98,6 +103,7 @@ export default function EntryFormScreen() {
     setEntryStatus,
     bonusTargetStudents,
     violationTargetStudents,
+    studyTargetStudents,
     classInfo,
     role,
     memberRole,
@@ -107,11 +113,16 @@ export default function EntryFormScreen() {
     canEditClass,
     currentStudent,
     isClassMonitor,
+    isAcademicVP,
     isGroupLeader,
     isDisciplineVP,
     officerPositionLabel,
+    customOfficerPermissions,
+    inferredStudySubjects,
+    canRecordStudy,
     canRecordBonus,
     canRecordViolation,
+    canRecordStudyForStudent,
     canRecordBonusForStudent,
     canRecordViolationForStudent,
   } = useClassStore();
@@ -120,25 +131,63 @@ export default function EntryFormScreen() {
   const { showToast } = useToast();
   const existing = id ? getEntry(id) : undefined;
 
-  // Officer role-aware capabilities
-  const canSwitchModes = isTeacher || isClassMonitor || (canRecordBonus && canRecordViolation);
-  const isDisciplineVPOnly = !canSwitchModes && canRecordViolation && !canRecordBonus;
-  const isGroupLeaderOnly = !canSwitchModes && canRecordBonus && !canRecordViolation;
-  const isOfficerRecorder = canSwitchModes || canRecordBonus || canRecordViolation;
-  const isStudentSelfOnly = !isOfficerRecorder;
+  const hasClassWideStudy =
+    isTeacher ||
+    isSubjectTeacher ||
+    isClassMonitor ||
+    isAcademicVP ||
+    customOfficerPermissions.includes('full_coordination') ||
+    customOfficerPermissions.includes('record_study') ||
+    inferredStudySubjects.length > 0;
+  const hasClassWideBonus =
+    isTeacher ||
+    isClassMonitor ||
+    customOfficerPermissions.includes('full_coordination') ||
+    customOfficerPermissions.includes('record_bonus_class');
+  const isGroupScopedBonus = !hasClassWideBonus && canRecordBonus;
+  const isGroupScopedStudy = !hasClassWideStudy && canRecordStudy;
+  const isDisciplineVPOnly =
+    !isTeacher && !isClassMonitor && canRecordViolation && !canRecordBonus && !hasClassWideStudy;
+  const canSelfSubmit = memberRole === 'student' && Boolean(currentStudent);
+
+  const allowStudyMode = canRecordStudy || canSelfSubmit || existing?.kind === 'study';
+  const allowBonusMode =
+    canRecordBonus ||
+    canSelfSubmit ||
+    (Boolean(existing) && existing?.kind !== 'violation' && existing?.kind !== 'study');
+  const allowViolationMode = canRecordViolation || existing?.kind === 'violation';
 
   const initialMode: RecordMode = existing
     ? existing.kind === 'violation' || existing.points < 0
       ? 'violation'
-      : 'bonus'
-    : isDisciplineVPOnly
-      ? 'violation'
-      : canSwitchModes && mode === 'violation'
+      : existing.kind === 'study'
+        ? 'study'
+        : 'bonus'
+    : mode === 'study' && allowStudyMode
+      ? 'study'
+      : mode === 'violation' && allowViolationMode
         ? 'violation'
-        : 'bonus';
+        : mode === 'bonus' && allowBonusMode
+          ? 'bonus'
+          : isSubjectTeacher && allowStudyMode
+            ? 'study'
+            : isDisciplineVPOnly
+              ? 'violation'
+              : allowBonusMode
+                ? 'bonus'
+                : allowStudyMode
+                  ? 'study'
+                  : 'violation';
 
   const [recordMode, setRecordMode] = useState<RecordMode>(initialMode);
   const isViolationMode = recordMode === 'violation';
+  const isStudyMode = recordMode === 'study';
+  const isGroupLeaderOnly = isStudyMode ? isGroupScopedStudy : isGroupScopedBonus;
+
+  const studyCandidates = useMemo<PublicStudentRosterItem[]>(
+    () => (canRecordStudy ? studyTargetStudents : []),
+    [canRecordStudy, studyTargetStudents],
+  );
 
   const bonusCandidates = useMemo<PublicStudentRosterItem[]>(
     () => (canRecordBonus ? bonusTargetStudents : []),
@@ -150,8 +199,22 @@ export default function EntryFormScreen() {
     [canRecordViolation, violationTargetStudents],
   );
 
-  const activeCandidates = isViolationMode ? violationCandidates : bonusCandidates;
-  const isGroupLeaderMissingGroup = isGroupLeaderOnly && !currentStudent?.group?.trim();
+  const activeCandidates = isViolationMode
+    ? violationCandidates
+    : isStudyMode
+      ? studyCandidates
+      : bonusCandidates;
+  const isOfficerModeForTarget = isViolationMode
+    ? canRecordViolation
+    : isStudyMode
+      ? canRecordStudy
+      : canRecordBonus;
+  const isGroupLeaderMissingGroup =
+    !isTeacher &&
+    !isClassMonitor &&
+    isGroupLeader &&
+    !currentStudent?.group?.trim() &&
+    activeCandidates.length === 0;
 
   const readOnly = Boolean(
     existing &&
@@ -161,7 +224,7 @@ export default function EntryFormScreen() {
 
   const defaultOwner =
     existing?.studentId ??
-    (isStudentSelfOnly
+    (!isOfficerModeForTarget
       ? (currentStudent?.id ?? null)
       : isGroupLeaderMissingGroup
         ? null
@@ -169,24 +232,59 @@ export default function EntryFormScreen() {
           ? studentId
           : activeCandidates[0]?.id ?? null);
 
+  const initialSubject =
+    existing?.subject?.trim() ||
+    paramSubject?.trim() ||
+    (isSubjectTeacher && subjectName?.trim()) ||
+    inferredStudySubjects[0] ||
+    STUDY_SUBJECT_PRESETS[0];
+
   const [owner, setOwner] = useState<string | null>(defaultOwner);
   const [studentQuery, setStudentQuery] = useState('');
   const [studentGroupFilter, setStudentGroupFilter] = useState<string>('all');
   const [title, setTitle] = useState(existing?.title ?? '');
   const [kind, setKind] = useState<EntryKind>(
-    existing?.kind ?? (initialMode === 'violation' ? 'violation' : 'achievement'),
+    existing?.kind ??
+      (initialMode === 'violation'
+        ? 'violation'
+        : initialMode === 'study'
+          ? 'study'
+          : 'achievement'),
   );
   const [category, setCategory] = useState<EntryCategory>(
-    existing?.category ?? (initialMode === 'violation' ? 'other' : 'study'),
+    existing?.category ??
+      (initialMode === 'violation'
+        ? 'other'
+        : initialMode === 'study'
+          ? 'study'
+          : 'academic'),
+  );
+  const [studySubject, setStudySubject] = useState<string>(initialSubject);
+  const [customStudySubject, setCustomStudySubject] = useState<string>(
+    existing?.subject && !(STUDY_SUBJECT_PRESETS as readonly string[]).includes(existing.subject)
+      ? existing.subject
+      : '',
+  );
+  const [speechCount, setSpeechCount] = useState<number>(
+    existing?.kind === 'study' ? Math.max(1, Math.round(existing.speechCount ?? 1)) : 1,
   );
   const [level, setLevel] = useState<EntryLevel>(
-    existing?.level ?? (initialMode === 'violation' || isGroupLeaderOnly ? 'class' : 'school'),
+    existing?.level ??
+      (initialMode === 'violation' || initialMode === 'study' || isGroupLeaderOnly
+        ? 'class'
+        : 'school'),
   );
   const [date, setDate] = useState<string>(existing?.date ?? todayIso());
   const [points, setPoints] = useState(
     String(
       existing?.points ??
-        (initialMode === 'violation' ? -5 : isGroupLeaderOnly ? 5 : suggestedPoints('school')),
+        (initialMode === 'violation'
+          ? -5
+          : initialMode === 'study'
+            ? 2
+            : isGroupLeaderOnly
+              ? 5
+              : suggestedPoints('school')),
     ),
   );
   const [description, setDescription] = useState(existing?.description ?? '');
@@ -200,6 +298,8 @@ export default function EntryFormScreen() {
     sizeBytes?: number;
   } | null>(null);
   const [reviewNote, setReviewNote] = useState(existing?.reviewNote ?? '');
+
+  const effectiveStudySubject = customStudySubject.trim() || studySubject;
 
   const uploaderDisplayName =
     auth.profile?.displayName?.trim() ||
@@ -359,8 +459,22 @@ export default function EntryFormScreen() {
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  const availableModes = useMemo<{ key: RecordMode; label: string; icon: keyof typeof Ionicons.glyphMap; tone: 'success' | 'accent' | 'danger' }[]>(() => {
+    const list: { key: RecordMode; label: string; icon: keyof typeof Ionicons.glyphMap; tone: 'success' | 'accent' | 'danger' }[] = [];
+    if (allowStudyMode) {
+      list.push({ key: 'study', label: 'Học tập · Phát biểu', icon: 'book', tone: 'success' });
+    }
+    if (allowBonusMode) {
+      list.push({ key: 'bonus', label: 'Thành tích / HĐ', icon: 'trophy', tone: 'accent' });
+    }
+    if (allowViolationMode) {
+      list.push({ key: 'violation', label: 'Vi phạm', icon: 'alert-circle', tone: 'danger' });
+    }
+    return list;
+  }, [allowStudyMode, allowBonusMode, allowViolationMode]);
+
   const switchRecordMode = (next: RecordMode) => {
-    if (!canSwitchModes || existing) return;
+    if (existing || next === recordMode) return;
     setRecordMode(next);
     setError(null);
     if (next === 'violation') {
@@ -372,35 +486,78 @@ export default function EntryFormScreen() {
       if (!violationCandidates.some((s) => s.id === owner)) {
         setOwner(violationCandidates[0]?.id ?? null);
       }
-    } else {
-      setKind((prev) => (prev === 'violation' ? 'activity' : prev));
-      setCategory((prev) => (prev === 'other' ? 'study' : prev));
-      const n = Number.parseInt(points, 10);
-      setPoints(String(Number.isFinite(n) && n > 0 ? n : 5));
-      if (!bonusCandidates.some((s) => s.id === owner)) {
-        setOwner(bonusCandidates[0]?.id ?? null);
+    } else if (next === 'study') {
+      setKind('study');
+      setCategory('study');
+      setLevel('class');
+      setPoints(String(Math.max(1, speechCount) * 2));
+      if (canRecordStudy) {
+        if (!studyCandidates.some((s) => s.id === owner)) {
+          setOwner(studyCandidates[0]?.id ?? null);
+        }
+      } else {
+        setOwner(currentStudent?.id ?? null);
       }
+    } else {
+      setKind((prev) => (prev === 'violation' || prev === 'study' ? 'achievement' : prev));
+      setCategory((prev) => (prev === 'study' || prev === 'other' ? 'academic' : prev));
+      const n = Number.parseInt(points, 10);
+      setPoints(String(Number.isFinite(n) && n > 0 ? n : suggestedPoints('school')));
+      if (canRecordBonus) {
+        if (!bonusCandidates.some((s) => s.id === owner)) {
+          setOwner(bonusCandidates[0]?.id ?? null);
+        }
+      } else {
+        setOwner(currentStudent?.id ?? null);
+      }
+    }
+  };
+
+  const changeSpeechCount = (nextCount: number) => {
+    const safe = Math.max(1, Math.min(20, nextCount));
+    setSpeechCount(safe);
+    if (!existing) {
+      setPoints(String(safe * 2));
     }
   };
 
   const changeLevel = (next: EntryLevel) => {
     setLevel(next);
-    if (!existing && !isViolationMode) setPoints(String(suggestedPoints(next)));
+    if (!existing && !isViolationMode && !isStudyMode) setPoints(String(suggestedPoints(next)));
   };
 
   const applyTemplate = (tpl: EntryTemplate) => {
     setTitle(tpl.title);
     setKind(tpl.kind);
-    setCategory(tpl.category);
+    setCategory(tpl.category === 'study' ? 'academic' : tpl.category);
     setLevel(tpl.level);
     setPoints(String(tpl.points));
     setError(null);
   };
 
+  const applyAcademicPreset = (preset: (typeof ACADEMIC_ACHIEVEMENT_PRESETS)[number]) => {
+    setTitle(preset.title);
+    setKind('achievement');
+    setCategory('academic');
+    setLevel(preset.level);
+    setPoints(String(preset.points));
+    setError(null);
+  };
+
+  const applyStudyPreset = (preset: (typeof STUDY_SPEECH_PRESETS)[number]) => {
+    setTitle(`${preset.title} — Môn ${effectiveStudySubject}`);
+    setKind('study');
+    setCategory('study');
+    setLevel('class');
+    setSpeechCount(preset.speechCount);
+    setPoints(String(preset.points));
+    setError(null);
+  };
+
   const applyBonusPreset = (preset: (typeof GROUP_BONUS_PRESETS)[number]) => {
     setTitle(preset.title);
-    setKind(preset.kind);
-    setCategory(preset.category);
+    setKind(preset.kind === 'study' ? 'activity' : preset.kind);
+    setCategory(preset.category === 'study' ? 'academic' : preset.category);
     setLevel('class');
     setPoints(String(Math.abs(preset.points)));
     setError(null);
@@ -426,17 +583,28 @@ export default function EntryFormScreen() {
     }
     if (!owner) {
       setError(
-        isStudentSelfOnly
+        !isOfficerModeForTarget
           ? 'Tài khoản của bạn chưa được GVCN liên kết với hồ sơ học sinh trong danh sách lớp.'
           : 'Hãy chọn học sinh',
       );
       return;
     }
-    if (!title.trim()) {
+    if (isStudyMode && !effectiveStudySubject.trim()) {
+      setError('Hãy chọn hoặc nhập tên môn học phát biểu');
+      return;
+    }
+
+    const effectiveTitle =
+      title.trim() ||
+      (isStudyMode
+        ? `Phát biểu môn ${effectiveStudySubject.trim()} (${speechCount} lượt)`
+        : '');
+
+    if (!effectiveTitle) {
       setError(
         isViolationMode
           ? 'Hãy nhập nội dung vi phạm / nhắc nhở'
-          : 'Hãy nhập tên thành tích / điểm cộng',
+          : 'Hãy nhập tên thành tích / hoạt động',
       );
       return;
     }
@@ -446,8 +614,17 @@ export default function EntryFormScreen() {
       return;
     }
     if (
+      isStudyMode &&
+      owner !== currentStudent?.id &&
+      !canRecordStudyForStudent(selectedTarget ?? { id: owner })
+    ) {
+      setError('Bạn không có quyền ghi nhận phát biểu cho học sinh này.');
+      return;
+    }
+    if (
       !isViolationMode &&
-      !isStudentSelfOnly &&
+      !isStudyMode &&
+      isOfficerModeForTarget &&
       owner !== currentStudent?.id &&
       !canRecordBonusForStudent(selectedTarget ?? { id: owner })
     ) {
@@ -461,20 +638,25 @@ export default function EntryFormScreen() {
       : Math.max(0, Number.isFinite(numeric) ? numeric : 0);
     const finalKind: EntryKind = isViolationMode
       ? 'violation'
-      : kind === 'violation'
-        ? 'activity'
-        : kind;
+      : isStudyMode
+        ? 'study'
+        : kind === 'violation' || kind === 'study'
+          ? 'achievement'
+          : kind;
+    const finalCategory: EntryCategory = isStudyMode ? 'study' : category;
 
     const data = {
       studentId: owner,
-      title,
+      title: effectiveTitle,
       kind: finalKind,
-      category,
-      level,
+      category: finalCategory,
+      level: isStudyMode ? ('class' as EntryLevel) : level,
       date,
       description,
       proofUrl,
       points: finalPoints,
+      subject: isStudyMode ? effectiveStudySubject.trim() : null,
+      speechCount: isStudyMode ? Math.max(1, Math.round(speechCount)) : undefined,
     };
 
     try {
@@ -485,16 +667,25 @@ export default function EntryFormScreen() {
         }
         showToast('Đã cập nhật ghi nhận!');
       } else {
-        await addEntry({ ...data, submittedBy: isOfficerRecorder ? 'teacher' : role });
+        await addEntry({
+          ...data,
+          submittedBy: isOfficerModeForTarget ? 'teacher' : role,
+        });
         decor.recordMissionProgress('submit_entry', 1);
         if (isViolationMode) {
           showToast(
             `Đã ghi nhận vi phạm (${finalPoints}đ) cho ${selectedTarget?.name ?? 'học sinh'}!`,
             'warning',
           );
-        } else if (isOfficerRecorder) {
+        } else if (isStudyMode) {
           showToast(
-            `Đã ghi điểm cộng (+${finalPoints}đ) cho ${selectedTarget?.name ?? 'học sinh'}! ⚡`,
+            isOfficerModeForTarget
+              ? `Đã ghi ${speechCount} lượt phát biểu môn ${effectiveStudySubject} (+${finalPoints}đ) cho ${selectedTarget?.name ?? 'học sinh'}! 📚`
+              : `Đã gửi ${speechCount} lượt phát biểu môn ${effectiveStudySubject} lên chờ GVCN duyệt!`,
+          );
+        } else if (isOfficerModeForTarget) {
+          showToast(
+            `Đã ghi thành tích / điểm cộng (+${finalPoints}đ) cho ${selectedTarget?.name ?? 'học sinh'}! ⚡`,
           );
         } else {
           showToast('Đã gửi lên chờ GVCN duyệt!');
@@ -518,33 +709,44 @@ export default function EntryFormScreen() {
     router.back();
   };
 
-  const authorityTitle = canSwitchModes
-    ? `Quyền ${isTeacher ? 'GVCN' : officerPositionLabel || 'Lớp trưởng'} · Điều phối & Ghi điểm / Vi phạm toàn lớp`
-    : isDisciplineVPOnly
-      ? `Quyền ${officerPositionLabel || 'Lớp phó kỷ luật'} · Ghi nhận học sinh vi phạm`
-      : isGroupLeaderOnly
-        ? `Quyền ${officerPositionLabel || 'Tổ trưởng'} · Ghi điểm cộng thành viên ${currentStudent?.group || 'trong Tổ'}`
-        : null;
+  const authorityTitle = !isOfficerModeForTarget
+    ? null
+    : isStudyMode
+      ? isGroupLeaderOnly
+        ? `Quyền ${officerPositionLabel || 'Tổ trưởng'} · Ghi phát biểu thành viên ${currentStudent?.group || 'trong Tổ'}`
+        : `Quyền ${isTeacher ? 'GVCN' : isSubjectTeacher ? `GV ${subjectName ?? 'Bộ môn'}` : officerPositionLabel || 'Ban cán sự'} · Ghi nhận phát biểu theo môn`
+      : isViolationMode
+        ? `Quyền ${isTeacher ? 'GVCN' : officerPositionLabel || 'Lớp phó kỷ luật'} · Ghi nhận học sinh vi phạm`
+        : isGroupLeaderOnly
+          ? `Quyền ${officerPositionLabel || 'Tổ trưởng'} · Ghi điểm cộng thành viên ${currentStudent?.group || 'trong Tổ'}`
+          : `Quyền ${isTeacher ? 'GVCN' : officerPositionLabel || 'Lớp trưởng'} · Điều phối & Ghi nhận toàn lớp`;
 
   const headerTitle = readOnly
     ? 'Chi tiết mục'
     : existing
       ? 'Sửa ghi nhận'
-      : isViolationMode
-        ? 'Ghi học sinh vi phạm'
-        : isGroupLeaderOnly
-          ? 'Ghi điểm cộng Tổ'
-          : 'Ghi điểm & Thành tích';
+      : isStudyMode
+        ? 'Ghi phát biểu theo môn'
+        : isViolationMode
+          ? 'Ghi học sinh vi phạm'
+          : isGroupLeaderOnly
+            ? 'Ghi điểm cộng Tổ'
+            : 'Ghi Thành tích & Hoạt động';
 
   const headerSubtitle = readOnly
     ? 'Chỉ xem — mục đã được xét duyệt'
-    : isStudentSelfOnly
+    : !isOfficerModeForTarget
       ? 'Sẽ gửi lên chờ GVCN duyệt'
-      : isViolationMode
-        ? 'Trừ điểm thi đua trực tiếp & lưu người ghi nhận'
-        : 'Ghi nhận trực tiếp vào bảng điểm học sinh';
+      : isStudyMode
+        ? 'Cập nhật ngay vào thống kê Tuần & Cộng dồn Học kỳ I'
+        : isViolationMode
+          ? 'Trừ điểm thi đua trực tiếp & lưu người ghi nhận'
+          : 'Tách riêng với Học tập · Hỗ trợ Thành tích Học thuật';
 
-  const bonusKinds = ENTRY_KIND_LIST.filter((k) => k !== 'violation');
+  const bonusKinds = ENTRY_KIND_LIST.filter((k) => k !== 'violation' && k !== 'study');
+  const displayCategoryList = isViolationMode
+    ? ENTRY_CATEGORY_LIST
+    : ACHIEVEMENT_CATEGORY_LIST;
 
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>
@@ -564,86 +766,205 @@ export default function EntryFormScreen() {
               style={[
                 styles.roleBanner,
                 {
-                  borderColor: isViolationMode ? theme.danger : theme.accent,
-                  backgroundColor: isViolationMode ? theme.dangerSoft : theme.accentSoft,
+                  borderColor: isViolationMode
+                    ? theme.danger
+                    : isStudyMode
+                      ? theme.success
+                      : theme.accent,
+                  backgroundColor: isViolationMode
+                    ? theme.dangerSoft
+                    : isStudyMode
+                      ? theme.successSoft
+                      : theme.accentSoft,
                 },
               ]}>
               <Ionicons
                 name={
                   isViolationMode
                     ? 'alert-circle'
-                    : isGroupLeaderOnly
-                      ? 'people-circle'
-                      : 'shield-checkmark'
+                    : isStudyMode
+                      ? 'book'
+                      : isGroupLeaderOnly
+                        ? 'people-circle'
+                        : 'shield-checkmark'
                 }
                 size={20}
-                color={isViolationMode ? theme.danger : theme.accent}
+                color={
+                  isViolationMode ? theme.danger : isStudyMode ? theme.success : theme.accent
+                }
               />
               <View style={styles.flex}>
                 <Text
                   style={[
                     styles.roleBannerTitle,
-                    { color: isViolationMode ? theme.danger : theme.accentText },
+                    {
+                      color: isViolationMode
+                        ? theme.danger
+                        : isStudyMode
+                          ? theme.success
+                          : theme.accentText,
+                    },
                   ]}>
                   {authorityTitle}
                 </Text>
                 <Text style={{ color: theme.textSecondary, fontSize: 11.5, lineHeight: 16 }}>
-                  {isGroupLeaderOnly
-                    ? 'Tổ trưởng chỉ chọn được học sinh trong đúng Tổ của mình và ghi điểm cộng trên lớp.'
-                    : isDisciplineVPOnly
-                      ? 'Lớp phó kỷ luật chọn học sinh vi phạm trong toàn lớp và ghi điểm trừ kỷ luật.'
-                      : 'Ghi nhận được duyệt tự động, đồng bộ ngay và gắn tên người ghi nhận rõ ràng.'}
+                  {isStudyMode
+                    ? 'Tách riêng Học tập (phát biểu theo từng môn) để tự động thống kê theo Tuần và cộng dồn cuối Học kỳ I.'
+                    : isGroupLeaderOnly
+                      ? 'Tổ trưởng chỉ chọn được học sinh trong đúng Tổ của mình và ghi điểm cộng trên lớp.'
+                      : isDisciplineVPOnly
+                        ? 'Lớp phó kỷ luật chọn học sinh vi phạm trong toàn lớp và ghi điểm trừ kỷ luật.'
+                        : 'Ghi nhận được duyệt tự động, đồng bộ ngay và gắn tên người ghi nhận rõ ràng.'}
                 </Text>
               </View>
             </Card>
           ) : null}
 
-          {/* Mode Toggle for Dual Authority (GVCN & Lớp trưởng) */}
-          {canSwitchModes && !existing ? (
+          {/* Mode Toggle Bar (Học tập · Phát biểu | Thành tích / HĐ | Vi phạm) */}
+          {availableModes.length > 1 && !existing ? (
             <View style={[styles.modeBar, { backgroundColor: theme.backgroundElement }]}>
-              <Pressable
-                onPress={() => switchRecordMode('bonus')}
-                style={[
-                  styles.modeBtn,
-                  !isViolationMode && { backgroundColor: theme.success },
-                ]}>
-                <Ionicons
-                  name="add-circle"
-                  size={16}
-                  color={!isViolationMode ? '#FFFFFF' : theme.textSecondary}
-                />
-                <Text
-                  style={[
-                    styles.modeBtnText,
-                    { color: !isViolationMode ? '#FFFFFF' : theme.textSecondary },
-                  ]}>
-                  + Ghi điểm cộng
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => switchRecordMode('violation')}
-                style={[
-                  styles.modeBtn,
-                  isViolationMode && { backgroundColor: theme.danger },
-                ]}>
-                <Ionicons
-                  name="alert-circle"
-                  size={16}
-                  color={isViolationMode ? '#FFFFFF' : theme.textSecondary}
-                />
-                <Text
-                  style={[
-                    styles.modeBtnText,
-                    { color: isViolationMode ? '#FFFFFF' : theme.textSecondary },
-                  ]}>
-                  - Ghi học sinh vi phạm
-                </Text>
-              </Pressable>
+              {availableModes.map((m) => {
+                const active = recordMode === m.key;
+                return (
+                  <Pressable
+                    key={m.key}
+                    onPress={() => switchRecordMode(m.key)}
+                    style={[
+                      styles.modeBtn,
+                      active && { backgroundColor: theme[m.tone] },
+                    ]}>
+                    <Ionicons
+                      name={m.icon}
+                      size={15}
+                      color={active ? '#FFFFFF' : theme.textSecondary}
+                    />
+                    <Text
+                      style={[
+                        styles.modeBtnText,
+                        { color: active ? '#FFFFFF' : theme.textSecondary },
+                      ]}
+                      numberOfLines={1}>
+                      {m.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
           ) : null}
 
-          {/* Quick Presets */}
-          {!existing ? (
+          {/* Study Mode Specific Controls: Subject Picker + Speech Count Stepper + Presets */}
+          {isStudyMode ? (
+            <Card style={styles.studentPickerCard}>
+              <View style={styles.studentPickerHead}>
+                <Text style={[styles.presetLabel, { color: theme.success }]}>
+                  Môn học phát biểu
+                </Text>
+                <Badge
+                  label={`Môn: ${effectiveStudySubject}`}
+                  color={'success'}
+                  soft={'successSoft'}
+                  icon={'book'}
+                />
+              </View>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.presetRow}>
+                {STUDY_SUBJECT_PRESETS.map((sub) => (
+                  <Chip
+                    key={sub}
+                    label={sub}
+                    selected={!customStudySubject.trim() && studySubject === sub}
+                    onPress={() => {
+                      setStudySubject(sub);
+                      setCustomStudySubject('');
+                    }}
+                  />
+                ))}
+              </ScrollView>
+              <TextField
+                icon={'create-outline'}
+                placeholder={'Hoặc nhập môn / chuyên đề khác (tuỳ chọn)...'}
+                value={customStudySubject}
+                onChangeText={setCustomStudySubject}
+                clearable
+              />
+
+              {/* Speech Count Stepper */}
+              <View style={styles.stepperWrap}>
+                <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>
+                  Số lượt phát biểu
+                </Text>
+                <View style={styles.stepperRow}>
+                  <Pressable
+                    onPress={() => changeSpeechCount(speechCount - 1)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Giảm số lượt phát biểu"
+                    style={[styles.stepBtn, { backgroundColor: theme.backgroundElement }]}>
+                    <Ionicons name="remove" size={18} color={theme.text} />
+                  </Pressable>
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <Pressable
+                      key={n}
+                      onPress={() => changeSpeechCount(n)}
+                      style={[
+                        styles.stepPill,
+                        {
+                          backgroundColor:
+                            speechCount === n ? theme.success : theme.backgroundElement,
+                          borderColor: speechCount === n ? theme.success : theme.border,
+                        },
+                      ]}>
+                      <Text
+                        style={[
+                          styles.stepPillText,
+                          { color: speechCount === n ? '#FFFFFF' : theme.text },
+                        ]}>
+                        {n === 5 && speechCount > 5 ? `${speechCount}` : `${n}`}
+                      </Text>
+                    </Pressable>
+                  ))}
+                  <Pressable
+                    onPress={() => changeSpeechCount(speechCount + 1)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Tăng số lượt phát biểu"
+                    style={[styles.stepBtn, { backgroundColor: theme.backgroundElement }]}>
+                    <Ionicons name="add" size={18} color={theme.text} />
+                  </Pressable>
+                </View>
+              </View>
+
+              {!existing ? (
+                <View style={styles.presetWrap}>
+                  <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>
+                    Chọn nhanh mẫu phát biểu
+                  </Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.presetRow}>
+                    {STUDY_SPEECH_PRESETS.map((preset) => (
+                      <Pressable
+                        key={preset.title}
+                        onPress={() => applyStudyPreset(preset)}
+                        style={({ pressed }) => [
+                          styles.presetChip,
+                          { backgroundColor: theme.successSoft, borderColor: theme.success },
+                          pressed && styles.pressed,
+                        ]}>
+                        <Text style={[styles.presetText, { color: theme.success }]}>
+                          {`${preset.title} (+${preset.points}đ)`}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+              ) : null}
+            </Card>
+          ) : null}
+
+          {/* Quick Presets for Violation or Bonus/Academic Achievement */}
+          {!existing && !isStudyMode ? (
             isViolationMode ? (
               <View style={styles.presetWrap}>
                 <Text style={[styles.presetLabel, { color: theme.danger }]}>
@@ -672,14 +993,32 @@ export default function EntryFormScreen() {
             ) : (
               <View style={styles.presetWrap}>
                 <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>
-                  {isGroupLeaderOnly
-                    ? 'Chọn nhanh điểm cộng trên lớp cho thành viên Tổ'
-                    : 'Chọn nhanh mẫu điểm cộng / thành tích'}
+                  {category === 'academic'
+                    ? '🎓 Chọn nhanh mẫu Thành tích Học thuật'
+                    : isGroupLeaderOnly
+                      ? 'Chọn nhanh điểm cộng trên lớp cho thành viên Tổ'
+                      : 'Chọn nhanh mẫu thành tích / hoạt động'}
                 </Text>
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.presetRow}>
+                  {category === 'academic'
+                    ? ACADEMIC_ACHIEVEMENT_PRESETS.map((preset) => (
+                        <Pressable
+                          key={preset.title}
+                          onPress={() => applyAcademicPreset(preset)}
+                          style={({ pressed }) => [
+                            styles.presetChip,
+                            { backgroundColor: theme.goldSoft, borderColor: theme.gold },
+                            pressed && styles.pressed,
+                          ]}>
+                          <Text style={[styles.presetText, { color: theme.gold }]}>
+                            {`${preset.title} (+${preset.points}đ)`}
+                          </Text>
+                        </Pressable>
+                      ))
+                    : null}
                   {GROUP_BONUS_PRESETS.map((preset) => (
                     <Pressable
                       key={preset.title}
@@ -715,8 +1054,8 @@ export default function EntryFormScreen() {
             )
           ) : null}
 
-          {/* Officer / Teacher Student Picker (with Search & Group Filter for whole-class pickers) */}
-          {isOfficerRecorder ? (
+          {/* Officer / Teacher Student Picker */}
+          {isOfficerModeForTarget ? (
             <Card style={styles.studentPickerCard}>
               <View style={styles.studentPickerHead}>
                 <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>
@@ -731,8 +1070,10 @@ export default function EntryFormScreen() {
                         ? `${selectedTarget.name} · ${selectedTarget.group}`
                         : selectedTarget.name
                     }
-                    color={isViolationMode ? 'danger' : 'accentText'}
-                    soft={isViolationMode ? 'dangerSoft' : 'accentSoft'}
+                    color={isViolationMode ? 'danger' : isStudyMode ? 'success' : 'accentText'}
+                    soft={
+                      isViolationMode ? 'dangerSoft' : isStudyMode ? 'successSoft' : 'accentSoft'
+                    }
                     icon={'person-circle-outline'}
                   />
                 ) : null}
@@ -764,8 +1105,8 @@ export default function EntryFormScreen() {
 
               {isGroupLeaderMissingGroup ? (
                 <Text style={{ color: theme.warning, fontSize: 12.5, lineHeight: 18, fontWeight: '700' }}>
-                  Bạn chưa được GVCN phân vào Tổ nên chưa thể ghi điểm cộng cho thành viên Tổ. Hãy
-                  báo GVCN cập nhật Tổ cho hồ sơ của bạn.
+                  Bạn chưa được GVCN phân vào Tổ nên chưa thể ghi điểm cho thành viên Tổ. Hãy báo
+                  GVCN cập nhật Tổ cho hồ sơ của bạn.
                 </Text>
               ) : filteredCandidates.length === 0 ? (
                 <Text style={{ color: theme.textMuted, fontSize: 12.5 }}>
@@ -791,7 +1132,7 @@ export default function EntryFormScreen() {
             </Card>
           ) : null}
 
-          {/* Entry Kind (locked to Violation in violation mode, otherwise Achievement/Activity) */}
+          {/* Entry Kind */}
           {isViolationMode ? (
             <View style={styles.lockedKindRow}>
               <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>Phân loại</Text>
@@ -802,6 +1143,16 @@ export default function EntryFormScreen() {
                 icon={'alert-circle'}
               />
             </View>
+          ) : isStudyMode ? (
+            <View style={styles.lockedKindRow}>
+              <Text style={[styles.presetLabel, { color: theme.textSecondary }]}>Phân loại</Text>
+              <Badge
+                label={`Học tập · Phát biểu (${speechCount} lượt)`}
+                color={'success'}
+                soft={'successSoft'}
+                icon={'book'}
+              />
+            </View>
           ) : (
             <OptionPicker
               label={'Loại'}
@@ -810,48 +1161,63 @@ export default function EntryFormScreen() {
                 label: ENTRY_KINDS[k].label,
                 icon: ENTRY_KINDS[k].icon,
               }))}
-              value={kind === 'violation' ? 'activity' : kind}
+              value={kind === 'violation' || kind === 'study' ? 'achievement' : kind}
               onChange={setKind}
             />
           )}
 
           <TextField
             label={
-              isViolationMode
-                ? 'Nội dung vi phạm / nhắc nhở'
-                : isGroupLeaderOnly
-                  ? 'Nội dung điểm cộng trên lớp'
-                  : 'Tên thành tích / hoạt động'
+              isStudyMode
+                ? 'Nội dung phát biểu (để trống sẽ tự điền theo môn & số lượt)'
+                : isViolationMode
+                  ? 'Nội dung vi phạm / nhắc nhở'
+                  : isGroupLeaderOnly
+                    ? 'Nội dung điểm cộng trên lớp'
+                    : 'Tên thành tích / hoạt động'
             }
-            icon={isViolationMode ? 'alert-circle-outline' : 'trophy-outline'}
+            icon={
+              isStudyMode
+                ? 'book-outline'
+                : isViolationMode
+                  ? 'alert-circle-outline'
+                  : 'trophy-outline'
+            }
             value={title}
             onChangeText={(v) => {
               setTitle(v);
               setError(null);
             }}
             placeholder={
-              isViolationMode
-                ? 'Ví dụ: Đi học muộn, nói chuyện riêng trong giờ...'
-                : isGroupLeaderOnly
-                  ? 'Ví dụ: Xung phong phát biểu xây dựng bài'
-                  : 'Giải Nhất Olympic Toán cấp trường'
+              isStudyMode
+                ? `VD: Phát biểu xây dựng bài môn ${effectiveStudySubject}`
+                : isViolationMode
+                  ? 'Ví dụ: Đi học muộn, nói chuyện riêng trong giờ...'
+                  : category === 'academic'
+                    ? 'Ví dụ: Giải Nhất HSG Toán cấp Trường / IELTS 7.5'
+                    : 'Ví dụ: Tham gia thiện nguyện / CLB văn nghệ'
             }
             error={error}
           />
 
-          <OptionPicker
-            label={'Lĩnh vực'}
-            columns={3}
-            options={ENTRY_CATEGORY_LIST.map((c) => ({
-              value: c,
-              label: ENTRY_CATEGORIES[c].label,
-              icon: ENTRY_CATEGORIES[c].icon,
-            }))}
-            value={category}
-            onChange={setCategory}
-          />
+          {/* Category picker (hidden for Study mode since category is locked to 'study') */}
+          {!isStudyMode ? (
+            <OptionPicker
+              label={
+                isViolationMode ? 'Lĩnh vực' : 'Lĩnh vực Thành tích (có Thành tích Học thuật)'
+              }
+              columns={3}
+              options={displayCategoryList.map((c) => ({
+                value: c,
+                label: ENTRY_CATEGORIES[c].label,
+                icon: ENTRY_CATEGORIES[c].icon,
+              }))}
+              value={displayCategoryList.includes(category) ? category : displayCategoryList[0]}
+              onChange={setCategory}
+            />
+          ) : null}
 
-          {!isViolationMode ? (
+          {!isViolationMode && !isStudyMode ? (
             <OptionPicker
               label={'Cấp độ'}
               columns={3}
@@ -864,7 +1230,13 @@ export default function EntryFormScreen() {
           <DatePickerField label={'Ngày diễn ra'} value={date} onChange={setDate} />
 
           <TextField
-            label={isViolationMode ? 'Điểm trừ kỷ luật (số âm)' : 'Điểm thi đua (+)'}
+            label={
+              isViolationMode
+                ? 'Điểm trừ kỷ luật (số âm)'
+                : isStudyMode
+                  ? 'Điểm học tập (+)'
+                  : 'Điểm thi đua (+)'
+            }
             icon={isViolationMode ? 'remove-circle-outline' : 'ribbon-outline'}
             value={points}
             onChangeText={setPoints}
@@ -872,9 +1244,11 @@ export default function EntryFormScreen() {
             hint={
               isViolationMode
                 ? 'Tự động lưu dưới dạng điểm trừ (ví dụ -5đ) và hiển thị rõ trên nhật ký lớp.'
-                : isGroupLeader || isDisciplineVP || isClassMonitor
-                  ? 'Điểm cộng do Ban cán sự ghi nhận sẽ cập nhật ngay vào bảng điểm.'
-                  : 'Gợi ý theo cấp độ, giáo viên có thể điều chỉnh khi duyệt.'
+                : isStudyMode
+                  ? 'Mặc định +2đ mỗi lượt phát biểu, cộng dồn vào thống kê Tuần & Học kỳ I.'
+                  : isGroupLeader || isDisciplineVP || isClassMonitor
+                    ? 'Điểm cộng do Ban cán sự ghi nhận sẽ cập nhật ngay vào bảng điểm.'
+                    : 'Gợi ý theo cấp độ, giáo viên có thể điều chỉnh khi duyệt.'
             }
           />
 
@@ -969,14 +1343,20 @@ export default function EntryFormScreen() {
               label={
                 existing
                   ? 'Lưu thay đổi'
-                  : isViolationMode
-                    ? 'Ghi nhận vi phạm'
-                    : isOfficerRecorder
-                      ? 'Lưu điểm cộng ngay'
-                      : 'Gửi lên'
+                  : isStudyMode
+                    ? isOfficerModeForTarget
+                      ? `Lưu ${speechCount} lượt phát biểu ngay`
+                      : 'Gửi lượt phát biểu lên GVCN'
+                    : isViolationMode
+                      ? 'Ghi nhận vi phạm'
+                      : isOfficerModeForTarget
+                        ? 'Lưu thành tích / điểm cộng'
+                        : 'Gửi lên'
               }
               variant={isViolationMode ? 'danger' : 'primary'}
-              icon={isViolationMode ? 'alert-circle' : 'checkmark-circle'}
+              icon={
+                isViolationMode ? 'alert-circle' : isStudyMode ? 'book' : 'checkmark-circle'
+              }
               onPress={save}
             />
           ) : null}
@@ -1023,12 +1403,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
     paddingVertical: 10,
-    paddingHorizontal: 10,
+    paddingHorizontal: 6,
     borderRadius: Radius.pill,
   },
-  modeBtnText: { fontSize: 13, fontWeight: '900' },
+  modeBtnText: { fontSize: 11.5, fontWeight: '900' },
   studentPickerCard: { gap: Spacing.two + 2 },
   studentPickerHead: {
     flexDirection: 'row',
@@ -1037,6 +1417,24 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 6,
   },
+  stepperWrap: { gap: Spacing.one + 2 },
+  stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  stepBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: Radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepPill: {
+    flex: 1,
+    height: 38,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepPillText: { fontSize: 14, fontWeight: '900' },
   wrapChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   lockedKindRow: {
     flexDirection: 'row',

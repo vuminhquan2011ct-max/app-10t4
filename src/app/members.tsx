@@ -7,6 +7,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { OfficerPositionEditor } from '@/components/officer-position-editor';
 import { PageHeader } from '@/components/page-header';
 import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -23,7 +24,12 @@ import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
 import { MEMBER_ROLES, MEMBER_STATUSES } from '@/constants/utilities-meta';
 import { useTheme } from '@/hooks/use-theme';
 import { stripVietnamese } from '@/lib/intelligence';
-import { OFFICER_POSITIONS, getOfficerPositionMeta } from '@/lib/officer-roles';
+import {
+  formatPositionsDisplay,
+  getOfficerPositionMeta,
+  normalizePositionsList,
+  type CustomOfficerGrantKey,
+} from '@/lib/officer-roles';
 import {
   MIN_STUDENT_PASSWORD_LENGTH,
   loadStudentAccounts,
@@ -58,7 +64,10 @@ export default function MembersScreen() {
     activityLog,
     statsOfStudent,
     updateStudent,
-    assignStudentPosition,
+    customPositionPresets,
+    assignStudentPositions,
+    addCustomPositionPreset,
+    removeCustomPositionPreset,
     logActivity,
     pullNow,
   } = useClassStore();
@@ -176,26 +185,29 @@ export default function MembersScreen() {
     return [...students]
       .filter((s) => {
         if (!q) return true;
-        return stripVietnamese(`${s.name} ${s.code} ${s.group ?? ''} ${s.position ?? ''}`).includes(q);
+        const posJoined = normalizePositionsList(s.positions, s.position).join(' ');
+        return stripVietnamese(`${s.name} ${s.code} ${s.group ?? ''} ${posJoined}`).includes(q);
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.code.localeCompare(b.code, 'vi'));
   }, [students, accountQuery]);
 
-  const handleAssignPosition = async (
+  const handleAssignPositions = async (
     studentId: string,
     studentName: string,
-    nextPosition: string | null,
+    nextPositions: string[],
+    nextCustomPermissions: CustomOfficerGrantKey[],
   ) => {
     if (!canAssignPositions || savingPositionId) return;
     setSavingPositionId(studentId);
     try {
-      await assignStudentPosition(studentId, nextPosition);
+      await assignStudentPositions(studentId, nextPositions, nextCustomPermissions);
       await refreshAccounts();
+      const display = formatPositionsDisplay(nextPositions);
       showToast(
-        nextPosition
-          ? `Đã phân công ${studentName} giữ chức vụ ${nextPosition}!`
-          : `Đã hủy chức vụ của ${studentName} (về thành viên thường)`,
-        nextPosition ? 'success' : 'info',
+        display
+          ? `Đã cập nhật chức vụ của ${studentName}: ${display}!`
+          : `Đã hủy tất cả chức vụ của ${studentName} (về thành viên thường)`,
+        display ? 'success' : 'info',
       );
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Không thể cập nhật chức vụ', 'danger');
@@ -646,7 +658,7 @@ export default function MembersScreen() {
                   const stats = statsOfStudent(stu.id);
                   const isResetting = resetTargetId === stu.id;
                   const isEditingPos = positionTargetId === stu.id;
-                  const posMeta = getOfficerPositionMeta(stu.position);
+                  const studentPositions = normalizePositionsList(stu.positions, stu.position);
                   const isSavingPos = savingPositionId === stu.id;
 
                   return (
@@ -666,16 +678,18 @@ export default function MembersScreen() {
                               ].join(' · ')}
                             </Text>
                             <View style={styles.badgeRow}>
-                              {stu.position?.trim() ? (
-                                <Badge
-                                  label={stu.position.trim()}
-                                  color={posMeta?.color ?? 'purple'}
-                                  soft={posMeta ? softToneOf(posMeta.color) : 'purpleSoft'}
-                                  icon={
-                                    (posMeta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap
-                                  }
-                                />
-                              ) : null}
+                              {studentPositions.map((posTitle) => {
+                                const meta = getOfficerPositionMeta(posTitle);
+                                return (
+                                  <Badge
+                                    key={posTitle}
+                                    label={posTitle}
+                                    color={meta?.color ?? 'purple'}
+                                    soft={meta ? softToneOf(meta.color) : 'purpleSoft'}
+                                    icon={(meta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap}
+                                  />
+                                );
+                              })}
                               <Badge
                                 label={acc ? 'Đã đặt mật khẩu 🔐' : 'Chưa đặt mật khẩu'}
                                 color={acc ? 'success' : 'warning'}
@@ -683,13 +697,6 @@ export default function MembersScreen() {
                                 icon={acc ? 'key' : 'alert-circle-outline'}
                               />
                             </View>
-                            {posMeta ? (
-                              <Text
-                                style={{ color: theme.textMuted, fontSize: 11, marginTop: 4 }}
-                                numberOfLines={2}>
-                                {posMeta.summary}
-                              </Text>
-                            ) : null}
                           </View>
                         </View>
 
@@ -725,40 +732,37 @@ export default function MembersScreen() {
                         ) : isEditingPos && canAssignPositions ? (
                           <View style={[styles.panel, { borderColor: theme.border }]}>
                             <Text style={[styles.subLabel, { color: theme.textSecondary }]}>
-                              Phân công / Đổi chức vụ Ban cán sự (Chỉ GVCN)
+                              Đa chức vụ & Chức vụ tự ghi (Chỉ GVCN)
                             </Text>
-                            <View style={styles.wrapChips}>
-                              {OFFICER_POSITIONS.map((opt) => (
-                                <Chip
-                                  key={opt.key}
-                                  label={opt.label}
-                                  icon={opt.icon as keyof typeof Ionicons.glyphMap}
-                                  selected={stu.position === opt.label}
-                                  onPress={() => void handleAssignPosition(stu.id, stu.name, opt.label)}
-                                />
-                              ))}
-                            </View>
-                            {posMeta ? (
-                              <Text style={{ color: theme.textSecondary, fontSize: 11.5, lineHeight: 17 }}>
-                                {`Quyền hạn hiện tại: ${posMeta.permissions.join(' · ')}`}
-                              </Text>
-                            ) : null}
+                            <OfficerPositionEditor
+                              compact
+                              positions={studentPositions}
+                              customPermissions={stu.customPermissions ?? []}
+                              customPresets={customPositionPresets}
+                              disabled={isSavingPos}
+                              onChange={(nextPositions, nextCustomPermissions) => {
+                                void handleAssignPositions(
+                                  stu.id,
+                                  stu.name,
+                                  nextPositions,
+                                  nextCustomPermissions,
+                                );
+                              }}
+                              onSaveCustomPreset={(preset) => {
+                                addCustomPositionPreset(preset);
+                                showToast(`Đã lưu “${preset}” vào mẫu chức vụ lớp!`, 'info');
+                              }}
+                              onRemoveCustomPreset={(preset) => {
+                                removeCustomPositionPreset(preset);
+                                showToast(`Đã xoá mẫu “${preset}”`, 'info');
+                              }}
+                            />
                             <View style={styles.quickRow}>
-                              {stu.position?.trim() ? (
-                                <Button
-                                  label={isSavingPos ? 'Đang lưu...' : 'Hủy chức vụ'}
-                                  variant={'danger'}
-                                  size={'sm'}
-                                  icon={'close-circle-outline'}
-                                  disabled={isSavingPos}
-                                  style={styles.flex}
-                                  onPress={() => void handleAssignPosition(stu.id, stu.name, null)}
-                                />
-                              ) : null}
                               <Button
                                 label={'Đóng'}
                                 variant={'ghost'}
                                 size={'sm'}
+                                style={styles.flex}
                                 onPress={() => setPositionTargetId(null)}
                               />
                             </View>
@@ -767,7 +771,11 @@ export default function MembersScreen() {
                           <View style={styles.quickRow}>
                             {canAssignPositions ? (
                               <Button
-                                label={stu.position?.trim() ? 'Đổi chức vụ' : 'Phân công'}
+                                label={
+                                  studentPositions.length > 0
+                                    ? `Chức vụ (${studentPositions.length})`
+                                    : 'Phân công'
+                                }
                                 variant={'soft'}
                                 size={'sm'}
                                 icon={'shield-checkmark-outline'}
@@ -1016,50 +1024,38 @@ export default function MembersScreen() {
                           ))}
                         </ScrollView>
 
-                        {/* Officer Position Assignment & Revocation for Linked Student (GVCN Only) */}
+                        {/* Officer Multi-Position & Custom Position Editor for Linked Student (GVCN Only) */}
                         {canAssignPositions && linkedStudent ? (
                           <>
                             <Text style={[styles.subLabel, { color: theme.textSecondary }]}>
-                              {'Chức vụ Ban cán sự (Chỉ GVCN): ' +
-                                (linkedStudent.position?.trim() || 'Thành viên thường')}
+                              Đa chức vụ & Chức vụ tự ghi (Chỉ GVCN)
                             </Text>
-                            <View style={styles.wrapChips}>
-                              {OFFICER_POSITIONS.map((opt) => (
-                                <Chip
-                                  key={opt.key}
-                                  label={opt.label}
-                                  icon={opt.icon as keyof typeof Ionicons.glyphMap}
-                                  selected={linkedStudent.position === opt.label}
-                                  onPress={() =>
-                                    void handleAssignPosition(
-                                      linkedStudent.id,
-                                      linkedStudent.name,
-                                      opt.label,
-                                    )
-                                  }
-                                />
-                              ))}
-                            </View>
-                            {linkedStudent.position?.trim() ? (
-                              <Button
-                                label={
-                                  savingPositionId === linkedStudent.id
-                                    ? 'Đang lưu...'
-                                    : 'Hủy chức vụ (Về thành viên thường)'
-                                }
-                                size={'sm'}
-                                variant={'danger'}
-                                icon={'close-circle-outline'}
-                                disabled={savingPositionId === linkedStudent.id}
-                                onPress={() =>
-                                  void handleAssignPosition(
-                                    linkedStudent.id,
-                                    linkedStudent.name,
-                                    null,
-                                  )
-                                }
-                              />
-                            ) : null}
+                            <OfficerPositionEditor
+                              compact
+                              positions={normalizePositionsList(
+                                linkedStudent.positions,
+                                linkedStudent.position,
+                              )}
+                              customPermissions={linkedStudent.customPermissions ?? []}
+                              customPresets={customPositionPresets}
+                              disabled={savingPositionId === linkedStudent.id}
+                              onChange={(nextPositions, nextCustomPermissions) => {
+                                void handleAssignPositions(
+                                  linkedStudent.id,
+                                  linkedStudent.name,
+                                  nextPositions,
+                                  nextCustomPermissions,
+                                );
+                              }}
+                              onSaveCustomPreset={(preset) => {
+                                addCustomPositionPreset(preset);
+                                showToast(`Đã lưu “${preset}” vào mẫu chức vụ lớp!`, 'info');
+                              }}
+                              onRemoveCustomPreset={(preset) => {
+                                removeCustomPositionPreset(preset);
+                                showToast(`Đã xoá mẫu “${preset}”`, 'info');
+                              }}
+                            />
                           </>
                         ) : null}
 

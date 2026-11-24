@@ -62,6 +62,7 @@ export default function ToolsScreen() {
     resources,
     seating,
     attendanceOfDate,
+    getStudyParticipationReport,
     pullNow,
   } = store;
   const theme = useTheme();
@@ -73,6 +74,7 @@ export default function ToolsScreen() {
 
   const health = useMemo(() => computeClassHealth(store), [store]);
   const livePeriod = useMemo(() => getLivePeriodStatus(schedule), [schedule]);
+  const studyReport = getStudyParticipationReport();
 
   const today = todayIso();
   const todayAtt = attendanceOfDate(today);
@@ -164,6 +166,16 @@ export default function ToolsScreen() {
   ];
 
   const learningTools: ToolCardItem[] = [
+    {
+      title: 'Học tập & Phát biểu Môn',
+      desc: 'Ghi nhận 1 chạm phát biểu theo từng môn, thống kê Tuần & Cộng dồn cuối Học kỳ I',
+      kpi: `Tuần: ${studyReport.weekly.totalSpeeches} · HK I: ${studyReport.semester1.totalSpeeches} lượt`,
+      icon: 'book',
+      color: 'success',
+      soft: 'successSoft',
+      route: '/study',
+      tag: 'MỚI',
+    },
     {
       title: 'Kho Ảnh & File Drive',
       desc: 'Học sinh & Thầy Cô cùng tải ảnh, video, tài liệu (GB) thẳng lên Google Drive K8T4_app',

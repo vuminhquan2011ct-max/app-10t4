@@ -6,6 +6,7 @@ import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-na
 
 import { CategoryBars } from '@/components/charts/category-bars';
 import { EntryCard } from '@/components/entry-card';
+import { OfficerPositionEditor } from '@/components/officer-position-editor';
 import { PageHeader } from '@/components/page-header';
 import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -25,7 +26,11 @@ import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { badgesForStudent } from '@/lib/badges';
 import { ageOf, formatDate } from '@/lib/date';
 import { buildStudentReportCard, shareOrCopyText } from '@/lib/export';
-import { OFFICER_POSITIONS, getOfficerPositionMeta } from '@/lib/officer-roles';
+import {
+  formatPositionsDisplay,
+  normalizePositionsList,
+  type CustomOfficerGrantKey,
+} from '@/lib/officer-roles';
 import { buildCategoryStats } from '@/lib/stats';
 import { useClassStore } from '@/store/class-store';
 
@@ -41,7 +46,11 @@ export default function StudentDetailScreen() {
     kudosOfStudent,
     seatOfStudent,
     quickReward,
-    assignStudentPosition,
+    assignStudentPositions,
+    customPositionPresets,
+    addCustomPositionPreset,
+    removeCustomPositionPreset,
+    getStudyParticipationReport,
     saveStudentPrivate,
     canAssignPositions,
     canEditClass,
@@ -97,6 +106,12 @@ export default function StudentDetailScreen() {
   const age = ageOf(student.birthDate);
   const honours = badgesForStudent(entries, stats, att, rank ?? undefined);
   const catStats = buildCategoryStats(entries);
+  const studentPositions = normalizePositionsList(student.positions, student.position);
+  const studyReport = getStudyParticipationReport();
+  const studyRow = studyReport.studentRows.find((r) => r.studentId === student.id) ?? null;
+  const studySubjectPills = Object.entries(studyRow?.bySubject ?? {})
+    .filter(([, cnt]) => cnt > 0)
+    .sort((a, b) => b[1] - a[1]);
 
   const canSeePrivate = canViewPrivateOf(student.id);
   const isOwnProfile = currentStudentId !== null && currentStudentId === student.id;
@@ -123,18 +138,20 @@ export default function StudentDetailScreen() {
     }
   };
 
-  const activePositionMeta = getOfficerPositionMeta(student.position);
-
-  const handleAssignPosition = async (nextPos: string | null) => {
+  const handleUpdatePositions = async (
+    nextPositions: string[],
+    nextCustomPermissions: CustomOfficerGrantKey[],
+  ) => {
     if (!canAssignPositions || updatingPosition) return;
     setUpdatingPosition(true);
     try {
-      await assignStudentPosition(student.id, nextPos);
+      await assignStudentPositions(student.id, nextPositions, nextCustomPermissions);
+      const display = formatPositionsDisplay(nextPositions);
       showToast(
-        nextPos
-          ? `Đã phân công ${student.name} làm ${nextPos}! ⭐`
-          : `Đã hủy chức vụ của ${student.name} (về thành viên thường)`,
-        nextPos ? 'success' : 'info',
+        display
+          ? `Đã cập nhật chức vụ của ${student.name}: ${display}! ⭐`
+          : `Đã hủy tất cả chức vụ của ${student.name} (về thành viên thường)`,
+        display ? 'success' : 'info',
       );
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Không thể cập nhật chức vụ', 'danger');
@@ -186,11 +203,18 @@ export default function StudentDetailScreen() {
           <Avatar name={student.name} size={88} ring />
           <Text style={styles.name}>{student.name}</Text>
           <View style={styles.tags}>
-            {[`ID: ${student.code}`, student.position?.trim(), student.group, seat?.label].filter(Boolean).map((tag) => (
-              <View key={tag} style={styles.tag}>
-                <Text style={styles.tagText}>{tag}</Text>
-              </View>
-            ))}
+            {[
+              `ID: ${student.code}`,
+              ...studentPositions,
+              student.group,
+              seat?.label,
+            ]
+              .filter(Boolean)
+              .map((tag, idx) => (
+                <View key={`${tag}-${idx}`} style={styles.tag}>
+                  <Text style={styles.tagText}>{tag}</Text>
+                </View>
+              ))}
           </View>
           <Text style={styles.birth}>
             {student.birthDate
@@ -321,10 +345,26 @@ export default function StudentDetailScreen() {
       {/* Metrics */}
       <FadeIn index={3} style={styles.grid}>
         <StatCard label={'Điểm thi đua'} value={stats.points} icon={'ribbon'} tone={'success'} />
-        <StatCard label={'Thành tích'} value={stats.achievements} icon={'trophy'} tone={'accent'} />
+        <StatCard
+          label={'Thành tích'}
+          value={stats.achievements}
+          icon={'trophy'}
+          tone={'accent'}
+          hint={
+            stats.academicAchievements > 0
+              ? `🎓 ${stats.academicAchievements} học thuật`
+              : undefined
+          }
+        />
       </FadeIn>
       <FadeIn index={4} style={styles.grid}>
-        <StatCard label={'Hoạt động'} value={stats.activities} icon={'sparkles'} tone={'purple'} />
+        <StatCard
+          label={'Phát biểu HK I'}
+          value={`${studyRow?.hk1Speeches ?? stats.studySpeeches} lượt`}
+          icon={'book'}
+          tone={'purple'}
+          hint={`Tuần này: ${studyRow?.weeklySpeeches ?? 0} lượt · +${studyRow?.hk1Points ?? stats.studyPoints}đ`}
+        />
         <StatCard
           label={'Điểm chuyên cần'}
           value={
@@ -349,7 +389,55 @@ export default function StudentDetailScreen() {
         />
       </FadeIn>
 
-      {/* GVCN-Only Class Officer Position Assignment & Revocation Card */}
+      {/* Study Participation (Weekly & Cumulative HK I) Summary Card */}
+      <FadeIn index={4}>
+        <Card style={[styles.honourCard, { borderColor: `${theme.success}55`, borderWidth: 1.2 }]}>
+          <View style={styles.privHead}>
+            <View style={[styles.privIcon, { backgroundColor: theme.successSoft }]}>
+              <Ionicons name="book" size={16} color={theme.success} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={[styles.cardLabel, { color: theme.text }]}>
+                Học tập & Phát biểu theo môn (Tuần & Cộng dồn HK I)
+              </Text>
+              <Text style={{ color: theme.textMuted, fontSize: 11.5 }}>
+                {`Tuần này: ${studyRow?.weeklySpeeches ?? 0} lượt · Cộng dồn ${studyReport.semester1.label}: ${studyRow?.hk1Speeches ?? stats.studySpeeches} lượt (+${studyRow?.hk1Points ?? stats.studyPoints}đ)`}
+              </Text>
+            </View>
+            <Pressable onPress={() => router.push('/study' as never)} hitSlop={8}>
+              <Text style={{ color: theme.success, fontSize: 12, fontWeight: '800' }}>
+                Chi tiết →
+              </Text>
+            </Pressable>
+          </View>
+          <View style={styles.honourList}>
+            <Badge
+              label={`🎓 ${stats.academicAchievements} Thành tích Học thuật`}
+              color={'gold'}
+              soft={'goldSoft'}
+              icon={'school'}
+            />
+            {studyRow?.topSubject ? (
+              <Badge
+                label={`Môn mạnh nhất: ${studyRow.topSubject}`}
+                color={'accentText'}
+                soft={'accentSoft'}
+                icon={'star'}
+              />
+            ) : null}
+            {studySubjectPills.map(([sub, cnt]) => (
+              <Badge
+                key={sub}
+                label={`${sub}: ${cnt} lượt`}
+                color={'success'}
+                soft={'successSoft'}
+              />
+            ))}
+          </View>
+        </Card>
+      </FadeIn>
+
+      {/* GVCN-Only Multi-Position & Custom Officer Assignment Card */}
       {canAssignPositions ? (
         <FadeIn index={5}>
           <Card style={[styles.honourCard, { borderColor: `${theme.accent}44`, borderWidth: 1.2 }]}>
@@ -359,81 +447,33 @@ export default function StudentDetailScreen() {
               </View>
               <View style={styles.flex}>
                 <Text style={[styles.cardLabel, { color: theme.text }]}>
-                  Phân công & Hủy Chức vụ Ban cán sự (Quyền GVCN)
+                  Phân công Đa chức vụ & Chức vụ tự ghi (Quyền GVCN)
                 </Text>
                 <Text style={{ color: theme.textMuted, fontSize: 11.5 }}>
-                  {student.position?.trim()
-                    ? `Đang giữ chức vụ: ${student.position.trim()}`
-                    : 'Hiện là thành viên thường · Chọn chức vụ bên dưới để phân công'}
+                  {studentPositions.length > 0
+                    ? `Đang giữ ${studentPositions.length} chức vụ · Có thể chọn nhiều hoặc tự nhập chức vụ mới`
+                    : 'Hiện là thành viên thường · Chọn chức vụ có sẵn hoặc tự ghi chức vụ mới'}
                 </Text>
               </View>
             </View>
 
-            <View style={styles.honourList}>
-              {OFFICER_POSITIONS.map((opt) => {
-                const selected = activePositionMeta?.key === opt.key;
-                const softKey = `${opt.color}Soft` as
-                  | 'accentSoft'
-                  | 'successSoft'
-                  | 'warningSoft'
-                  | 'dangerSoft'
-                  | 'purpleSoft';
-                return (
-                  <Pressable
-                    key={opt.key}
-                    disabled={updatingPosition}
-                    onPress={() => void handleAssignPosition(selected ? null : opt.label)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Phân công chức vụ ${opt.label}`}
-                    style={({ pressed }) => [
-                      styles.positionChip,
-                      {
-                        backgroundColor: selected ? theme[opt.color] : theme[softKey],
-                        borderColor: theme[opt.color],
-                      },
-                      pressed && styles.pressed,
-                    ]}>
-                    <Ionicons
-                      name={opt.icon as keyof typeof Ionicons.glyphMap}
-                      size={13}
-                      color={selected ? '#FFFFFF' : theme[opt.color]}
-                    />
-                    <Text
-                      style={[
-                        styles.positionChipText,
-                        { color: selected ? '#FFFFFF' : theme[opt.color] },
-                      ]}>
-                      {opt.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            {activePositionMeta ? (
-              <View style={[styles.lockedBox, { backgroundColor: theme.backgroundElement }]}>
-                <Ionicons name="star" size={16} color={theme.accent} />
-                <View style={styles.flex}>
-                  <Text style={{ color: theme.text, fontSize: 12.5, fontWeight: '800' }}>
-                    {`Quyền hạn của ${activePositionMeta.label}:`}
-                  </Text>
-                  <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 2 }}>
-                    {activePositionMeta.permissions.join(' · ')}
-                  </Text>
-                </View>
-              </View>
-            ) : null}
-
-            {student.position?.trim() ? (
-              <Button
-                label={updatingPosition ? 'Đang cập nhật...' : 'Hủy chức vụ (Về thành viên thường)'}
-                variant={'danger'}
-                size={'sm'}
-                icon={'close-circle-outline'}
-                disabled={updatingPosition}
-                onPress={() => void handleAssignPosition(null)}
-              />
-            ) : null}
+            <OfficerPositionEditor
+              positions={studentPositions}
+              customPermissions={student.customPermissions ?? []}
+              customPresets={customPositionPresets}
+              disabled={updatingPosition}
+              onChange={(nextPositions, nextCustomPermissions) => {
+                void handleUpdatePositions(nextPositions, nextCustomPermissions);
+              }}
+              onSaveCustomPreset={(preset) => {
+                addCustomPositionPreset(preset);
+                showToast(`Đã lưu “${preset}” vào mẫu chức vụ lớp!`, 'info');
+              }}
+              onRemoveCustomPreset={(preset) => {
+                removeCustomPositionPreset(preset);
+                showToast(`Đã xoá mẫu “${preset}”`, 'info');
+              }}
+            />
           </Card>
         </FadeIn>
       ) : null}

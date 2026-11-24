@@ -5,9 +5,13 @@
  * `JSON.stringify` in AsyncStorage and synced as one JSONB document in Supabase.
  */
 
-import type { OfficerDepartmentKey } from '@/lib/officer-roles';
+import type { CustomOfficerGrantKey, OfficerDepartmentKey } from '@/lib/officer-roles';
 
-export type { OfficerDepartmentKey, OfficerRoleKey } from '@/lib/officer-roles';
+export type {
+  CustomOfficerGrantKey,
+  OfficerDepartmentKey,
+  OfficerRoleKey,
+} from '@/lib/officer-roles';
 
 export type Role = 'teacher' | 'student';
 
@@ -26,8 +30,12 @@ export type Student = {
   address: string | null;
   /** Tổ của lớp, ví dụ `Tổ 1`. */
   group: string | null;
-  /** Chức vụ trong lớp, ví dụ `Lớp trưởng`. */
+  /** Chuỗi hiển thị chức vụ (đồng bộ với `positions.join(' · ') || null`). */
   position: string | null;
+  /** Danh sách nhiều chức vụ do GVCN phân công (gồm chức vụ chuẩn & chức vụ tự ghi). */
+  positions?: string[];
+  /** Quyền hạn tùy chỉnh do GVCN cấp riêng cho học sinh (nâng cao). */
+  customPermissions?: CustomOfficerGrantKey[];
   note: string | null;
   createdAt: string;
   updatedAt: string;
@@ -52,12 +60,14 @@ export type PublicStudentRosterItem = {
   gender: Gender;
   group: string | null;
   position: string | null;
+  positions?: string[];
+  customPermissions?: CustomOfficerGrantKey[];
 };
 
-/** `achievement` = thành tích, `activity` = hoạt động / phong trào, `violation` = vi phạm / nhắc nhở. */
-export type EntryKind = 'achievement' | 'activity' | 'violation';
+/** `achievement` = thành tích, `activity` = hoạt động / phong trào, `study` = học tập & phát biểu theo môn, `violation` = vi phạm / nhắc nhở. */
+export type EntryKind = 'achievement' | 'activity' | 'study' | 'violation';
 
-export type EntryCategory = 'study' | 'sport' | 'art' | 'volunteer' | 'skill' | 'other';
+export type EntryCategory = 'academic' | 'study' | 'sport' | 'art' | 'volunteer' | 'skill' | 'other';
 
 export type EntryLevel = 'class' | 'school' | 'district' | 'city' | 'national' | 'international';
 
@@ -80,14 +90,24 @@ export type Entry = {
   submittedBy: Role;
   /** Ghi chú của giáo viên khi duyệt / từ chối. */
   reviewNote: string | null;
+  /** Môn học gắn với mục Học tập · Phát biểu (ví dụ: `Toán`, `Ngữ văn`, `Tiếng Anh`). */
+  subject?: string | null;
+  /** Số lượt phát biểu trong bản ghi `kind === 'study'` (mặc định `1`). */
+  speechCount?: number;
   /** Tên người ghi nhận (Ban cán sự / GVCN). */
   recordedByName?: string | null;
   /** Chức vụ người ghi nhận (ví dụ: Tổ trưởng, Lớp phó kỷ luật, Lớp trưởng, GVCN). */
   recordedByPosition?: string | null;
   /** ID học sinh ghi nhận (nếu là Ban cán sự). */
   recordedByStudentId?: string | null;
-  /** Nguồn gốc bản ghi thi đua / vi phạm / chuyên cần trực nhật. */
-  source?: 'self' | 'officer_bonus' | 'officer_violation' | 'duty_diligence' | 'teacher';
+  /** Nguồn gốc bản ghi thi đua / vi phạm / chuyên cần trực nhật / phát biểu học tập. */
+  source?:
+    | 'self'
+    | 'officer_bonus'
+    | 'officer_violation'
+    | 'duty_diligence'
+    | 'study_participation'
+    | 'teacher';
   createdAt: string;
   updatedAt: string;
 };
@@ -103,6 +123,14 @@ export type ClassInfo = {
   motto: string;
   /** Mục tiêu điểm thi đua của cả lớp trong học kỳ. */
   goalPoints?: number;
+  /** Danh sách mẫu chức vụ tự ghi do GVCN tạo thêm để dùng lại nhanh. */
+  customPositions?: string[];
+  /** Ngày bắt đầu Học kỳ I (ISO `YYYY-MM-DD`, tuỳ chọn). */
+  semester1Start?: string | null;
+  /** Ngày kết thúc Học kỳ I (ISO `YYYY-MM-DD`, tuỳ chọn). */
+  semester1End?: string | null;
+  /** Dấu thời gian ISO lần cập nhật cấu hình lớp / mẫu chức vụ / mốc HK1 gần nhất. */
+  updatedAt?: string | null;
 };
 
 export type StudentStats = {
@@ -114,6 +142,14 @@ export type StudentStats = {
   achievements: number;
   activities: number;
   violations?: number;
+  /** Tổng lượt phát biểu học tập đã duyệt (`kind === 'study'`). */
+  studySpeeches: number;
+  /** Số bản ghi phát biểu học tập (`kind === 'study'`). */
+  studyEntries: number;
+  /** Tổng điểm từ phát biểu học tập đã duyệt (`kind === 'study'`). */
+  studyPoints: number;
+  /** Số thành tích Học thuật (`kind === 'achievement' && category === 'academic'`). */
+  academicAchievements: number;
   total: number;
   /** Ngày của hoạt động gần nhất (ISO) hoặc `null`. */
   lastActivity: string | null;
@@ -127,6 +163,10 @@ export const EMPTY_STATS: StudentStats = {
   achievements: 0,
   activities: 0,
   violations: 0,
+  studySpeeches: 0,
+  studyEntries: 0,
+  studyPoints: 0,
+  academicAchievements: 0,
   total: 0,
   lastActivity: null,
 };

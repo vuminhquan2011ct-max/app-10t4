@@ -1,7 +1,18 @@
 /** Computes the derived numbers and analytics shown across the app. */
 
 import { ENTRY_CATEGORY_LIST, ENTRY_LEVELS, GROUP_PRESETS } from '@/constants/entry-meta';
-import { daysSince, daysUntilBirthday, formatWeekdayShort, shiftIsoDate, todayIso } from '@/lib/date';
+import {
+  daysSince,
+  daysUntilBirthday,
+  endOfWeekIso,
+  formatDayMonth,
+  formatWeekLabel,
+  formatWeekdayShort,
+  getSemester1Window,
+  shiftIsoDate,
+  startOfWeekIso,
+  todayIso,
+} from '@/lib/date';
 import {
   EMPTY_STATS,
   type AttendanceDay,
@@ -14,7 +25,7 @@ import {
   type StudentStats,
 } from '@/types/models';
 
-/** Tổng điểm (có dấu: cộng thành tích/hoạt động và trừ vi phạm) của các mục đã được duyệt. */
+/** Tổng điểm (có dấu: cộng thành tích/hoạt động/phát biểu và trừ vi phạm) của các mục đã được duyệt. */
 export function statsFor(entries: Entry[], studentId?: string): StudentStats {
   let points = 0;
   let approved = 0;
@@ -23,6 +34,10 @@ export function statsFor(entries: Entry[], studentId?: string): StudentStats {
   let achievements = 0;
   let activities = 0;
   let violations = 0;
+  let studySpeeches = 0;
+  let studyEntries = 0;
+  let studyPoints = 0;
+  let academicAchievements = 0;
   let total = 0;
   let lastActivity: string | null = null;
 
@@ -30,13 +45,28 @@ export function statsFor(entries: Entry[], studentId?: string): StudentStats {
     if (studentId !== undefined && entry.studentId !== studentId) continue;
     total += 1;
 
-    if (entry.kind === 'achievement') achievements += 1;
-    else if (entry.kind === 'violation') violations += 1;
-    else activities += 1;
+    if (entry.kind === 'achievement') {
+      achievements += 1;
+      if (entry.category === 'academic') academicAchievements += 1;
+    } else if (entry.kind === 'study') {
+      studyEntries += 1;
+    } else if (entry.kind === 'violation') {
+      violations += 1;
+    } else {
+      activities += 1;
+    }
 
     if (entry.status === 'approved') {
       approved += 1;
       points += entry.points;
+      if (entry.kind === 'study') {
+        const count =
+          typeof entry.speechCount === 'number' && Number.isFinite(entry.speechCount)
+            ? Math.max(1, Math.round(entry.speechCount))
+            : 1;
+        studySpeeches += count;
+        studyPoints += entry.points;
+      }
       if (!lastActivity || entry.date > lastActivity) lastActivity = entry.date;
     } else if (entry.status === 'pending') {
       pending += 1;
@@ -53,6 +83,10 @@ export function statsFor(entries: Entry[], studentId?: string): StudentStats {
     achievements,
     activities,
     violations,
+    studySpeeches,
+    studyEntries,
+    studyPoints,
+    academicAchievements,
     total,
     lastActivity,
   };
@@ -227,6 +261,7 @@ export type CategoryStat = {
 
 export function buildCategoryStats(entries: Entry[]): CategoryStat[] {
   const map: Record<EntryCategory, { count: number; points: number }> = {
+    academic: { count: 0, points: 0 },
     study: { count: 0, points: 0 },
     sport: { count: 0, points: 0 },
     art: { count: 0, points: 0 },
@@ -294,4 +329,379 @@ export function buildUpcomingBirthdays(students: Student[], withinDays = 45): Up
     }
   }
   return list.sort((a, b) => a.daysLeft - b.daysLeft || a.student.name.localeCompare(b.student.name, 'vi'));
+}
+
+/* ---------- Study Participation Analytics (Weekly & Cumulative HK1) ---------- */
+
+export type SubjectSpeechStat = {
+  subject: string;
+  speeches: number;
+  entries: number;
+  points: number;
+  studentCount: number;
+};
+
+export type StudentStudySummaryRow = {
+  studentId: string;
+  studentName: string;
+  studentCode: string;
+  group: string | null;
+  rank: number;
+  weeklySpeeches: number;
+  weeklyPoints: number;
+  weeklyTopSubject?: string | null;
+  hk1Speeches: number;
+  hk1Points: number;
+  topSubject: string | null;
+  bySubject: Record<string, number>;
+};
+
+export type StudyWeekOption = {
+  weekStart: string;
+  weekEnd: string;
+  label: string;
+  speeches: number;
+  points: number;
+};
+
+export type StudyParticipationReport = {
+  selectedWeekStart: string;
+  selectedWeekEnd: string;
+  selectedWeekLabel: string;
+  availableWeeks: StudyWeekOption[];
+  weekly: {
+    totalSpeeches: number;
+    totalPoints: number;
+    totalEntries: number;
+    activeStudents: number;
+    bySubject: SubjectSpeechStat[];
+    byGroup: { group: string; speeches: number; points: number; activeStudents: number }[];
+    dailyBars: { date: string; label: string; speeches: number; points: number }[];
+  };
+  semester1: {
+    start: string;
+    end: string;
+    label: string;
+    totalSpeeches: number;
+    totalPoints: number;
+    totalEntries: number;
+    activeStudents: number;
+    avgSpeechesPerStudent: number;
+    bySubject: SubjectSpeechStat[];
+    byGroup: { group: string; speeches: number; points: number; activeStudents: number }[];
+    weeklyTrend: { weekStart: string; label: string; speeches: number; points: number }[];
+  };
+  studentRows: StudentStudySummaryRow[];
+};
+
+function speechesOfEntry(entry: Entry): number {
+  if (typeof entry.speechCount === 'number' && Number.isFinite(entry.speechCount) && entry.speechCount > 0) {
+    return Math.max(1, Math.round(entry.speechCount));
+  }
+  return 1;
+}
+
+function subjectOfStudyEntry(entry: Entry): string {
+  const direct = entry.subject?.trim();
+  if (direct) return direct;
+  return 'Môn chung';
+}
+
+function aggregateBySubject(list: Entry[]): SubjectSpeechStat[] {
+  const map = new Map<
+    string,
+    { speeches: number; entries: number; points: number; students: Set<string> }
+  >();
+  for (const entry of list) {
+    const subject = subjectOfStudyEntry(entry);
+    const count = speechesOfEntry(entry);
+    let bucket = map.get(subject);
+    if (!bucket) {
+      bucket = { speeches: 0, entries: 0, points: 0, students: new Set<string>() };
+      map.set(subject, bucket);
+    }
+    bucket.speeches += count;
+    bucket.entries += 1;
+    bucket.points += Math.max(0, entry.points);
+    bucket.students.add(entry.studentId);
+  }
+  return Array.from(map.entries())
+    .map(([subject, b]) => ({
+      subject,
+      speeches: b.speeches,
+      entries: b.entries,
+      points: b.points,
+      studentCount: b.students.size,
+    }))
+    .sort((a, b) => b.speeches - a.speeches || b.points - a.points || a.subject.localeCompare(b.subject, 'vi'));
+}
+
+function aggregateByGroup(
+  list: Entry[],
+  students: { id: string; group: string | null }[],
+): { group: string; speeches: number; points: number; activeStudents: number }[] {
+  const studentGroup = new Map<string, string>();
+  const groupNames = new Set<string>(GROUP_PRESETS);
+  for (const stu of students) {
+    const g = stu.group?.trim();
+    if (g) {
+      studentGroup.set(stu.id, g);
+      groupNames.add(g);
+    }
+  }
+
+  const buckets = new Map<string, { speeches: number; points: number; active: Set<string> }>();
+  for (const g of groupNames) {
+    buckets.set(g, { speeches: 0, points: 0, active: new Set<string>() });
+  }
+
+  for (const entry of list) {
+    const g = studentGroup.get(entry.studentId);
+    if (!g) continue;
+    let bucket = buckets.get(g);
+    if (!bucket) {
+      bucket = { speeches: 0, points: 0, active: new Set<string>() };
+      buckets.set(g, bucket);
+    }
+    bucket.speeches += speechesOfEntry(entry);
+    bucket.points += Math.max(0, entry.points);
+    bucket.active.add(entry.studentId);
+  }
+
+  return Array.from(buckets.entries())
+    .map(([group, b]) => ({
+      group,
+      speeches: b.speeches,
+      points: b.points,
+      activeStudents: b.active.size,
+    }))
+    .sort((a, b) => b.speeches - a.speeches || b.points - a.points || a.group.localeCompare(b.group, 'vi'));
+}
+
+/**
+ * Compute Weekly AND Cumulative End-of-Semester-1 (`Học kỳ I`) Study Participation
+ * analytics across subjects, students, groups, and weekly trends.
+ */
+export function buildStudyParticipationStats(params: {
+  entries: Entry[];
+  students: { id: string; name: string; code: string; group: string | null }[];
+  selectedWeekStart?: string | null;
+  classYear?: string;
+  semester1Start?: string | null;
+  semester1End?: string | null;
+}): StudyParticipationReport {
+  const { students } = params;
+  const studentIdSet = new Set(students.map((s) => s.id));
+
+  const studyEntries = params.entries.filter(
+    (e) =>
+      e.kind === 'study' &&
+      e.status === 'approved' &&
+      (studentIdSet.size === 0 || studentIdSet.has(e.studentId)),
+  );
+
+  const thisWeekStart = startOfWeekIso();
+  const selectedWeekStart = params.selectedWeekStart?.trim()
+    ? startOfWeekIso(params.selectedWeekStart.trim())
+    : thisWeekStart;
+  const selectedWeekEnd = endOfWeekIso(selectedWeekStart);
+  const selectedWeekLabel = formatWeekLabel(selectedWeekStart);
+
+  const hk1 = getSemester1Window(params.classYear, params.semester1Start, params.semester1End);
+
+  // Build available weeks (current + 7 recent weeks + selected week + all weeks with data)
+  const weekTotals = new Map<string, { speeches: number; points: number }>();
+  for (let i = 0; i < 8; i += 1) {
+    const ws = shiftIsoDate(thisWeekStart, -i * 7);
+    weekTotals.set(ws, { speeches: 0, points: 0 });
+  }
+  if (!weekTotals.has(selectedWeekStart)) {
+    weekTotals.set(selectedWeekStart, { speeches: 0, points: 0 });
+  }
+  for (const entry of studyEntries) {
+    const ws = startOfWeekIso(entry.date);
+    const cur = weekTotals.get(ws) ?? { speeches: 0, points: 0 };
+    cur.speeches += speechesOfEntry(entry);
+    cur.points += Math.max(0, entry.points);
+    weekTotals.set(ws, cur);
+  }
+
+  const availableWeeks: StudyWeekOption[] = Array.from(weekTotals.entries())
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([weekStart, agg]) => ({
+      weekStart,
+      weekEnd: endOfWeekIso(weekStart),
+      label: formatWeekLabel(weekStart),
+      speeches: agg.speeches,
+      points: agg.points,
+    }));
+
+  // 1. Selected week stats
+  const weekEntries = studyEntries.filter(
+    (e) => e.date >= selectedWeekStart && e.date <= selectedWeekEnd,
+  );
+  const weekActiveSet = new Set<string>();
+  let weekSpeeches = 0;
+  let weekPoints = 0;
+  const dailyBars: { date: string; label: string; speeches: number; points: number }[] = [];
+  const dailyMap = new Map<string, { date: string; label: string; speeches: number; points: number }>();
+  for (let offset = 0; offset < 7; offset += 1) {
+    const date = shiftIsoDate(selectedWeekStart, offset);
+    const slot = { date, label: formatWeekdayShort(date), speeches: 0, points: 0 };
+    dailyBars.push(slot);
+    dailyMap.set(date, slot);
+  }
+
+  const weeklyStudentAgg = new Map<
+    string,
+    { speeches: number; points: number; bySubject: Record<string, number> }
+  >();
+  for (const entry of weekEntries) {
+    const count = speechesOfEntry(entry);
+    const pts = Math.max(0, entry.points);
+    const subj = subjectOfStudyEntry(entry);
+    weekSpeeches += count;
+    weekPoints += pts;
+    weekActiveSet.add(entry.studentId);
+
+    const daySlot = dailyMap.get(entry.date);
+    if (daySlot) {
+      daySlot.speeches += count;
+      daySlot.points += pts;
+    }
+
+    let stuAgg = weeklyStudentAgg.get(entry.studentId);
+    if (!stuAgg) {
+      stuAgg = { speeches: 0, points: 0, bySubject: {} };
+      weeklyStudentAgg.set(entry.studentId, stuAgg);
+    }
+    stuAgg.speeches += count;
+    stuAgg.points += pts;
+    stuAgg.bySubject[subj] = (stuAgg.bySubject[subj] ?? 0) + count;
+  }
+
+  // 2. Cumulative Semester 1 (Học kỳ I) stats
+  const hk1Entries = studyEntries.filter((e) => e.date >= hk1.start && e.date <= hk1.end);
+  const hk1ActiveSet = new Set<string>();
+  let hk1Speeches = 0;
+  let hk1Points = 0;
+  const hk1WeekMap = new Map<string, { speeches: number; points: number }>();
+  const hk1StudentAgg = new Map<
+    string,
+    { speeches: number; points: number; bySubject: Record<string, number> }
+  >();
+
+  for (const entry of hk1Entries) {
+    const count = speechesOfEntry(entry);
+    const pts = Math.max(0, entry.points);
+    const subj = subjectOfStudyEntry(entry);
+    hk1Speeches += count;
+    hk1Points += pts;
+    hk1ActiveSet.add(entry.studentId);
+
+    const ws = startOfWeekIso(entry.date);
+    const wAgg = hk1WeekMap.get(ws) ?? { speeches: 0, points: 0 };
+    wAgg.speeches += count;
+    wAgg.points += pts;
+    hk1WeekMap.set(ws, wAgg);
+
+    let stuAgg = hk1StudentAgg.get(entry.studentId);
+    if (!stuAgg) {
+      stuAgg = { speeches: 0, points: 0, bySubject: {} };
+      hk1StudentAgg.set(entry.studentId, stuAgg);
+    }
+    stuAgg.speeches += count;
+    stuAgg.points += pts;
+    stuAgg.bySubject[subj] = (stuAgg.bySubject[subj] ?? 0) + count;
+  }
+
+  // Ensure current week appears on HK1 trend if today falls within HK1
+  const today = todayIso();
+  if (today >= hk1.start && today <= hk1.end && !hk1WeekMap.has(thisWeekStart)) {
+    hk1WeekMap.set(thisWeekStart, { speeches: 0, points: 0 });
+  }
+
+  const weeklyTrend = Array.from(hk1WeekMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([weekStart, agg]) => ({
+      weekStart,
+      label: formatDayMonth(weekStart),
+      speeches: agg.speeches,
+      points: agg.points,
+    }));
+
+  const avgSpeechesPerStudent =
+    students.length > 0 ? Math.round((hk1Speeches / students.length) * 10) / 10 : 0;
+
+  // 3. Ranked per-student summary rows
+  const unsortedRows = students.map((stu) => {
+    const wAgg = weeklyStudentAgg.get(stu.id);
+    const hAgg = hk1StudentAgg.get(stu.id);
+    const bySubject = hAgg ? { ...hAgg.bySubject } : {};
+    const subjectEntries = Object.entries(bySubject).sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'vi'),
+    );
+    const weeklyTopSubject = wAgg
+      ? Object.entries(wAgg.bySubject).sort(
+          (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'vi'),
+        )[0]?.[0] ?? null
+      : null;
+
+    return {
+      studentId: stu.id,
+      studentName: stu.name,
+      studentCode: stu.code,
+      group: stu.group,
+      weeklySpeeches: wAgg?.speeches ?? 0,
+      weeklyPoints: wAgg?.points ?? 0,
+      weeklyTopSubject,
+      hk1Speeches: hAgg?.speeches ?? 0,
+      hk1Points: hAgg?.points ?? 0,
+      topSubject: subjectEntries[0]?.[0] ?? weeklyTopSubject,
+      bySubject,
+    };
+  });
+
+  unsortedRows.sort(
+    (a, b) =>
+      b.hk1Speeches - a.hk1Speeches ||
+      b.weeklySpeeches - a.weeklySpeeches ||
+      b.hk1Points - a.hk1Points ||
+      a.studentName.localeCompare(b.studentName, 'vi'),
+  );
+
+  const studentRows: StudentStudySummaryRow[] = unsortedRows.map((row, idx) => ({
+    ...row,
+    rank: idx + 1,
+  }));
+
+  return {
+    selectedWeekStart,
+    selectedWeekEnd,
+    selectedWeekLabel,
+    availableWeeks,
+    weekly: {
+      totalSpeeches: weekSpeeches,
+      totalPoints: weekPoints,
+      totalEntries: weekEntries.length,
+      activeStudents: weekActiveSet.size,
+      bySubject: aggregateBySubject(weekEntries),
+      byGroup: aggregateByGroup(weekEntries, students),
+      dailyBars,
+    },
+    semester1: {
+      start: hk1.start,
+      end: hk1.end,
+      label: hk1.label,
+      totalSpeeches: hk1Speeches,
+      totalPoints: hk1Points,
+      totalEntries: hk1Entries.length,
+      activeStudents: hk1ActiveSet.size,
+      avgSpeechesPerStudent,
+      bySubject: aggregateBySubject(hk1Entries),
+      byGroup: aggregateByGroup(hk1Entries, students),
+      weeklyTrend,
+    },
+    studentRows,
+  };
 }

@@ -61,6 +61,14 @@ export default function InsightsScreen() {
 
   const health = useMemo(() => computeClassHealth(store), [store]);
   const livePeriod = useMemo(() => getLivePeriodStatus(store.schedule), [store.schedule]);
+  const studyReport = store.getStudyParticipationReport();
+  const academicAchCount = useMemo(
+    () =>
+      store.entries.filter(
+        (e) => e.status === 'approved' && e.kind === 'achievement' && e.category === 'academic',
+      ).length,
+    [store.entries],
+  );
 
   const ask = (raw: string) => {
     const clean = raw.trim();
@@ -168,6 +176,54 @@ export default function InsightsScreen() {
             </View>
           </Card>
         ))}
+      </FadeIn>
+
+      {/* Study Participation (Weekly + HK I) & Academic Achievements Spotlight */}
+      <FadeIn index={2}>
+        <Card
+          style={[styles.copilotCard, { borderColor: `${theme.success}55`, borderWidth: 1.2 }]}
+          onPress={() => router.push('/study' as never)}>
+          <View style={styles.alertHead}>
+            <View style={[styles.alertIcon, { backgroundColor: theme.successSoft }]}>
+              <Ionicons name="book" size={19} color={theme.success} />
+            </View>
+            <View style={styles.flex}>
+              <Badge
+                label={`HỌC TẬP · ${studyReport.semester1.label.toUpperCase()}`}
+                color={'success'}
+                soft={'successSoft'}
+                icon={'book-outline'}
+              />
+              <Text style={[styles.alertTitle, { color: theme.text }]}>
+                Phát biểu theo Môn & Thành tích Học thuật
+              </Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 12, marginTop: 2 }}>
+                {`Tuần này: ${studyReport.weekly.totalSpeeches} lượt (+${studyReport.weekly.totalPoints}đ) · Cộng dồn HK I: ${studyReport.semester1.totalSpeeches} lượt · 🎓 ${academicAchCount} thành tích Học thuật`}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.replyActions}>
+            <Button
+              label={'Ghi phát biểu'}
+              size={'sm'}
+              icon={'hand-left-outline'}
+              style={styles.flex}
+              onPress={() =>
+                router.push({ pathname: '/study', params: { tab: 'record' } } as never)
+              }
+            />
+            <Button
+              label={'Thống kê HK I →'}
+              size={'sm'}
+              variant={'soft'}
+              icon={'bar-chart-outline'}
+              style={styles.flex}
+              onPress={() =>
+                router.push({ pathname: '/study', params: { tab: 'semester1' } } as never)
+              }
+            />
+          </View>
+        </Card>
       </FadeIn>
 
       {/* Interactive Copilot Q&A */}

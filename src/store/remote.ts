@@ -12,6 +12,11 @@
  */
 
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
+import {
+  formatPositionsDisplay,
+  normalizeCustomGrants,
+  normalizePositionsList,
+} from '@/lib/officer-roles';
 import { emitLiveBroadcast } from '@/lib/realtime-bus';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { createId } from '@/lib/utils';
@@ -296,6 +301,22 @@ function mergeStudents(
     const primary = chooseLocal ? lStu : rStu;
     const secondary = chooseLocal ? rStu : lStu;
 
+    const primaryPositions = normalizePositionsList(primary.positions, primary.position);
+    const secondaryPositions = normalizePositionsList(secondary.positions, secondary.position);
+    const resolvedPositions = isStrictlyNewer
+      ? primaryPositions
+      : primaryPositions.length > 0
+        ? primaryPositions
+        : secondaryPositions;
+
+    const primaryPerms = normalizeCustomGrants(primary.customPermissions);
+    const secondaryPerms = normalizeCustomGrants(secondary.customPermissions);
+    const resolvedPerms = isStrictlyNewer
+      ? primaryPerms
+      : primaryPerms.length > 0
+        ? primaryPerms
+        : secondaryPerms;
+
     map.set(lStu.id, {
       ...secondary,
       ...primary,
@@ -303,7 +324,9 @@ function mergeStudents(
         ? primary.birthDate
         : (primary.birthDate ?? secondary.birthDate ?? null),
       group: isStrictlyNewer ? primary.group : (primary.group ?? secondary.group ?? null),
-      position: isStrictlyNewer ? primary.position : (primary.position ?? secondary.position ?? null),
+      position: formatPositionsDisplay(resolvedPositions),
+      positions: resolvedPositions,
+      customPermissions: resolvedPerms,
       // Always preserve local private contact/note data because remote strips them.
       phone: lStu.phone ?? rStu.phone ?? null,
       email: lStu.email ?? rStu.email ?? null,
@@ -1060,7 +1083,48 @@ export function mergeClassStates(
         ? r.schedule
         : l.schedule;
 
-  const classInfo = prefer === 'local' ? { ...r.classInfo, ...l.classInfo } : { ...l.classInfo, ...r.classInfo };
+  const lClassTime = ts(l.classInfo.updatedAt);
+  const rClassTime = ts(r.classInfo.updatedAt);
+  const isStrictlyDifferentClassTime = lClassTime !== rClassTime;
+  const chooseLocalClass =
+    lClassTime > rClassTime || (lClassTime === rClassTime && prefer === 'local');
+  const primaryClassInfo = chooseLocalClass ? l.classInfo : r.classInfo;
+  const secondaryClassInfo = chooseLocalClass ? r.classInfo : l.classInfo;
+
+  const primaryCustomPositions =
+    primaryClassInfo.customPositions !== undefined
+      ? normalizePositionsList(primaryClassInfo.customPositions)
+      : undefined;
+  const secondaryCustomPositions =
+    secondaryClassInfo.customPositions !== undefined
+      ? normalizePositionsList(secondaryClassInfo.customPositions)
+      : undefined;
+
+  let mergedCustomPositions: string[] | undefined;
+  if (isStrictlyDifferentClassTime) {
+    mergedCustomPositions = primaryCustomPositions ?? secondaryCustomPositions;
+  } else if (primaryCustomPositions && primaryCustomPositions.length > 0) {
+    mergedCustomPositions = primaryCustomPositions;
+  } else if (secondaryCustomPositions && secondaryCustomPositions.length > 0) {
+    mergedCustomPositions = secondaryCustomPositions;
+  } else {
+    mergedCustomPositions = primaryCustomPositions ?? secondaryCustomPositions;
+  }
+
+  const classInfo = {
+    ...secondaryClassInfo,
+    ...primaryClassInfo,
+    ...(mergedCustomPositions !== undefined ? { customPositions: mergedCustomPositions } : {}),
+    semester1Start: isStrictlyDifferentClassTime
+      ? (primaryClassInfo.semester1Start ?? null)
+      : (primaryClassInfo.semester1Start ?? secondaryClassInfo.semester1Start ?? null),
+    semester1End: isStrictlyDifferentClassTime
+      ? (primaryClassInfo.semester1End ?? null)
+      : (primaryClassInfo.semester1End ?? secondaryClassInfo.semester1End ?? null),
+    ...(primaryClassInfo.updatedAt || secondaryClassInfo.updatedAt
+      ? { updatedAt: primaryClassInfo.updatedAt ?? secondaryClassInfo.updatedAt ?? null }
+      : {}),
+  };
   const dutyRoster = prefer === 'local' ? { ...r.dutyRoster, ...l.dutyRoster } : { ...l.dutyRoster, ...r.dutyRoster };
   const fundCycleLabel =
     prefer === 'local'
@@ -1476,6 +1540,20 @@ function mergeAuthAccountRecord(
     ...primary,
     passwordHash,
   };
+
+  if (primary.positions !== undefined || primary.position !== undefined) {
+    const normalizedPositions = normalizePositionsList(
+      Array.isArray(primary.positions) ? (primary.positions as string[]) : undefined,
+      typeof primary.position === 'string' ? primary.position : null,
+    );
+    merged.positions = normalizedPositions;
+    merged.position = formatPositionsDisplay(normalizedPositions);
+  }
+  if (primary.customPermissions !== undefined) {
+    merged.customPermissions = normalizeCustomGrants(
+      Array.isArray(primary.customPermissions) ? (primary.customPermissions as string[]) : [],
+    );
+  }
 
   if (email !== null) merged.email = email;
   if (emailKey !== null) merged.emailKey = emailKey;
@@ -1997,6 +2075,7 @@ export async function addResourceRemote(resource: ClassResource): Promise<void> 
 
 export async function addStudentRemote(student: StudentInput): Promise<void> {
   if (!isSupabaseConfigured) return;
+  const normalizedPositions = normalizePositionsList(student.positions, student.position);
   const payload = {
     id: student.id,
     name: student.name,
@@ -2004,7 +2083,9 @@ export async function addStudentRemote(student: StudentInput): Promise<void> {
     gender: student.gender,
     birthDate: student.birthDate ?? null,
     group: student.group ?? null,
-    position: student.position ?? null,
+    position: formatPositionsDisplay(normalizedPositions),
+    positions: normalizedPositions,
+    customPermissions: normalizeCustomGrants(student.customPermissions),
   };
   const { error } = await supabase.rpc('app_add_student', { student: payload });
   if (error && !isMissingSchemaObject(error)) throw error;

@@ -9,6 +9,7 @@ import type {
   ClassInfo,
   ClassResource,
   ClassTask,
+  CustomOfficerGrantKey,
   DriveAttachment,
   DutyDayLog,
   DutyRoster,
@@ -99,6 +100,8 @@ export type StudentInput = {
   address?: string | null;
   group?: string | null;
   position?: string | null;
+  positions?: string[];
+  customPermissions?: CustomOfficerGrantKey[];
   note?: string | null;
 };
 
@@ -112,6 +115,8 @@ export type EntryInput = {
   description?: string | null;
   proofUrl?: string | null;
   points: number;
+  subject?: string | null;
+  speechCount?: number;
   status?: EntryStatus;
   submittedBy?: Role;
   reviewNote?: string | null;

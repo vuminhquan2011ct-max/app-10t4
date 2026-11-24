@@ -28,7 +28,7 @@ import {
 import { Platform } from 'react-native';
 
 import { GROUP_PRESETS } from '@/constants/entry-meta';
-import { currentSchoolWeekday } from '@/lib/date';
+import { currentSchoolWeekday, todayIso } from '@/lib/date';
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
 import {
   deleteDriveFileEverywhere,
@@ -36,8 +36,12 @@ import {
   type DeleteDriveMediaTarget,
 } from '@/lib/drive-gallery';
 import {
-  canonicalizeOfficerPosition,
   computeOfficerPermissions,
+  formatPositionsDisplay,
+  inferGrantsFromPositions,
+  normalizeCustomGrants,
+  normalizePositionsList,
+  type CustomOfficerGrantKey,
   type OfficerDepartmentKey,
   type OfficerPermissions,
   type OfficerRoleKey,
@@ -48,6 +52,7 @@ import {
   buildCategoryStats,
   buildGroupStats,
   buildRanking,
+  buildStudyParticipationStats,
   buildUpcomingBirthdays,
   buildWeeklyActivity,
   computeStreak,
@@ -56,6 +61,7 @@ import {
   type CategoryStat,
   type DailyBar,
   type GroupStat,
+  type StudyParticipationReport,
   type UpcomingBirthday,
 } from '@/lib/stats';
 import {
@@ -69,7 +75,7 @@ import {
   subscribeStudentAccountsChanged,
   suggestNextLoginId,
   updateStudentAccountCredentials,
-  updateStudentAccountPosition,
+  updateStudentAccountPositions,
 } from '@/lib/student-accounts';
 import {
   loadTeacherAccounts,
@@ -208,15 +214,20 @@ export type RegisteredMemberPublic = {
   group?: string | null;
   subject?: string | null;
   position?: string | null;
+  positions?: string[];
   joinedAt: string;
 };
 
 type BaseActions = Omit<
   ReturnType<typeof createActions>,
+  | 'updateClass'
+  | 'addCustomPositionPresetLocal'
+  | 'removeCustomPositionPresetLocal'
   | 'addStudentLocal'
   | 'appendStudentsLocal'
   | 'bulkAddStudentsLocal'
   | 'updateStudent'
+  | 'assignStudentPositionsLocal'
   | 'assignStudentPositionLocal'
   | 'addEntry'
   | 'updateEntry'
@@ -288,6 +299,10 @@ export type ClassStore = BaseActions & {
   officerRoles: OfficerRoleKey[];
   isOfficer: boolean;
   officerPositionLabel: string | null;
+  officerPositionsList: string[];
+  customOfficerPermissions: CustomOfficerGrantKey[];
+  inferredStudySubjects: string[];
+  customPositionPresets: string[];
   defaultDepartment: OfficerDepartmentKey | null;
   isClassMonitor: boolean;
   isSecretary: boolean;
@@ -301,18 +316,23 @@ export type ClassStore = BaseActions & {
   canManageDuty: boolean;
   canRecordBonus: boolean;
   canRecordViolation: boolean;
+  canRecordStudy: boolean;
   canRecordBonusForStudent: (
     target: { id: string; group?: string | null } | null | undefined,
   ) => boolean;
   canRecordViolationForStudent: (
     target: { id: string; group?: string | null } | null | undefined,
   ) => boolean;
+  canRecordStudyForStudent: (
+    target: { id: string; group?: string | null } | null | undefined,
+  ) => boolean;
   canManageTasksAndEvents: boolean;
-  /** Public-safe student roster items ({ id, name, code, gender, group, position } — zero private fields!). */
+  /** Public-safe student roster items ({ id, name, code, gender, group, position, positions, customPermissions } — zero private fields!). */
   classRosterPublic: PublicStudentRosterItem[];
   bonusTargetStudents: PublicStudentRosterItem[];
   violationTargetStudents: PublicStudentRosterItem[];
   dutyTargetStudents: PublicStudentRosterItem[];
+  studyTargetStudents: PublicStudentRosterItem[];
   dutyLogs: Record<string, DutyDayLog>;
   dutyLogOfDate: (date: string) => DutyDayLog | undefined;
   /** True for teacher OR approved editor (ban cán sự). */
@@ -362,6 +382,11 @@ export type ClassStore = BaseActions & {
   checkLoginIdTaken: (loginId: string, excludeStudentId?: string) => Promise<boolean>;
   suggestNextStudentCode: () => Promise<string>;
   /** Account-aware & cloud-aware mutations. */
+  updateClass: (patch: Partial<ClassInfo>) => void;
+  /** Alias for `updateClass`. */
+  updateClassInfo: (patch: Partial<ClassInfo>) => void;
+  addCustomPositionPreset: (title: string) => void;
+  removeCustomPositionPreset: (title: string) => void;
   addStudent: (input: StudentInput) => Promise<string>;
   updateStudent: (id: string, patch: Partial<StudentInput>) => Promise<void>;
   bulkAddStudents: (
@@ -369,6 +394,16 @@ export type ClassStore = BaseActions & {
     options?: { group?: string | null; autoDistributeGroups?: boolean; initialPassword?: string },
   ) => Promise<void>;
   addEntry: (input: EntryInput) => Promise<void>;
+  quickLogStudyParticipation: (input: {
+    studentId: string;
+    subject: string;
+    speechCount?: number;
+    points?: number;
+    date?: string;
+    title?: string;
+    note?: string;
+  }) => Promise<void>;
+  getStudyParticipationReport: (selectedWeekStart?: string | null) => StudyParticipationReport;
   updateEntry: (id: string, patch: Partial<EntryInput>) => void;
   removeEntry: (id: string) => void;
   clearEntryProof: (entryId: string) => Promise<void>;
@@ -392,6 +427,11 @@ export type ClassStore = BaseActions & {
     attachment: { id: string; driveFileId?: string; url?: string; name?: string },
   ) => Promise<void>;
   updateDutyRoster: (day: Weekday, group: string) => void;
+  assignStudentPositions: (
+    studentId: string,
+    positions: string[],
+    customPermissions?: CustomOfficerGrantKey[],
+  ) => Promise<void>;
   assignStudentPosition: (studentId: string, position: string | null) => Promise<void>;
   assignDutyForDate: (input: {
     date: string;
@@ -504,6 +544,26 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [isTeacher, isSubjectTeacher, memberRole, currentStudent],
   );
   const canPostAnnouncements = officerPermissions.canPostAnnouncements;
+  const inferredOfficerGrants = useMemo(
+    () => inferGrantsFromPositions(officerPermissions.positionsList),
+    [officerPermissions.positionsList],
+  );
+  const hasFullCoordination =
+    officerPermissions.isClassMonitor ||
+    officerPermissions.customPermissions.includes('full_coordination') ||
+    inferredOfficerGrants.includes('full_coordination');
+  const hasClassWideStudyView =
+    canViewAll ||
+    isSubjectTeacher ||
+    hasFullCoordination ||
+    officerPermissions.isAcademicVP ||
+    officerPermissions.customPermissions.includes('record_study') ||
+    inferredOfficerGrants.includes('record_study') ||
+    officerPermissions.inferredStudySubjects.length > 0;
+  const hasGroupBonusScope =
+    officerPermissions.isGroupLeader ||
+    officerPermissions.customPermissions.includes('record_bonus_group') ||
+    inferredOfficerGrants.includes('record_bonus_group');
 
   const canViewPrivateOf = useCallback(
     (studentId: string) => {
@@ -620,12 +680,15 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           const deletedAt = deletedStudents[acc.studentId];
           if (deletedAt && deletedAt.localeCompare(acc.updatedAt) > 0) continue;
           if (!studentIds.has(acc.studentId)) {
+            const restoredPositions = normalizePositionsList(acc.positions, acc.position);
             const restored = buildStudent(mergedStudents, base.classInfo.name, {
               id: acc.studentId,
               name: acc.name,
               code: acc.loginId,
               gender: 'male',
-              position: acc.position ?? null,
+              position: formatPositionsDisplay(restoredPositions),
+              positions: restoredPositions,
+              customPermissions: normalizeCustomGrants(acc.customPermissions),
             });
             mergedStudents.push({
               ...restored,
@@ -735,9 +798,21 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         if (
           event.name !== undefined ||
           event.loginId !== undefined ||
-          event.position !== undefined
+          event.position !== undefined ||
+          event.positions !== undefined ||
+          event.customPermissions !== undefined
         ) {
           const now = new Date().toISOString();
+          const hasPosUpdate = event.positions !== undefined || event.position !== undefined;
+          const nextPositions = hasPosUpdate
+            ? normalizePositionsList(event.positions, event.position)
+            : undefined;
+          const nextPositionDisplay =
+            nextPositions !== undefined ? formatPositionsDisplay(nextPositions) : undefined;
+          const nextCustomPerms =
+            event.customPermissions !== undefined
+              ? normalizeCustomGrants(event.customPermissions)
+              : undefined;
           mutate((prev) => ({
             ...prev,
             students: prev.students.map((s) =>
@@ -746,10 +821,12 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
                     ...s,
                     name: event.name ? normalizeName(event.name) : s.name,
                     code: event.loginId ?? s.code,
-                    position:
-                      event.position !== undefined
-                        ? canonicalizeOfficerPosition(event.position)
-                        : s.position,
+                    ...(nextPositions !== undefined
+                      ? { position: nextPositionDisplay, positions: nextPositions }
+                      : {}),
+                    ...(nextCustomPerms !== undefined
+                      ? { customPermissions: nextCustomPerms }
+                      : {}),
                     updatedAt: event.account?.updatedAt ?? now,
                   }
                 : s,
@@ -1008,6 +1085,47 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   /* ---------- Account-aware & Cloud-aware mutations ---------- */
 
+  const updateClass = useCallback(
+    (patch: Partial<ClassInfo>) => {
+      if (!canEditClass && !isTeacher) return;
+      const {
+        customPositions: rawCustomPositions,
+        semester1Start: rawSem1Start,
+        semester1End: rawSem1End,
+        ...restPatch
+      } = patch;
+      const safePatch: Partial<ClassInfo> = {
+        ...restPatch,
+        ...(isTeacher && rawCustomPositions !== undefined
+          ? { customPositions: normalizePositionsList(rawCustomPositions, null) }
+          : {}),
+        ...(isTeacher && rawSem1Start !== undefined ? { semester1Start: rawSem1Start } : {}),
+        ...(isTeacher && rawSem1End !== undefined ? { semester1End: rawSem1End } : {}),
+      };
+      actions.updateClass(safePatch);
+      flushCloud('update-class');
+    },
+    [actions, canEditClass, flushCloud, isTeacher],
+  );
+
+  const addCustomPositionPreset = useCallback(
+    (title: string) => {
+      if (!isTeacher) return;
+      actions.addCustomPositionPresetLocal(title);
+      flushCloud('update-class');
+    },
+    [actions, flushCloud, isTeacher],
+  );
+
+  const removeCustomPositionPreset = useCallback(
+    (title: string) => {
+      if (!isTeacher) return;
+      actions.removeCustomPositionPresetLocal(title);
+      flushCloud('update-class');
+    },
+    [actions, flushCloud, isTeacher],
+  );
+
   const addStudent = useCallback(
     async (input: StudentInput): Promise<string> => {
       const targetCode = input.code?.trim()
@@ -1015,7 +1133,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         : await suggestNextLoginId(stateRef.current.classInfo.name, stateRef.current.students);
 
       const password = input.password?.trim() ?? '';
-      const safePosition = isTeacher ? canonicalizeOfficerPosition(input.position) : null;
+      const safePositions = isTeacher
+        ? normalizePositionsList(input.positions, input.position)
+        : [];
+      const safePosition = formatPositionsDisplay(safePositions);
+      const safeCustomPerms = isTeacher ? normalizeCustomGrants(input.customPermissions) : [];
       const reg = await registerStudentAccount({
         studentId: input.id,
         name: input.name,
@@ -1025,6 +1147,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         birthDate: input.birthDate ?? null,
         group: input.group ?? null,
         position: safePosition,
+        positions: safePositions,
+        customPermissions: safeCustomPerms,
         writeToClassState: false,
         knownStudents: stateRef.current.students,
       });
@@ -1041,6 +1165,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         birthDate: input.birthDate ?? null,
         group: input.group ?? null,
         position: safePosition,
+        positions: safePositions,
+        customPermissions: safeCustomPerms,
       };
 
       // Idempotent upsert so `subscribeStudentAccountsChanged` and `addStudent` never duplicate.
@@ -1083,20 +1209,43 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (!cred.ok) {
         throw new Error(cred.error || 'Không thể cập nhật thông tin tài khoản học sinh');
       }
-      const { password: _discarded, position: rawPosition, ...restPatch } = patch;
+      const {
+        password: _discarded,
+        position: rawPosition,
+        positions: rawPositions,
+        customPermissions: rawCustomPermissions,
+        ...restPatch
+      } = patch;
+      const hasPosUpdate = rawPositions !== undefined || rawPosition !== undefined;
+      const nextPositions =
+        isTeacher && hasPosUpdate
+          ? rawPositions !== undefined
+            ? normalizePositionsList(rawPositions, null)
+            : normalizePositionsList(null, rawPosition)
+          : undefined;
+      const nextCustomPerms =
+        isTeacher && rawCustomPermissions !== undefined
+          ? normalizeCustomGrants(rawCustomPermissions)
+          : isTeacher && nextPositions !== undefined && nextPositions.length === 0
+            ? []
+            : undefined;
+
       const cleanPatch: Partial<StudentInput> = {
         ...restPatch,
         code: cred.account?.loginId ?? restPatch.code,
-        ...(isTeacher && rawPosition !== undefined
-          ? { position: canonicalizeOfficerPosition(rawPosition) }
+        ...(nextPositions !== undefined
+          ? { position: formatPositionsDisplay(nextPositions), positions: nextPositions }
           : {}),
+        ...(nextCustomPerms !== undefined ? { customPermissions: nextCustomPerms } : {}),
       };
       const existingStu = stateRef.current.students.find((s) => s.id === id);
       const mergedStu = existingStu ? mergeStudent(existingStu, cleanPatch) : null;
 
       actions.updateStudent(id, cleanPatch);
-      if (isTeacher && rawPosition !== undefined) {
-        await updateStudentAccountPosition(id, canonicalizeOfficerPosition(rawPosition), {
+      if (isTeacher && (nextPositions !== undefined || nextCustomPerms !== undefined)) {
+        const finalPositions =
+          nextPositions ?? normalizePositionsList(existingStu?.positions, existingStu?.position);
+        await updateStudentAccountPositions(id, finalPositions, nextCustomPerms, {
           writeToClassState: false,
         });
       }
@@ -1113,20 +1262,41 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [actions, auth, flushCloud, isCloudSync, isTeacher],
   );
 
-  const assignStudentPosition = useCallback(
-    async (studentId: string, position: string | null): Promise<void> => {
+  const assignStudentPositions = useCallback(
+    async (
+      studentId: string,
+      positions: string[],
+      customPermissions?: CustomOfficerGrantKey[],
+    ): Promise<void> => {
       if (!isTeacher) {
         throw new Error('Chỉ Giáo viên chủ nhiệm mới có quyền phân công hoặc hủy chức vụ Ban cán sự.');
       }
-      const normalizedPos = canonicalizeOfficerPosition(position);
-      actions.assignStudentPositionLocal(studentId, normalizedPos);
-      await updateStudentAccountPosition(studentId, normalizedPos, {
+      const cleanPositions = normalizePositionsList(positions, null);
+      const cleanCustomPerms =
+        customPermissions !== undefined
+          ? normalizeCustomGrants(customPermissions)
+          : cleanPositions.length === 0
+            ? []
+            : undefined;
+      actions.assignStudentPositionsLocal(studentId, cleanPositions, cleanCustomPerms);
+      await updateStudentAccountPositions(studentId, cleanPositions, cleanCustomPerms, {
         writeToClassState: false,
       });
       await auth.refreshStudentAccountCount();
       flushCloud('assign-position');
     },
     [actions, auth, flushCloud, isTeacher],
+  );
+
+  const assignStudentPosition = useCallback(
+    async (studentId: string, position: string | null): Promise<void> => {
+      if (position === null) {
+        await assignStudentPositions(studentId, [], []);
+        return;
+      }
+      await assignStudentPositions(studentId, [position]);
+    },
+    [assignStudentPositions],
   );
 
   const bulkAddStudents = useCallback(
@@ -1174,6 +1344,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     async (input: EntryInput) => {
       const targetStudent = stateRef.current.students.find((s) => s.id === input.studentId) ?? null;
       const isViolation = input.kind === 'violation' || input.points < 0;
+      const isStudy = input.kind === 'study';
       const isClassmateTarget =
         Boolean(input.studentId) && input.studentId !== effectiveStudentId;
 
@@ -1187,7 +1358,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           recordedByName: input.recordedByName ?? actorLabel,
           recordedByPosition: input.recordedByPosition ?? 'GVCN',
           recordedByStudentId: null,
-          source: input.source ?? 'teacher',
+          source: input.source ?? (isStudy ? 'study_participation' : 'teacher'),
         };
       } else if (isViolation) {
         if (!officerPermissions.canRecordViolationForStudent(targetStudent)) {
@@ -1203,6 +1374,45 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           recordedByStudentId: effectiveStudentId,
           source: 'officer_violation',
         };
+      } else if (isStudy) {
+        const canRecordThisStudy = officerPermissions.canRecordStudyForStudent(targetStudent);
+        if (
+          canRecordThisStudy &&
+          (isClassmateTarget ||
+            isSubjectTeacher ||
+            input.submittedBy === 'teacher' ||
+            input.source === 'study_participation')
+        ) {
+          finalInput = {
+            ...input,
+            kind: 'study',
+            category: 'study',
+            subject: input.subject?.trim() || (isSubjectTeacher ? subjectName : null),
+            speechCount: Math.max(1, Math.round(input.speechCount ?? 1)),
+            status: 'approved',
+            submittedBy: 'teacher',
+            recordedByName: actorLabel,
+            recordedByPosition: isSubjectTeacher
+              ? `GV ${subjectName ?? input.subject ?? 'Bộ môn'}`
+              : (officerPermissions.officerPositionLabel ?? 'Ban cán sự'),
+            recordedByStudentId: isSubjectTeacher ? null : effectiveStudentId,
+            source: 'study_participation',
+          };
+        } else if (isClassmateTarget) {
+          throw new Error('Bạn không có quyền ghi nhận phát biểu cho học sinh này.');
+        } else {
+          const enforcedStudentId = effectiveStudentId ?? input.studentId;
+          finalInput = {
+            ...input,
+            studentId: enforcedStudentId,
+            kind: 'study',
+            category: 'study',
+            speechCount: Math.max(1, Math.round(input.speechCount ?? 1)),
+            submittedBy: canEditClass ? 'teacher' : 'student',
+            status: canEditClass ? 'approved' : 'pending',
+            source: canEditClass ? 'study_participation' : 'self',
+          };
+        }
       } else if (
         isClassmateTarget ||
         (officerPermissions.canRecordBonusForStudent(targetStudent) &&
@@ -1247,6 +1457,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       canViewAll,
       effectiveStudentId,
       canEditClass,
+      isSubjectTeacher,
+      subjectName,
       officerPermissions,
       flushCloud,
       isCloudOAuth,
@@ -1254,22 +1466,121 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     ],
   );
 
+  const quickLogStudyParticipation = useCallback(
+    async (input: {
+      studentId: string;
+      subject: string;
+      speechCount?: number;
+      points?: number;
+      date?: string;
+      title?: string;
+      note?: string;
+    }): Promise<void> => {
+      const cleanSubject = input.subject.trim();
+      if (!cleanSubject) {
+        throw new Error('Vui lòng chọn hoặc nhập môn học.');
+      }
+      const targetStudent =
+        stateRef.current.students.find((s) => s.id === input.studentId) ?? null;
+      if (!targetStudent) {
+        throw new Error('Không tìm thấy học sinh để ghi nhận phát biểu.');
+      }
+      const speechCount = Math.max(1, Math.round(input.speechCount ?? 1));
+      const points = Math.max(
+        0,
+        Math.round(input.points !== undefined ? input.points : speechCount * 2),
+      );
+      const title =
+        input.title?.trim() || `Phát biểu môn ${cleanSubject} (${speechCount} lượt)`;
+      const date = input.date?.trim() || todayIso();
+
+      const isAuthorized = officerPermissions.canRecordStudyForStudent(targetStudent);
+      const isSelfSubmission = Boolean(
+        effectiveStudentId && targetStudent.id === effectiveStudentId,
+      );
+      if (!isAuthorized && !isSelfSubmission) {
+        throw new Error('Bạn không có quyền ghi nhận phát biểu cho học sinh này.');
+      }
+
+      const recorderPosition = isTeacher
+        ? 'GVCN'
+        : isSubjectTeacher
+          ? `GV ${subjectName ?? cleanSubject}`
+          : (officerPermissions.officerPositionLabel ?? 'Ban cán sự');
+
+      const entryInput: EntryInput = isAuthorized
+        ? {
+            studentId: targetStudent.id,
+            title,
+            kind: 'study',
+            category: 'study',
+            level: 'class',
+            date,
+            subject: cleanSubject,
+            speechCount,
+            points,
+            description: input.note?.trim() || null,
+            status: 'approved',
+            submittedBy: 'teacher',
+            recordedByName: actorLabel,
+            recordedByPosition: recorderPosition,
+            recordedByStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
+            source: 'study_participation',
+          }
+        : {
+            studentId: effectiveStudentId!,
+            title,
+            kind: 'study',
+            category: 'study',
+            level: 'class',
+            date,
+            subject: cleanSubject,
+            speechCount,
+            points,
+            description: input.note?.trim() || null,
+            status: 'pending',
+            submittedBy: 'student',
+            source: 'self',
+          };
+
+      const created = actions.addEntry(entryInput);
+      flushCloud('log-study-participation');
+      if (isCloudOAuth && !canEditClass) {
+        await submitEntryRemote(created);
+        await pullNow();
+      }
+    },
+    [
+      actions,
+      actorLabel,
+      canEditClass,
+      effectiveStudentId,
+      flushCloud,
+      isCloudOAuth,
+      isSubjectTeacher,
+      isTeacher,
+      officerPermissions,
+      pullNow,
+      subjectName,
+    ],
+  );
+
   const setAttendance = useCallback(
     (date: string, studentId: string, status: AttendanceStatus, note?: string | null) => {
-      if (!isTeacher && !officerPermissions.isClassMonitor && !canEditClass) return;
+      if (!isTeacher && !hasFullCoordination && !canEditClass) return;
       actions.setAttendance(date, studentId, status, note);
       flushCloud('attendance');
     },
-    [actions, canEditClass, flushCloud, isTeacher, officerPermissions.isClassMonitor],
+    [actions, canEditClass, flushCloud, hasFullCoordination, isTeacher],
   );
 
   const markAllPresent = useCallback(
     (date: string) => {
-      if (!isTeacher && !officerPermissions.isClassMonitor && !canEditClass) return;
+      if (!isTeacher && !hasFullCoordination && !canEditClass) return;
       actions.markAllPresent(date);
       flushCloud('attendance');
     },
-    [actions, canEditClass, flushCloud, isTeacher, officerPermissions.isClassMonitor],
+    [actions, canEditClass, flushCloud, hasFullCoordination, isTeacher],
   );
 
   const addAnnouncement = useCallback(
@@ -1862,6 +2173,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     for (const s of state.students) {
       const delAt = deletedStu[s.id];
       if (delAt && delAt.localeCompare(s.updatedAt) > 0) continue;
+      const posList = normalizePositionsList(s.positions, s.position);
       list.push({
         id: s.id,
         name: s.name,
@@ -1869,7 +2181,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         role: 'student',
         group: s.group ?? null,
         subject: null,
-        position: s.position ?? null,
+        position: formatPositionsDisplay(posList),
+        positions: posList,
         joinedAt: s.createdAt,
       });
     }
@@ -1908,6 +2221,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const dutyLogOfDate = useCallback((date: string) => dutyLogs[date], [dutyLogs]);
 
+  const customPositionPresets = useMemo<string[]>(
+    () => normalizePositionsList(classInfo.customPositions, null),
+    [classInfo.customPositions],
+  );
+
   // Public-safe class roster (ZERO private contact fields — safe for officer target pickers!).
   const classRosterPublic = useMemo<PublicStudentRosterItem[]>(() => {
     const deletedStu = state.deletedStudentIds ?? {};
@@ -1916,14 +2234,20 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         const delAt = deletedStu[s.id];
         return !delAt || delAt.localeCompare(s.updatedAt) <= 0;
       })
-      .map((s) => ({
-        id: s.id,
-        name: s.name,
-        code: s.code,
-        gender: s.gender,
-        group: s.group ?? null,
-        position: s.position ?? null,
-      }))
+      .map((s) => {
+        const posList = normalizePositionsList(s.positions, s.position);
+        const customPerms = normalizeCustomGrants(s.customPermissions);
+        return {
+          id: s.id,
+          name: s.name,
+          code: s.code,
+          gender: s.gender,
+          group: s.group ?? null,
+          position: formatPositionsDisplay(posList),
+          positions: posList,
+          customPermissions: customPerms,
+        };
+      })
       .sort((a, b) => a.name.localeCompare(b.name, 'vi'));
   }, [state.students, state.deletedStudentIds]);
 
@@ -1931,31 +2255,23 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const bonusTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
     if (!officerPermissions.canRecordBonus) return [];
-    if (isTeacher || officerPermissions.isClassMonitor) return classRosterPublic;
-    if (officerPermissions.isGroupLeader && currentStudentGroup) {
-      return classRosterPublic.filter(
-        (s) => (s.group?.trim().toLowerCase() ?? '') === currentStudentGroup,
-      );
-    }
-    return [];
-  }, [
-    officerPermissions.canRecordBonus,
-    officerPermissions.isClassMonitor,
-    officerPermissions.isGroupLeader,
-    isTeacher,
-    currentStudentGroup,
-    classRosterPublic,
-  ]);
+    return classRosterPublic.filter((s) => officerPermissions.canRecordBonusForStudent(s));
+  }, [officerPermissions, classRosterPublic]);
 
   const violationTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
     if (!officerPermissions.canRecordViolation) return [];
-    return classRosterPublic;
-  }, [officerPermissions.canRecordViolation, classRosterPublic]);
+    return classRosterPublic.filter((s) => officerPermissions.canRecordViolationForStudent(s));
+  }, [officerPermissions, classRosterPublic]);
 
   const dutyTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
     if (!officerPermissions.canManageDuty) return [];
     return classRosterPublic;
   }, [officerPermissions.canManageDuty, classRosterPublic]);
+
+  const studyTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
+    if (!officerPermissions.canRecordStudy) return [];
+    return classRosterPublic.filter((s) => officerPermissions.canRecordStudyForStudent(s));
+  }, [officerPermissions, classRosterPublic]);
 
   const visibleStudents = useMemo(() => {
     if (canViewAll) return state.students;
@@ -1964,11 +2280,14 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   }, [canViewAll, state.students, effectiveStudentId]);
 
   const visibleEntries = useMemo(() => {
-    if (canViewAll || officerPermissions.isClassMonitor) return state.entries;
+    if (canViewAll || hasFullCoordination) return state.entries;
+    if (isSubjectTeacher) {
+      return state.entries.filter((e) => e.kind === 'study');
+    }
     if (!effectiveStudentId) return [];
 
     let myGroupStudentIds: Set<string> | null = null;
-    if (officerPermissions.isGroupLeader && currentStudentGroup) {
+    if (hasGroupBonusScope && currentStudentGroup) {
       myGroupStudentIds = new Set(
         state.students
           .filter((s) => (s.group?.trim().toLowerCase() ?? '') === currentStudentGroup)
@@ -1980,10 +2299,13 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (e.studentId === effectiveStudentId || e.recordedByStudentId === effectiveStudentId) {
         return true;
       }
-      if (officerPermissions.isDisciplineVP && e.kind === 'violation') {
+      if (hasClassWideStudyView && e.kind === 'study') {
         return true;
       }
-      if (officerPermissions.isLaborVP && e.source === 'duty_diligence') {
+      if (officerPermissions.canRecordViolation && e.kind === 'violation') {
+        return true;
+      }
+      if (officerPermissions.canManageDuty && e.source === 'duty_diligence') {
         return true;
       }
       if (myGroupStudentIds && myGroupStudentIds.has(e.studentId)) {
@@ -1993,18 +2315,66 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     });
   }, [
     canViewAll,
-    officerPermissions.isClassMonitor,
-    officerPermissions.isDisciplineVP,
-    officerPermissions.isLaborVP,
-    officerPermissions.isGroupLeader,
+    hasFullCoordination,
+    hasClassWideStudyView,
+    hasGroupBonusScope,
+    isSubjectTeacher,
+    officerPermissions,
     currentStudentGroup,
     state.students,
     state.entries,
     effectiveStudentId,
   ]);
 
+  const getStudyParticipationReport = useCallback(
+    (selectedWeekStart?: string | null): StudyParticipationReport => {
+      let reportStudents: { id: string; name: string; code: string; group: string | null }[];
+      let reportEntries: Entry[];
+
+      if (hasClassWideStudyView) {
+        reportStudents = classRosterPublic;
+        reportEntries = state.entries;
+      } else if (officerPermissions.canRecordStudy && studyTargetStudents.length > 0) {
+        reportStudents = studyTargetStudents;
+        const allowedIds = new Set(studyTargetStudents.map((s) => s.id));
+        reportEntries = state.entries.filter((e) => allowedIds.has(e.studentId));
+      } else if (currentStudent) {
+        reportStudents = [
+          {
+            id: currentStudent.id,
+            name: currentStudent.name,
+            code: currentStudent.code,
+            group: currentStudent.group ?? null,
+          },
+        ];
+        reportEntries = state.entries.filter((e) => e.studentId === currentStudent.id);
+      } else {
+        reportStudents = [];
+        reportEntries = [];
+      }
+
+      return buildStudyParticipationStats({
+        entries: reportEntries,
+        students: reportStudents,
+        selectedWeekStart,
+        classYear: classInfo.year,
+        semester1Start: classInfo.semester1Start,
+        semester1End: classInfo.semester1End,
+      });
+    },
+    [
+      hasClassWideStudyView,
+      officerPermissions.canRecordStudy,
+      classRosterPublic,
+      studyTargetStudents,
+      currentStudent,
+      state.entries,
+      classInfo,
+    ],
+  );
+
   const canReadClassDiligence =
-    canViewAll || officerPermissions.canManageDuty || officerPermissions.isClassMonitor;
+    canViewAll || officerPermissions.canManageDuty || hasFullCoordination;
 
   const visibleAttendance = useMemo(() => {
     if (canReadClassDiligence) return state.attendance;
@@ -2210,7 +2580,10 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     () => ({
       setRole: actions.setRole,
       signInAs: actions.signInAs,
-      updateClass: actions.updateClass,
+      updateClass,
+      updateClassInfo: updateClass,
+      addCustomPositionPreset,
+      removeCustomPositionPreset,
       logActivity: actions.logActivity,
       addStudent,
       bulkAddStudents,
@@ -2234,6 +2607,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       addScheduleSlot: actions.addScheduleSlot,
       removeScheduleSlot: actions.removeScheduleSlot,
       updateDutyRoster,
+      assignStudentPositions,
       assignStudentPosition,
       assignDutyForDate,
       markDutyCompletion,
@@ -2258,6 +2632,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       checkLoginIdTaken,
       suggestNextStudentCode,
       addEntry,
+      quickLogStudyParticipation,
+      getStudyParticipationReport,
       removeStudent,
       saveStudentPrivate,
       saveStudentNote,
@@ -2289,6 +2665,10 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       officerRoles: officerPermissions.officerRoles,
       isOfficer: officerPermissions.isOfficer,
       officerPositionLabel: officerPermissions.officerPositionLabel,
+      officerPositionsList: officerPermissions.positionsList,
+      customOfficerPermissions: officerPermissions.customPermissions,
+      inferredStudySubjects: officerPermissions.inferredStudySubjects,
+      customPositionPresets,
       defaultDepartment: officerPermissions.defaultDepartment,
       isClassMonitor: officerPermissions.isClassMonitor,
       isSecretary: officerPermissions.isSecretary,
@@ -2302,13 +2682,16 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       canManageDuty: officerPermissions.canManageDuty,
       canRecordBonus: officerPermissions.canRecordBonus,
       canRecordViolation: officerPermissions.canRecordViolation,
+      canRecordStudy: officerPermissions.canRecordStudy,
       canRecordBonusForStudent: officerPermissions.canRecordBonusForStudent,
       canRecordViolationForStudent: officerPermissions.canRecordViolationForStudent,
+      canRecordStudyForStudent: officerPermissions.canRecordStudyForStudent,
       canManageTasksAndEvents: officerPermissions.canManageTasksAndEvents,
       classRosterPublic,
       bonusTargetStudents,
       violationTargetStudents,
       dutyTargetStudents,
+      studyTargetStudents,
       dutyLogs,
       dutyLogOfDate,
       canEditClass,
@@ -2360,9 +2743,13 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     }),
     [
       actions,
+      updateClass,
+      addCustomPositionPreset,
+      removeCustomPositionPreset,
       addStudent,
       bulkAddStudents,
       updateStudent,
+      assignStudentPositions,
       assignStudentPosition,
       updateDutyRoster,
       assignDutyForDate,
@@ -2387,6 +2774,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       checkLoginIdTaken,
       suggestNextStudentCode,
       addEntry,
+      quickLogStudyParticipation,
+      getStudyParticipationReport,
       removeStudent,
       saveStudentPrivate,
       saveStudentNote,
@@ -2415,10 +2804,12 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       subjectName,
       canPostAnnouncements,
       officerPermissions,
+      customPositionPresets,
       classRosterPublic,
       bonusTargetStudents,
       violationTargetStudents,
       dutyTargetStudents,
+      studyTargetStudents,
       dutyLogs,
       dutyLogOfDate,
       canEditClass,

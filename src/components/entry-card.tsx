@@ -19,14 +19,25 @@ type EntryCardProps = {
 export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
   const theme = useTheme();
   const isViolation = entry.kind === 'violation' || entry.points < 0;
+  const isStudy = entry.kind === 'study';
+  const isAcademic = entry.category === 'academic';
   const isDutyDiligence = entry.source === 'duty_diligence';
   const kind = ENTRY_KINDS[entry.kind] ?? ENTRY_KINDS.activity;
   const status = ENTRY_STATUSES[entry.status] ?? ENTRY_STATUSES.approved;
   const category = ENTRY_CATEGORIES[entry.category] ?? ENTRY_CATEGORIES.other;
 
-  const iconBg = isViolation ? theme.dangerSoft : theme[kind.soft];
-  const iconColor = isViolation ? theme.danger : theme[kind.color];
-  const iconName = isViolation ? 'alert-circle' : kind.icon;
+  const iconBg = isViolation
+    ? theme.dangerSoft
+    : isStudy
+      ? theme.successSoft
+      : theme[kind.soft];
+  const iconColor = isViolation
+    ? theme.danger
+    : isStudy
+      ? theme.success
+      : theme[kind.color];
+  const iconName = isViolation ? 'alert-circle' : isStudy ? 'book' : kind.icon;
+  const speechCount = isStudy ? Math.max(1, Math.round(entry.speechCount ?? 1)) : 0;
 
   const attributionLabel = isDutyDiligence
     ? 'Trực nhật · Chuyên cần'
@@ -46,7 +57,11 @@ export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
         Shadow.card,
         {
           backgroundColor: theme.card,
-          borderColor: isViolation ? `${theme.danger}55` : theme.border,
+          borderColor: isViolation
+            ? `${theme.danger}55`
+            : isStudy
+              ? `${theme.success}44`
+              : theme.border,
         },
         pressed && styles.pressed,
       ]}>
@@ -62,7 +77,7 @@ export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
           <Text style={[styles.metaText, { color: theme.textMuted }]} numberOfLines={1}>
             {[
               studentName,
-              category.label,
+              isStudy && entry.subject ? `Môn ${entry.subject}` : category.label,
               ENTRY_LEVELS[entry.level]?.label ?? 'Cấp lớp',
               formatDate(entry.date),
             ]
@@ -71,6 +86,30 @@ export function EntryCard({ entry, studentName, onPress }: EntryCardProps) {
           </Text>
         </View>
         <View style={styles.badges}>
+          {isStudy ? (
+            <>
+              <Badge
+                label={entry.subject ? `Phát biểu · ${entry.subject}` : 'Học tập · Phát biểu'}
+                color={'success'}
+                soft={'successSoft'}
+                icon={'book'}
+              />
+              <Badge
+                label={`${speechCount} lượt`}
+                color={'success'}
+                soft={'successSoft'}
+                icon={'hand-left-outline'}
+              />
+            </>
+          ) : null}
+          {isAcademic ? (
+            <Badge
+              label={'Thành tích Học thuật'}
+              color={'gold'}
+              soft={'goldSoft'}
+              icon={'school'}
+            />
+          ) : null}
           {isViolation ? (
             <Badge label={'Vi phạm'} color={'danger'} soft={'dangerSoft'} icon={'warning'} />
           ) : null}

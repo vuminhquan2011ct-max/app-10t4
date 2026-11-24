@@ -4,6 +4,7 @@ import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { OfficerPositionEditor } from '@/components/officer-position-editor';
 import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,7 +20,12 @@ import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { stripVietnamese } from '@/lib/intelligence';
-import { OFFICER_POSITIONS, getOfficerPositionMeta } from '@/lib/officer-roles';
+import {
+  formatPositionsDisplay,
+  getOfficerPositionMeta,
+  normalizePositionsList,
+  type CustomOfficerGrantKey,
+} from '@/lib/officer-roles';
 import { useAuth } from '@/store/auth-store';
 import { useClassStore } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
@@ -87,7 +93,10 @@ export default function StudentsScreen() {
     canEditClass,
     canAddStudents,
     canAssignPositions,
-    assignStudentPosition,
+    customPositionPresets,
+    assignStudentPositions,
+    addCustomPositionPreset,
+    removeCustomPositionPreset,
     quickReward,
     pullNow,
   } = useClassStore();
@@ -101,20 +110,22 @@ export default function StudentsScreen() {
   const [positionRowId, setPositionRowId] = useState<string | null>(null);
   const [savingPositionId, setSavingPositionId] = useState<string | null>(null);
 
-  const handleAssignPosition = async (
+  const handleAssignPositions = async (
     studentId: string,
     studentName: string,
-    nextPosition: string | null,
+    nextPositions: string[],
+    nextCustomPermissions: CustomOfficerGrantKey[],
   ) => {
     if (!canAssignPositions || savingPositionId) return;
     setSavingPositionId(studentId);
     try {
-      await assignStudentPosition(studentId, nextPosition);
+      await assignStudentPositions(studentId, nextPositions, nextCustomPermissions);
+      const display = formatPositionsDisplay(nextPositions);
       showToast(
-        nextPosition
-          ? `Đã phân công ${studentName} giữ chức vụ ${nextPosition}!`
-          : `Đã hủy chức vụ của ${studentName} (về thành viên thường)`,
-        nextPosition ? 'success' : 'info',
+        display
+          ? `Đã cập nhật chức vụ của ${studentName}: ${display}!`
+          : `Đã hủy tất cả chức vụ của ${studentName} (về thành viên thường)`,
+        display ? 'success' : 'info',
       );
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Không thể cập nhật chức vụ', 'danger');
@@ -431,14 +442,14 @@ export default function StudentsScreen() {
                         {currentStudent.group || 'Chưa phân tổ'}
                       </Text>
                     </View>
-                    {currentStudent.position?.trim() ? (
-                      <View style={styles.myMetaChipGold}>
-                        <Ionicons name="star" size={10} color="#FDE68A" />
-                        <Text style={styles.myMetaChipGoldText}>
-                          {currentStudent.position.trim()}
-                        </Text>
-                      </View>
-                    ) : null}
+                    {normalizePositionsList(currentStudent.positions, currentStudent.position).map(
+                      (posLabel) => (
+                        <View key={posLabel} style={styles.myMetaChipGold}>
+                          <Ionicons name="star" size={10} color="#FDE68A" />
+                          <Text style={styles.myMetaChipGoldText}>{posLabel}</Text>
+                        </View>
+                      ),
+                    )}
                     {mySeat?.label ? (
                       <View style={styles.myMetaChip}>
                         <Ionicons name="grid-outline" size={11} color="#FFFFFF" />
@@ -901,7 +912,10 @@ export default function StudentsScreen() {
             topPoints > 0 ? Math.min(100, Math.max(8, Math.round((row.points / topPoints) * 100))) : 8;
           const isPaid = Boolean(fundPaid[row.student.id]);
           const diligence = att.diligenceScore ?? att.rate;
-          const posMeta = getOfficerPositionMeta(row.student.position);
+          const studentPositions = normalizePositionsList(
+            row.student.positions,
+            row.student.position,
+          );
           const posExpanded = canAssignPositions && positionRowId === row.student.id;
           const isSavingPos = savingPositionId === row.student.id;
 
@@ -977,21 +991,25 @@ export default function StudentsScreen() {
                         .join(' · ')}
                     </Text>
 
-                    {/* Group, Officer & Diligence Pills */}
+                    {/* Group, Multi-Position Officer & Diligence Pills */}
                     <View style={styles.metaBadges}>
                       <Badge
                         label={row.student.group?.trim() || 'Chưa phân tổ'}
                         color={'accentText'}
                         soft={'accentSoft'}
                       />
-                      {row.student.position?.trim() ? (
-                        <Badge
-                          label={row.student.position.trim()}
-                          color={posMeta?.color ?? 'purple'}
-                          soft={posMeta ? softToneOf(posMeta.color) : 'purpleSoft'}
-                          icon={(posMeta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap}
-                        />
-                      ) : null}
+                      {studentPositions.map((posTitle) => {
+                        const meta = getOfficerPositionMeta(posTitle);
+                        return (
+                          <Badge
+                            key={posTitle}
+                            label={posTitle}
+                            color={meta?.color ?? 'purple'}
+                            soft={meta ? softToneOf(meta.color) : 'purpleSoft'}
+                            icon={(meta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap}
+                          />
+                        );
+                      })}
                       {diligence !== null ? (
                         <Badge
                           label={`CC ${diligence}%`}
@@ -1124,50 +1142,43 @@ export default function StudentsScreen() {
                   </View>
                 </View>
 
-                {/* Inline GVCN-Only Quick Officer Assignment / Revocation Drawer */}
+                {/* Inline GVCN-Only Multi-Position & Custom Position Editor Drawer */}
                 {posExpanded ? (
                   <Pressable
                     onPress={(e) => e.stopPropagation?.()}
                     style={[styles.posDrawer, { borderColor: theme.border }]}>
                     <Text style={[styles.posDrawerLabel, { color: theme.textSecondary }]}>
-                      Phân công / Hủy chức vụ Ban cán sự (Chỉ GVCN)
+                      Đa chức vụ & Chức vụ tự ghi (Chỉ GVCN)
                     </Text>
-                    <View style={styles.posWrapChips}>
-                      {OFFICER_POSITIONS.map((opt) => (
-                        <Chip
-                          key={opt.key}
-                          label={opt.label}
-                          icon={opt.icon as keyof typeof Ionicons.glyphMap}
-                          selected={row.student.position === opt.label}
-                          onPress={() =>
-                            void handleAssignPosition(row.student.id, row.student.name, opt.label)
-                          }
-                        />
-                      ))}
-                    </View>
-                    {posMeta ? (
-                      <Text style={{ color: theme.textMuted, fontSize: 11.5, lineHeight: 16 }}>
-                        {posMeta.summary}
-                      </Text>
-                    ) : null}
+                    <OfficerPositionEditor
+                      compact
+                      positions={studentPositions}
+                      customPermissions={row.student.customPermissions ?? []}
+                      customPresets={customPositionPresets}
+                      disabled={isSavingPos}
+                      onChange={(nextPositions, nextCustomPermissions) => {
+                        void handleAssignPositions(
+                          row.student.id,
+                          row.student.name,
+                          nextPositions,
+                          nextCustomPermissions,
+                        );
+                      }}
+                      onSaveCustomPreset={(preset) => {
+                        addCustomPositionPreset(preset);
+                        showToast(`Đã lưu “${preset}” vào mẫu chức vụ lớp!`, 'info');
+                      }}
+                      onRemoveCustomPreset={(preset) => {
+                        removeCustomPositionPreset(preset);
+                        showToast(`Đã xoá mẫu “${preset}”`, 'info');
+                      }}
+                    />
                     <View style={styles.posDrawerBtns}>
-                      {row.student.position?.trim() ? (
-                        <Button
-                          label={isSavingPos ? 'Đang lưu...' : 'Hủy chức vụ'}
-                          variant={'danger'}
-                          size={'sm'}
-                          icon={'close-circle-outline'}
-                          disabled={isSavingPos}
-                          style={styles.flex}
-                          onPress={() =>
-                            void handleAssignPosition(row.student.id, row.student.name, null)
-                          }
-                        />
-                      ) : null}
                       <Button
                         label={'Đóng'}
                         variant={'ghost'}
                         size={'sm'}
+                        style={styles.flex}
                         onPress={() => setPositionRowId(null)}
                       />
                     </View>

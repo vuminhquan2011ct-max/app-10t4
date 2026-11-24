@@ -15,7 +15,13 @@ import type { ThemeColor } from '@/constants/theme';
 import { PERIOD_CLOCK, SCHOOL_WEEKDAYS } from '@/constants/utilities-meta';
 import { currentSchoolWeekday, daysSince, formatDate, relativeDay, todayIso } from '@/lib/date';
 import { formatVnd } from '@/lib/export';
-import type { GroupStat, UpcomingBirthday } from '@/lib/stats';
+import { formatPositionsDisplay } from '@/lib/officer-roles';
+import {
+  buildStudyParticipationStats,
+  type GroupStat,
+  type StudyParticipationReport,
+  type UpcomingBirthday,
+} from '@/lib/stats';
 import type {
   Announcement,
   AttendanceDay,
@@ -184,6 +190,7 @@ export type IntelligenceContext = {
   attendanceStatsOfStudent: (id: string) => AttendanceStats;
   seatOfStudent: (id: string) => { row: number; col: number; label: string } | null;
   kudosOfStudent: (id: string) => KudosItem[];
+  getStudyParticipationReport?: (selectedWeekStart?: string | null) => StudyParticipationReport;
 };
 
 export function computeClassHealth(ctx: IntelligenceContext): ClassHealthReport {
@@ -452,6 +459,30 @@ export function computeClassHealth(ctx: IntelligenceContext): ClassHealthReport 
     });
   }
 
+  const studyReport = ctx.getStudyParticipationReport
+    ? ctx.getStudyParticipationReport()
+    : buildStudyParticipationStats({
+        entries: ctx.entries,
+        students,
+        classYear: classInfo.year,
+        semester1Start: classInfo.semester1Start,
+        semester1End: classInfo.semester1End,
+      });
+  if (studyReport.weekly.totalSpeeches > 0 || studyReport.semester1.totalSpeeches > 0) {
+    const topSubj = studyReport.weekly.bySubject[0] ?? studyReport.semester1.bySubject[0];
+    alerts.push({
+      id: 'study-participation-pulse',
+      severity: 'celebrate',
+      title: `Học tập tuần này: ${studyReport.weekly.totalSpeeches} lượt phát biểu (HK1: ${studyReport.semester1.totalSpeeches} lượt)`,
+      detail: topSubj
+        ? `Môn sôi nổi nhất: ${topSubj.subject} (${topSubj.speeches} lượt · ${topSubj.studentCount} học sinh tham gia).`
+        : 'Theo dõi bảng thống kê phát biểu theo tuần và cộng dồn cuối Học kỳ I.',
+      actionLabel: 'Mở Học tập & Phát biểu',
+      route: '/study',
+      icon: 'book',
+    });
+  }
+
   return { score, grade, headline, pillars, alerts };
 }
 
@@ -478,6 +509,7 @@ export function stripVietnamese(input: string): string {
 }
 
 export const COPILOT_QUICK_PROMPTS: string[] = [
+  'Thống kê phát biểu tuần này',
   'Hôm nay học môn gì?',
   'Ai dẫn đầu thi đua?',
   'Tổ nào đang đứng nhất?',
@@ -531,15 +563,18 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
       const rankRow = ranking.find((r) => r.student.id === matchedStudent.id);
       const seat = seatOfStudent(matchedStudent.id);
       const stuKudos = kudosOfStudent(matchedStudent.id);
+      const posDisplay =
+        formatPositionsDisplay(matchedStudent.positions) ?? matchedStudent.position;
       return {
         title: `Hồ sơ nhanh: ${matchedStudent.name}`,
         badge: rankRow ? `Hạng #${rankRow.rank}` : matchedStudent.code,
-        summary: [matchedStudent.code, matchedStudent.group, matchedStudent.position]
+        summary: [matchedStudent.code, matchedStudent.group, posDisplay]
           .filter(Boolean)
           .join(' · '),
         bullets: [
           `Điểm thi đua: ${stats.points} điểm (${stats.approved} đã duyệt, ${stats.pending} chờ duyệt)`,
-          `Chuyên cần: ${att.rate !== null ? `${att.rate}% (${att.present} có mặt, ${att.late} muộn)` : 'Chưa có lịch sử điểm danh'}`,
+          `Phát biểu học tập: ${stats.studySpeeches} lượt (+${stats.studyPoints}đ) · Thành tích Học thuật: ${stats.academicAchievements}`,
+          `Chuyên cần: ${(att.diligenceScore ?? att.rate) !== null ? `${att.diligenceScore ?? att.rate}% (${att.present} có mặt, ${att.late} muộn)` : 'Chưa có lịch sử điểm danh'}`,
           `Vị trí chỗ ngồi: ${seat ? seat.label : 'Chưa xếp chỗ'}`,
           `Lời khen Kudos đã nhận: ${stuKudos.length} lời khen`,
           `Đóng quỹ lớp: ${fundPaid[matchedStudent.id] ? 'Đã đóng ✅' : 'Chưa đánh dấu'}`,
@@ -548,6 +583,47 @@ export function answerClassQuery(rawQuery: string, ctx: IntelligenceContext): Co
         actionRoute: `/student/${matchedStudent.id}`,
       };
     }
+  }
+
+  // 1b. Study Participation (Weekly & Cumulative HK1) & Academic Achievements
+  if (
+    q.includes('phat bieu') ||
+    q.includes('hoc ky') ||
+    q.includes('hk1') ||
+    q.includes('hoc thuat') ||
+    q.includes('thong ke hoc tap')
+  ) {
+    const studyReport = ctx.getStudyParticipationReport
+      ? ctx.getStudyParticipationReport()
+      : buildStudyParticipationStats({
+          entries: ctx.entries,
+          students,
+          classYear: classInfo.year,
+          semester1Start: classInfo.semester1Start,
+          semester1End: classInfo.semester1End,
+        });
+    const academicCount = ctx.entries.filter(
+      (e) => e.kind === 'achievement' && e.category === 'academic' && e.status === 'approved',
+    ).length;
+    const topSubjs = studyReport.semester1.bySubject.slice(0, 3);
+    const topStu = studyReport.studentRows.filter((r) => r.hk1Speeches > 0).slice(0, 3);
+    return {
+      title: `Học tập & Phát biểu theo môn — ${classInfo.name}`,
+      badge: `Tuần: ${studyReport.weekly.totalSpeeches} · HK1: ${studyReport.semester1.totalSpeeches} lượt`,
+      summary: `${studyReport.semester1.label} · ${academicCount} thành tích Học thuật đã duyệt.`,
+      bullets: [
+        `Tuần hiện tại (${studyReport.selectedWeekLabel}): ${studyReport.weekly.totalSpeeches} lượt phát biểu (+${studyReport.weekly.totalPoints}đ · ${studyReport.weekly.activeStudents} bạn tham gia)`,
+        `Cộng dồn cuối Học kỳ I: ${studyReport.semester1.totalSpeeches} lượt (+${studyReport.semester1.totalPoints}đ · TB ${studyReport.semester1.avgSpeechesPerStudent} lượt/HS)`,
+        topSubjs.length > 0
+          ? `Môn sôi nổi HK1: ${topSubjs.map((s) => `${s.subject} (${s.speeches})`).join(', ')}`
+          : 'Chưa có lượt phát biểu nào theo môn trong Học kỳ I.',
+        topStu.length > 0
+          ? `Top phát biểu HK1: ${topStu.map((r, i) => `#${i + 1} ${r.studentName} (${r.hk1Speeches} lượt)`).join(', ')}`
+          : 'Mở mục Học tập & Phát biểu để ghi nhận nhanh 1 chạm theo từng môn!',
+      ],
+      actionLabel: 'Mở Thống kê Học tập & HK1',
+      actionRoute: '/study',
+    };
   }
 
   // 2. Schedule / Today's lessons / Duty

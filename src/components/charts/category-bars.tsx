@@ -14,6 +14,7 @@ import type { CategoryStat } from '@/lib/stats';
 import type { EntryCategory } from '@/types/models';
 
 const CAT_TONE: Record<EntryCategory, { color: ThemeColor; soft: ThemeColor }> = {
+  academic: { color: 'gold', soft: 'goldSoft' },
   study: { color: 'accent', soft: 'accentSoft' },
   sport: { color: 'success', soft: 'successSoft' },
   art: { color: 'purple', soft: 'purpleSoft' },

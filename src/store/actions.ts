@@ -6,7 +6,12 @@
 import { GROUP_PRESETS } from '@/constants/entry-meta';
 import { formatDate, todayIso } from '@/lib/date';
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
-import { canonicalizeOfficerPosition } from '@/lib/officer-roles';
+import {
+  formatPositionsDisplay,
+  normalizeCustomGrants,
+  normalizePositionsList,
+  type CustomOfficerGrantKey,
+} from '@/lib/officer-roles';
 import { createId, normalizeName } from '@/lib/utils';
 import type { StudentPrivateData } from '@/types/auth';
 import type {
@@ -125,11 +130,71 @@ export function createActions(
       mutate((prev) => ({ ...prev, currentStudentId: studentId })),
 
     updateClass: (patch: Partial<ClassInfo>) =>
-      mutate((prev) => ({
-        ...prev,
-        classInfo: { ...prev.classInfo, ...patch },
-        activityLog: appendLog(prev, actorName(), 'Cập nhật thông tin lớp'),
-      })),
+      mutate((prev) => {
+        const now = new Date().toISOString();
+        const nextClassInfo: ClassInfo = {
+          ...prev.classInfo,
+          ...patch,
+          customPositions:
+            patch.customPositions !== undefined
+              ? normalizePositionsList(patch.customPositions, null)
+              : prev.classInfo.customPositions,
+          semester1Start:
+            patch.semester1Start !== undefined
+              ? patch.semester1Start?.trim() || null
+              : prev.classInfo.semester1Start,
+          semester1End:
+            patch.semester1End !== undefined
+              ? patch.semester1End?.trim() || null
+              : prev.classInfo.semester1End,
+          updatedAt: now,
+        };
+        return {
+          ...prev,
+          classInfo: nextClassInfo,
+          activityLog: appendLog(prev, actorName(), 'Cập nhật thông tin lớp'),
+        };
+      }),
+
+    /** Adds a reusable GVCN custom position title preset on `classInfo.customPositions`. */
+    addCustomPositionPresetLocal: (title: string) =>
+      mutate((prev) => {
+        const additions = normalizePositionsList([title], null);
+        if (additions.length === 0) return prev;
+        const current = prev.classInfo.customPositions ?? [];
+        const nextList = normalizePositionsList([...current, ...additions], null);
+        if (nextList.length === current.length) return prev;
+        const now = new Date().toISOString();
+        return {
+          ...prev,
+          classInfo: {
+            ...prev.classInfo,
+            customPositions: nextList,
+            updatedAt: now,
+          },
+          activityLog: appendLog(prev, actorName(), `Thêm mẫu chức vụ "${additions.join(' · ')}"`),
+        };
+      }),
+
+    /** Removes a reusable GVCN custom position title preset from `classInfo.customPositions`. */
+    removeCustomPositionPresetLocal: (title: string) =>
+      mutate((prev) => {
+        const clean = title.trim().toLowerCase();
+        if (!clean) return prev;
+        const current = prev.classInfo.customPositions ?? [];
+        const nextList = current.filter((item) => item.trim().toLowerCase() !== clean);
+        if (nextList.length === current.length) return prev;
+        const now = new Date().toISOString();
+        return {
+          ...prev,
+          classInfo: {
+            ...prev.classInfo,
+            customPositions: nextList,
+            updatedAt: now,
+          },
+          activityLog: appendLog(prev, actorName(), `Xoá mẫu chức vụ "${title.trim()}"`),
+        };
+      }),
 
     logActivity: (action: string) =>
       mutate((prev) => ({
@@ -233,21 +298,71 @@ export function createActions(
         ),
       })),
 
-    /** Assigns or revokes (`null`) a student's class officer position (GVCN-only caller). */
-    assignStudentPositionLocal: (studentId: string, position: string | null) =>
+    /** Assigns multiple positions (built-in & custom) and optional explicit permissions (GVCN-only caller). */
+    assignStudentPositionsLocal: (
+      studentId: string,
+      positions: string[],
+      customPermissions?: CustomOfficerGrantKey[],
+    ) =>
       mutate((prev) => {
         const target = prev.students.find((s) => s.id === studentId);
         if (!target) return prev;
-        const cleanPos = canonicalizeOfficerPosition(position);
+        const cleanPositions = normalizePositionsList(positions, null);
+        const displayPos = formatPositionsDisplay(cleanPositions);
+        const cleanCustomPerms =
+          customPermissions !== undefined
+            ? normalizeCustomGrants(customPermissions)
+            : cleanPositions.length === 0
+              ? []
+              : normalizeCustomGrants(target.customPermissions);
         const prevPos = target.position;
         const now = new Date().toISOString();
-        const logText = cleanPos
-          ? `GVCN phân công chức vụ "${cleanPos}" cho ${target.name}`
+        const logText = displayPos
+          ? `GVCN phân công chức vụ "${displayPos}" cho ${target.name}`
           : `GVCN đã hủy chức vụ${prevPos ? ` "${prevPos}"` : ''} của ${target.name}`;
         return {
           ...prev,
           students: prev.students.map((s) =>
-            s.id === studentId ? { ...s, position: cleanPos, updatedAt: now } : s,
+            s.id === studentId
+              ? {
+                  ...s,
+                  position: displayPos,
+                  positions: cleanPositions,
+                  customPermissions: cleanCustomPerms,
+                  updatedAt: now,
+                }
+              : s,
+          ),
+          activityLog: appendLog(prev, actorName(), logText),
+        };
+      }),
+
+    /** Backward-compatible single-position wrapper (GVCN-only caller). */
+    assignStudentPositionLocal: (studentId: string, position: string | null) =>
+      mutate((prev) => {
+        const target = prev.students.find((s) => s.id === studentId);
+        if (!target) return prev;
+        const cleanPositions = position ? normalizePositionsList(null, position) : [];
+        const displayPos = formatPositionsDisplay(cleanPositions);
+        const cleanCustomPerms =
+          cleanPositions.length === 0 ? [] : normalizeCustomGrants(target.customPermissions);
+        const prevPos = target.position;
+        const now = new Date().toISOString();
+        const logText = displayPos
+          ? `GVCN phân công chức vụ "${displayPos}" cho ${target.name}`
+          : `GVCN đã hủy chức vụ${prevPos ? ` "${prevPos}"` : ''} của ${target.name}`;
+        return {
+          ...prev,
+          students: prev.students.map((s) =>
+            s.id === studentId
+              ? {
+                  ...s,
+                  position: displayPos,
+                  positions: cleanPositions,
+                  customPermissions: cleanCustomPerms,
+                  updatedAt: now,
+                }
+              : s,
           ),
           activityLog: appendLog(prev, actorName(), logText),
         };
@@ -312,15 +427,14 @@ export function createActions(
     addEntry: (input: EntryInput) => {
       const entry = buildEntry(input);
       const signedPoints = `${entry.points > 0 ? '+' : ''}${entry.points}đ`;
+      const logAction =
+        entry.kind === 'study'
+          ? `Ghi nhận ${entry.speechCount ?? 1} lượt phát biểu${entry.subject ? ` môn ${entry.subject}` : ''} (${signedPoints})`
+          : `Ghi mục "${entry.title}" (${signedPoints})`;
       mutate((prev) => ({
         ...prev,
         entries: [entry, ...prev.entries],
-        activityLog: appendLog(
-          prev,
-          actorName(),
-          `Ghi mục "${entry.title}" (${signedPoints})`,
-          actorStudentId(),
-        ),
+        activityLog: appendLog(prev, actorName(), logAction, actorStudentId()),
       }));
       return entry;
     },

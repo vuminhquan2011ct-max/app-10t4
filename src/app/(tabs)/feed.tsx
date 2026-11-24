@@ -106,7 +106,7 @@ function FeedProofPreview({
 
 type Filter = 'all' | EntryStatus;
 type CatFilter = 'all' | EntryCategory;
-type KindFilter = 'all' | 'bonus' | 'violation' | 'duty';
+type KindFilter = 'all' | 'study' | 'achievement' | 'academic' | 'violation' | 'duty';
 
 const FILTERS: { value: Filter; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: 'all', label: 'Tất cả', icon: 'layers-outline' },
@@ -117,9 +117,11 @@ const FILTERS: { value: Filter; label: string; icon: keyof typeof Ionicons.glyph
 
 const KIND_FILTERS: { value: KindFilter; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: 'all', label: 'Tất cả', icon: 'apps-outline' },
-  { value: 'bonus', label: 'Điểm cộng', icon: 'sparkles-outline' },
-  { value: 'violation', label: 'Vi phạm', icon: 'alert-circle-outline' },
-  { value: 'duty', label: 'Trực nhật', icon: 'leaf-outline' },
+  { value: 'study', label: '📚 Phát biểu', icon: 'book-outline' },
+  { value: 'achievement', label: '🏆 Thành tích', icon: 'trophy-outline' },
+  { value: 'academic', label: '🎓 Học thuật', icon: 'school-outline' },
+  { value: 'violation', label: '⚠️ Vi phạm', icon: 'alert-circle-outline' },
+  { value: 'duty', label: '🧹 Trực nhật', icon: 'leaf-outline' },
 ];
 
 export default function FeedScreen() {
@@ -130,6 +132,7 @@ export default function FeedScreen() {
     canEditClass,
     isOfficer,
     officerPositionLabel,
+    canRecordStudy,
     canRecordBonus,
     canRecordViolation,
     classRosterPublic,
@@ -177,13 +180,24 @@ export default function FeedScreen() {
   }, [entries]);
 
   const kindCounts = useMemo(() => {
-    const c: Record<KindFilter, number> = { all: entries.length, bonus: 0, violation: 0, duty: 0 };
+    const c: Record<KindFilter, number> = {
+      all: entries.length,
+      study: 0,
+      achievement: 0,
+      academic: 0,
+      violation: 0,
+      duty: 0,
+    };
     for (const entry of entries) {
       const isViol = entry.kind === 'violation' || entry.points < 0;
       const isDuty = entry.source === 'duty_diligence';
-      if (isDuty) c.duty += 1;
+      const isStudy = entry.kind === 'study';
+      const isAcademic = entry.category === 'academic';
+      if (isStudy) c.study += 1;
+      if (entry.kind === 'achievement') c.achievement += 1;
+      if (isAcademic) c.academic += 1;
       if (isViol) c.violation += 1;
-      else if (!isDuty) c.bonus += 1;
+      if (isDuty) c.duty += 1;
     }
     return c;
   }, [entries]);
@@ -196,20 +210,25 @@ export default function FeedScreen() {
         const matchCat = catFilter === 'all' || entry.category === catFilter;
         const isViol = entry.kind === 'violation' || entry.points < 0;
         const isDuty = entry.source === 'duty_diligence';
+        const isStudy = entry.kind === 'study';
         const matchKind =
           kindFilter === 'all'
             ? true
-            : kindFilter === 'violation'
-              ? isViol
-              : kindFilter === 'duty'
-                ? isDuty
-                : !isViol && !isDuty;
+            : kindFilter === 'study'
+              ? isStudy
+              : kindFilter === 'achievement'
+                ? entry.kind === 'achievement'
+                : kindFilter === 'academic'
+                  ? entry.category === 'academic'
+                  : kindFilter === 'violation'
+                    ? isViol
+                    : isDuty;
         const studentName =
           getStudent(entry.studentId)?.name ?? rosterById.get(entry.studentId)?.name ?? '';
         const matchQuery =
           !q ||
           stripVietnamese(
-            `${entry.title} ${studentName} ${entry.description ?? ''} ${entry.recordedByName ?? ''} ${entry.recordedByPosition ?? ''}`,
+            `${entry.title} ${entry.subject ?? ''} ${studentName} ${entry.description ?? ''} ${entry.recordedByName ?? ''} ${entry.recordedByPosition ?? ''}`,
           ).includes(q);
         return matchStatus && matchCat && matchKind && matchQuery;
       })
@@ -255,21 +274,23 @@ export default function FeedScreen() {
   const primaryCtaLabel =
     canRecordViolation && !canRecordBonus && !canEditClass
       ? 'Ghi học sinh vi phạm'
-      : canRecordBonus && !canEditClass && !canRecordViolation
-        ? 'Ghi điểm cộng Tổ'
-        : canRecordBonus && canRecordViolation && !canEditClass
-          ? 'Ghi điểm / Vi phạm'
-          : 'Ghi thành tích mới';
+      : canRecordStudy && !canRecordBonus && !canEditClass
+        ? 'Ghi phát biểu Môn'
+        : canRecordBonus && !canEditClass && !canRecordViolation
+          ? 'Ghi điểm cộng Tổ'
+          : canRecordBonus && canRecordViolation && !canEditClass
+            ? 'Ghi điểm / Vi phạm'
+            : 'Ghi thành tích mới';
 
   return (
     <Screen onRefresh={pullNow}>
       <FadeIn index={0}>
         <SectionHeader
           large
-          title={canViewAll || isOfficer ? 'Nhật ký thi đua & Kỷ luật' : 'Bài đăng của tôi'}
+          title={canViewAll || isOfficer ? 'Nhật ký thi đua & Học tập' : 'Bài đăng của tôi'}
           subtitle={
             canViewAll
-              ? sorted.length + ' / ' + entries.length + ' mục toàn lớp · Điểm cộng, Vi phạm & Trực nhật'
+              ? sorted.length + ' / ' + entries.length + ' mục toàn lớp · Phát biểu, Thành tích Học thuật & Kỷ luật'
               : isOfficer
                 ? `${sorted.length} mục thuộc phạm vi ${officerPositionLabel ?? 'Ban cán sự'}`
                 : sorted.length + ' mục của riêng bạn · Chỉ bạn & GVCN thấy'
@@ -369,8 +390,32 @@ export default function FeedScreen() {
                 <Ionicons name="checkmark-done" size={17} color="#FFFFFF" />
                 <Text style={styles.bannerGlassText}>{`Duyệt hết (${counts.pending})`}</Text>
               </Pressable>
-            ) : null}
+            ) : (
+              <Pressable
+                onPress={() => router.push('/study' as never)}
+                style={({ pressed }) => [
+                  styles.bannerGlassBtn,
+                  pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+                ]}>
+                <Ionicons name="book" size={16} color="#FFFFFF" />
+                <Text style={styles.bannerGlassText}>Thống kê HK I →</Text>
+              </Pressable>
+            )}
           </View>
+
+          {role === 'teacher' && counts.pending > 0 ? (
+            <Pressable
+              onPress={() => router.push('/study' as never)}
+              style={({ pressed }) => [
+                styles.bannerGlassBtn,
+                pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+              ]}>
+              <Ionicons name="book" size={15} color="#A7F3D0" />
+              <Text style={styles.bannerGlassText}>
+                Xem thống kê phát biểu tuần & cộng dồn HK I →
+              </Text>
+            </Pressable>
+          ) : null}
         </LinearGradient>
       </FadeIn>
 
@@ -379,12 +424,12 @@ export default function FeedScreen() {
         <Card style={styles.filterCard}>
           <TextField
             icon={'search'}
-            placeholder={'Tìm thành tích, vi phạm, tên học sinh, người ghi...'}
+            placeholder={'Tìm phát biểu, môn học, thành tích học thuật, vi phạm...'}
             value={query}
             onChangeText={setQuery}
           />
 
-          {/* Kind Filter Chips: Tất cả | Điểm cộng | Vi phạm | Trực nhật */}
+          {/* Kind Filter Chips: Tất cả | Phát biểu | Thành tích | Học thuật | Vi phạm | Trực nhật */}
           <View style={styles.filterGroup}>
             <Text style={[styles.filterHeading, { color: theme.textMuted }]}>PHÂN LOẠI GHI NHẬN</Text>
             <ScrollView
@@ -460,11 +505,14 @@ export default function FeedScreen() {
         sorted.map((entry, i) => {
           const status = ENTRY_STATUSES[entry.status];
           const isViolation = entry.kind === 'violation' || entry.points < 0;
+          const isStudy = entry.kind === 'study';
+          const isAcademic = entry.category === 'academic';
           const isDuty = entry.source === 'duty_diligence';
           const kind = ENTRY_KINDS[entry.kind] ?? ENTRY_KINDS.achievement;
-          const accentColor = isViolation ? 'danger' : kind.color;
-          const accentSoft = isViolation ? 'dangerSoft' : kind.soft;
-          const category = ENTRY_CATEGORIES[entry.category] ?? ENTRY_CATEGORIES.study;
+          const accentColor = isViolation ? 'danger' : isStudy ? 'success' : kind.color;
+          const accentSoft = isViolation ? 'dangerSoft' : isStudy ? 'successSoft' : kind.soft;
+          const speechCount = isStudy ? Math.max(1, Math.round(entry.speechCount ?? 1)) : 0;
+          const category = ENTRY_CATEGORIES[entry.category] ?? ENTRY_CATEGORIES.other;
           const student = getStudent(entry.studentId);
           const pubStudent = rosterById.get(entry.studentId);
           const studentName = student?.name ?? pubStudent?.name ?? 'Học sinh';
@@ -491,6 +539,11 @@ export default function FeedScreen() {
                   isViolation &&
                     entry.status !== 'pending' && {
                       borderColor: theme.danger,
+                      borderWidth: 1,
+                    },
+                  isStudy &&
+                    entry.status !== 'pending' && {
+                      borderColor: theme.success,
                       borderWidth: 1,
                     },
                 ]}
@@ -546,7 +599,7 @@ export default function FeedScreen() {
                       },
                     ]}>
                     <Ionicons
-                      name={isViolation ? 'alert-circle' : kind.icon}
+                      name={isViolation ? 'alert-circle' : isStudy ? 'book' : kind.icon}
                       size={21}
                       color={theme[accentColor]}
                     />
@@ -556,7 +609,13 @@ export default function FeedScreen() {
                       {entry.title}
                     </Text>
                     <Text style={[styles.kindLabelText, { color: theme[accentColor] }]}>
-                      {isViolation ? 'Vi phạm / Nhắc nhở' : kind.label}
+                      {isViolation
+                        ? 'Vi phạm / Nhắc nhở'
+                        : isStudy
+                          ? entry.subject
+                            ? `Học tập · Môn ${entry.subject} (${speechCount} lượt)`
+                            : `Học tập · Phát biểu (${speechCount} lượt)`
+                          : kind.label}
                     </Text>
                   </View>
                   {entry.points !== 0 ? (
@@ -569,7 +628,7 @@ export default function FeedScreen() {
                         },
                       ]}>
                       <Ionicons
-                        name={entry.points < 0 ? 'alert-circle' : 'sparkles'}
+                        name={entry.points < 0 ? 'alert-circle' : isStudy ? 'book' : 'sparkles'}
                         size={11}
                         color={theme[accentColor]}
                       />
@@ -595,6 +654,30 @@ export default function FeedScreen() {
 
                 {/* Badges Row */}
                 <View style={styles.badges}>
+                  {isStudy ? (
+                    <>
+                      <Badge
+                        label={entry.subject ? `Phát biểu · ${entry.subject}` : 'Học tập · Phát biểu'}
+                        color={'success'}
+                        soft={'successSoft'}
+                        icon={'book'}
+                      />
+                      <Badge
+                        label={`${speechCount} lượt`}
+                        color={'success'}
+                        soft={'successSoft'}
+                        icon={'hand-left-outline'}
+                      />
+                    </>
+                  ) : null}
+                  {isAcademic ? (
+                    <Badge
+                      label={'Thành tích Học thuật'}
+                      color={'gold'}
+                      soft={'goldSoft'}
+                      icon={'school'}
+                    />
+                  ) : null}
                   {isViolation ? (
                     <Badge
                       label={'Vi phạm'}
@@ -625,12 +708,14 @@ export default function FeedScreen() {
                     soft={status.soft}
                     icon={status.icon}
                   />
-                  <Badge
-                    label={category.label}
-                    color={'purple'}
-                    soft={'purpleSoft'}
-                    icon={category.icon}
-                  />
+                  {!isStudy && !isAcademic ? (
+                    <Badge
+                      label={category.label}
+                      color={'purple'}
+                      soft={'purpleSoft'}
+                      icon={category.icon}
+                    />
+                  ) : null}
                   <Badge
                     label={ENTRY_LEVELS[entry.level].label}
                     color={'accentText'}
