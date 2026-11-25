@@ -317,6 +317,7 @@ export type ClassStore = BaseActions & {
   canRecordBonus: boolean;
   canRecordViolation: boolean;
   canRecordStudy: boolean;
+  canRecordStudyClassWide: boolean;
   canRecordBonusForStudent: (
     target: { id: string; group?: string | null } | null | undefined,
   ) => boolean;
@@ -554,14 +555,6 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     officerPermissions.isClassMonitor ||
     officerPermissions.customPermissions.includes('full_coordination') ||
     inferredOfficerGrants.includes('full_coordination');
-  const hasClassWideStudyView =
-    canViewAll ||
-    isSubjectTeacher ||
-    hasFullCoordination ||
-    officerPermissions.isAcademicVP ||
-    officerPermissions.customPermissions.includes('record_study') ||
-    inferredOfficerGrants.includes('record_study') ||
-    officerPermissions.inferredStudySubjects.length > 0;
   const hasGroupBonusScope =
     officerPermissions.isGroupLeader ||
     officerPermissions.customPermissions.includes('record_bonus_group') ||
@@ -1378,46 +1371,33 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           source: 'officer_violation',
         };
       } else if (isStudy) {
-        const canRecordThisStudy = officerPermissions.canRecordStudyForStudent(targetStudent);
-        if (
-          canRecordThisStudy &&
-          (isClassmateTarget ||
-            isSubjectTeacher ||
-            input.submittedBy === 'teacher' ||
-            input.source === 'study_participation')
-        ) {
-          finalInput = {
-            ...input,
-            kind: 'study',
-            category: 'study',
-            subject: input.subject?.trim() || (isSubjectTeacher ? subjectName : null),
-            speechCount: 1,
-            points: STUDY_STAMP_POINTS,
-            status: 'approved',
-            submittedBy: 'teacher',
-            recordedByName: actorLabel,
-            recordedByPosition: isSubjectTeacher
-              ? `GV ${subjectName ?? input.subject ?? 'Bộ môn'}`
-              : (officerPermissions.officerPositionLabel ?? 'Ban cán sự'),
-            recordedByStudentId: isSubjectTeacher ? null : effectiveStudentId,
-            source: 'study_participation',
-          };
-        } else if (isClassmateTarget) {
-          throw new Error('Bạn không có quyền ghi nhận phát biểu cho học sinh này.');
-        } else {
-          const enforcedStudentId = effectiveStudentId ?? input.studentId;
-          finalInput = {
-            ...input,
-            studentId: enforcedStudentId,
-            kind: 'study',
-            category: 'study',
-            speechCount: 1,
-            points: STUDY_STAMP_POINTS,
-            submittedBy: canEditClass ? 'teacher' : 'student',
-            status: canEditClass ? 'approved' : 'pending',
-            source: canEditClass ? 'study_participation' : 'self',
-          };
+        if (!officerPermissions.canRecordStudy) {
+          throw new Error(
+            'Chỉ Giáo viên và thành viên được GVCN giao chức vụ mới có quyền cộng Stamp phát biểu (+0,25đ).',
+          );
         }
+        if (!targetStudent || !officerPermissions.canRecordStudyForStudent(targetStudent)) {
+          throw new Error(
+            'Bạn chỉ được phép cộng Stamp phát biểu cho thành viên trong Tổ của mình.',
+          );
+        }
+        finalInput = {
+          ...input,
+          studentId: targetStudent.id,
+          kind: 'study',
+          category: 'study',
+          subject: input.subject?.trim() || (isSubjectTeacher ? subjectName : null),
+          speechCount: 1,
+          points: STUDY_STAMP_POINTS,
+          status: 'approved',
+          submittedBy: 'teacher',
+          recordedByName: actorLabel,
+          recordedByPosition: isSubjectTeacher
+            ? `GV ${subjectName ?? input.subject ?? 'Bộ môn'}`
+            : (officerPermissions.officerPositionLabel ?? 'Ban cán sự'),
+          recordedByStudentId: isSubjectTeacher ? null : effectiveStudentId,
+          source: 'study_participation',
+        };
       } else if (
         isClassmateTarget ||
         (officerPermissions.canRecordBonusForStudent(targetStudent) &&
@@ -1485,23 +1465,22 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (!cleanSubject) {
         throw new Error('Vui lòng chọn hoặc nhập môn học.');
       }
+      if (!officerPermissions.canRecordStudy) {
+        throw new Error(
+          'Chỉ Giáo viên và thành viên được GVCN giao chức vụ mới có quyền cộng Stamp phát biểu (+0,25đ).',
+        );
+      }
       const targetStudent =
         stateRef.current.students.find((s) => s.id === input.studentId) ?? null;
-      if (!targetStudent) {
-        throw new Error('Không tìm thấy học sinh để ghi nhận phát biểu.');
+      if (!targetStudent || !officerPermissions.canRecordStudyForStudent(targetStudent)) {
+        throw new Error(
+          'Bạn chỉ được phép cộng Stamp phát biểu cho thành viên trong Tổ của mình.',
+        );
       }
       const speechCount = 1;
       const points = STUDY_STAMP_POINTS;
       const title = input.title?.trim() || `Phát biểu môn ${cleanSubject} (1 stamp)`;
       const date = input.date?.trim() || todayIso();
-
-      const isAuthorized = officerPermissions.canRecordStudyForStudent(targetStudent);
-      const isSelfSubmission = Boolean(
-        effectiveStudentId && targetStudent.id === effectiveStudentId,
-      );
-      if (!isAuthorized && !isSelfSubmission) {
-        throw new Error('Bạn không có quyền ghi nhận phát biểu cho học sinh này.');
-      }
 
       const recorderPosition = isTeacher
         ? 'GVCN'
@@ -1509,40 +1488,24 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           ? `GV ${subjectName ?? cleanSubject}`
           : (officerPermissions.officerPositionLabel ?? 'Ban cán sự');
 
-      const entryInput: EntryInput = isAuthorized
-        ? {
-            studentId: targetStudent.id,
-            title,
-            kind: 'study',
-            category: 'study',
-            level: 'class',
-            date,
-            subject: cleanSubject,
-            speechCount,
-            points,
-            description: input.note?.trim() || null,
-            status: 'approved',
-            submittedBy: 'teacher',
-            recordedByName: actorLabel,
-            recordedByPosition: recorderPosition,
-            recordedByStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
-            source: 'study_participation',
-          }
-        : {
-            studentId: effectiveStudentId!,
-            title,
-            kind: 'study',
-            category: 'study',
-            level: 'class',
-            date,
-            subject: cleanSubject,
-            speechCount,
-            points,
-            description: input.note?.trim() || null,
-            status: 'pending',
-            submittedBy: 'student',
-            source: 'self',
-          };
+      const entryInput: EntryInput = {
+        studentId: targetStudent.id,
+        title,
+        kind: 'study',
+        category: 'study',
+        level: 'class',
+        date,
+        subject: cleanSubject,
+        speechCount,
+        points,
+        description: input.note?.trim() || null,
+        status: 'approved',
+        submittedBy: 'teacher',
+        recordedByName: actorLabel,
+        recordedByPosition: recorderPosition,
+        recordedByStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
+        source: 'study_participation',
+      };
 
       const created = actions.addEntry(entryInput);
       flushCloud('log-study-participation');
@@ -1734,42 +1697,29 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const canDeleteStudyStamp = useCallback(
     (entry: Entry): boolean => {
       if (!entry || entry.kind !== 'study') return false;
-      if (
-        isTeacher ||
-        officerPermissions.isClassMonitor ||
-        canEditClass ||
-        hasFullCoordination
-      ) {
+      if (isTeacher || isSubjectTeacher || officerPermissions.canRecordStudyClassWide) {
         return true;
       }
-      const targetStudent =
-        state.students.find((s) => s.id === entry.studentId) ?? {
-          id: entry.studentId,
-          group: null,
-        };
-      if (officerPermissions.canRecordStudyForStudent(targetStudent)) {
-        return true;
+      if (officerPermissions.isOfficer) {
+        const targetStudent =
+          state.students.find((s) => s.id === entry.studentId) ?? {
+            id: entry.studentId,
+            group: null,
+          };
+        if (officerPermissions.canRecordStudyForStudent(targetStudent)) {
+          return true;
+        }
+        if (effectiveStudentId !== null && entry.recordedByStudentId === effectiveStudentId) {
+          return true;
+        }
       }
-      if (effectiveStudentId !== null && entry.recordedByStudentId === effectiveStudentId) {
-        return true;
-      }
-      if (
+      return (
         effectiveStudentId !== null &&
         entry.studentId === effectiveStudentId &&
         entry.status === 'pending'
-      ) {
-        return true;
-      }
-      return false;
+      );
     },
-    [
-      isTeacher,
-      officerPermissions,
-      canEditClass,
-      hasFullCoordination,
-      state.students,
-      effectiveStudentId,
-    ],
+    [isTeacher, isSubjectTeacher, officerPermissions, state.students, effectiveStudentId],
   );
 
   const deleteStudyStamp = useCallback(
@@ -2321,9 +2271,15 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   }, [officerPermissions.canManageDuty, classRosterPublic]);
 
   const studyTargetStudents = useMemo<PublicStudentRosterItem[]>(() => {
-    if (!officerPermissions.canRecordStudy) return [];
-    return classRosterPublic.filter((s) => officerPermissions.canRecordStudyForStudent(s));
-  }, [officerPermissions, classRosterPublic]);
+    if (officerPermissions.canRecordStudyClassWide) return classRosterPublic;
+    if (officerPermissions.isOfficer) {
+      if (!currentStudentGroup) return [];
+      return classRosterPublic.filter(
+        (s) => (s.group?.trim().toLowerCase() ?? '') === currentStudentGroup,
+      );
+    }
+    return [];
+  }, [officerPermissions, currentStudentGroup, classRosterPublic]);
 
   const visibleStudents = useMemo(() => {
     if (canViewAll) return state.students;
@@ -2339,7 +2295,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     if (!effectiveStudentId) return [];
 
     let myGroupStudentIds: Set<string> | null = null;
-    if (hasGroupBonusScope && currentStudentGroup) {
+    if ((hasGroupBonusScope || officerPermissions.isOfficer) && currentStudentGroup) {
       myGroupStudentIds = new Set(
         state.students
           .filter((s) => (s.group?.trim().toLowerCase() ?? '') === currentStudentGroup)
@@ -2351,7 +2307,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (e.studentId === effectiveStudentId || e.recordedByStudentId === effectiveStudentId) {
         return true;
       }
-      if (hasClassWideStudyView && e.kind === 'study') {
+      if (officerPermissions.canRecordStudyClassWide && e.kind === 'study') {
         return true;
       }
       if (officerPermissions.canRecordViolation && e.kind === 'violation') {
@@ -2361,14 +2317,14 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         return true;
       }
       if (myGroupStudentIds && myGroupStudentIds.has(e.studentId)) {
-        return true;
+        if (hasGroupBonusScope) return true;
+        if (officerPermissions.isOfficer && e.kind === 'study') return true;
       }
       return false;
     });
   }, [
     canViewAll,
     hasFullCoordination,
-    hasClassWideStudyView,
     hasGroupBonusScope,
     isSubjectTeacher,
     officerPermissions,
@@ -2383,10 +2339,10 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       let reportStudents: { id: string; name: string; code: string; group: string | null }[];
       let reportEntries: Entry[];
 
-      if (hasClassWideStudyView) {
+      if (canViewAll || officerPermissions.canRecordStudyClassWide || officerPermissions.isClassMonitor) {
         reportStudents = classRosterPublic;
         reportEntries = state.entries;
-      } else if (officerPermissions.canRecordStudy && studyTargetStudents.length > 0) {
+      } else if (officerPermissions.isOfficer && studyTargetStudents.length > 0) {
         reportStudents = studyTargetStudents;
         const allowedIds = new Set(studyTargetStudents.map((s) => s.id));
         reportEntries = state.entries.filter((e) => allowedIds.has(e.studentId));
@@ -2415,8 +2371,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       });
     },
     [
-      hasClassWideStudyView,
-      officerPermissions.canRecordStudy,
+      canViewAll,
+      officerPermissions,
       classRosterPublic,
       studyTargetStudents,
       currentStudent,
@@ -2737,6 +2693,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       canRecordBonus: officerPermissions.canRecordBonus,
       canRecordViolation: officerPermissions.canRecordViolation,
       canRecordStudy: officerPermissions.canRecordStudy,
+      canRecordStudyClassWide: officerPermissions.canRecordStudyClassWide,
       canRecordBonusForStudent: officerPermissions.canRecordBonusForStudent,
       canRecordViolationForStudent: officerPermissions.canRecordViolationForStudent,
       canRecordStudyForStudent: officerPermissions.canRecordStudyForStudent,

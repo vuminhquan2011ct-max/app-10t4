@@ -67,11 +67,11 @@ export default function StudyParticipationScreen() {
     isTeacher,
     isSubjectTeacher,
     subjectName,
-    isOfficer,
     officerPositionLabel,
     inferredStudySubjects,
     currentStudent,
     canRecordStudy,
+    canRecordStudyClassWide,
     studyTargetStudents,
     canDeleteStudyStamp,
     deleteStudyStamp,
@@ -85,7 +85,7 @@ export default function StudyParticipationScreen() {
   const { showToast } = useToast();
 
   const initialTab: StudyTab =
-    params.tab === 'record' || params.tab === 'weekly' || params.tab === 'semester1'
+    params.tab === 'weekly' || params.tab === 'semester1'
       ? params.tab
       : canRecordStudy
         ? 'record'
@@ -138,24 +138,15 @@ export default function StudyParticipationScreen() {
     [classRosterPublic],
   );
 
-  // Target list for Tab 1 (strictly scoped by store RBAC; regular student sees self)
-  const recordCandidates = useMemo<PublicStudentRosterItem[]>(() => {
-    if (canRecordStudy) return studyTargetStudents;
-    if (currentStudent) {
-      return [
-        {
-          id: currentStudent.id,
-          name: currentStudent.name,
-          code: currentStudent.code,
-          gender: currentStudent.gender,
-          group: currentStudent.group,
-          position: currentStudent.position,
-          positions: currentStudent.positions,
-        },
-      ];
-    }
-    return [];
-  }, [canRecordStudy, studyTargetStudents, currentStudent]);
+  const isGroupScopedStudy = canRecordStudy && !canRecordStudyClassWide;
+  const myGroup = currentStudent?.group?.trim() ?? '';
+  const isMissingGroup = isGroupScopedStudy && !myGroup;
+
+  // Target list for Tab 1: strictly scoped by store RBAC (never falls back to self for regular students)
+  const recordCandidates = useMemo<PublicStudentRosterItem[]>(
+    () => (canRecordStudy ? studyTargetStudents : []),
+    [canRecordStudy, studyTargetStudents],
+  );
 
   const groups = useMemo(() => {
     const set = new Set<string>(GROUP_PRESETS);
@@ -169,13 +160,14 @@ export default function StudyParticipationScreen() {
     const q = stripVietnamese(studentQuery);
     return recordCandidates
       .filter((s) => {
-        const matchGroup = groupFilter === 'all' || (s.group?.trim() ?? '') === groupFilter;
+        const matchGroup =
+          isGroupScopedStudy || groupFilter === 'all' || (s.group?.trim() ?? '') === groupFilter;
         if (!matchGroup) return false;
         if (!q) return true;
         return stripVietnamese(`${s.name} ${s.code} ${s.group ?? ''}`).includes(q);
       })
       .sort((a, b) => a.name.localeCompare(b.name, 'vi'));
-  }, [recordCandidates, groupFilter, studentQuery]);
+  }, [recordCandidates, isGroupScopedStudy, groupFilter, studentQuery]);
 
   // All study stamp entries sorted newest first
   const allStudyStamps = useMemo(
@@ -392,12 +384,14 @@ export default function StudyParticipationScreen() {
   const activeExportMode: 'weekly' | 'semester1' = activeTab === 'weekly' ? 'weekly' : 'semester1';
 
   const authorityLabel = isTeacher
-    ? 'Quyền GVCN · Đóng & xoá stamp phát biểu toàn lớp (duyệt tức thì)'
+    ? 'Quyền GVCN · Cộng & xoá Stamp (+0,25đ) toàn lớp (duyệt tức thì)'
     : isSubjectTeacher
-      ? `Quyền GV Bộ môn ${subjectName ?? ''} · Đóng & xoá stamp phát biểu toàn lớp`
-      : canRecordStudy
-        ? `Quyền ${officerPositionLabel || 'Ban cán sự học tập'} · Đóng stamp phát biểu trực tiếp`
-        : 'Tự gửi stamp phát biểu cá nhân (chờ GVCN duyệt)';
+      ? `Quyền GV Bộ môn ${subjectName ?? ''} · Cộng & xoá Stamp (+0,25đ) toàn lớp`
+      : canRecordStudyClassWide
+        ? `Quyền ${officerPositionLabel || 'Ban cán sự'} · Cộng & xoá Stamp (+0,25đ) toàn lớp`
+        : canRecordStudy
+          ? `Quyền ${officerPositionLabel || 'Ban cán sự'} · Cộng & xoá Stamp (+0,25đ) cho thành viên ${myGroup || 'Tổ của mình'}`
+          : 'Chỉ thành viên được GVCN giao chức vụ mới được cộng Stamp';
 
   const renderStampRow = (entry: Entry, prefix: string) => {
     const stu = rosterById.get(entry.studentId);
@@ -468,10 +462,12 @@ export default function StudyParticipationScreen() {
       <PageHeader
         title={'Học tập & Stamp Phát biểu'}
         subtitle={`Lớp ${classInfo.name} · 1 lần phát biểu = 1 Stamp = +0,25 điểm`}
-        rightIcon={'add-circle-outline'}
-        rightLabel={'Ghi chi tiết'}
-        onRightPress={() =>
-          router.push({ pathname: '/entry-form', params: { mode: 'study' } } as never)
+        rightIcon={canRecordStudy ? 'add-circle-outline' : undefined}
+        rightLabel={canRecordStudy ? 'Ghi chi tiết' : undefined}
+        onRightPress={
+          canRecordStudy
+            ? () => router.push({ pathname: '/entry-form', params: { mode: 'study' } } as never)
+            : undefined
         }
       />
 
@@ -581,24 +577,53 @@ export default function StudyParticipationScreen() {
 
       {/* ==================== TAB 1: 1-TAP STAMP RECORDER & DELETION ==================== */}
       {activeTab === 'record' ? (
+        !canRecordStudy ? (
+          <FadeIn index={2}>
+            <Card
+              style={[
+                styles.lockedCard,
+                { borderColor: `${theme.warning}77`, borderWidth: 1.2 },
+              ]}>
+              <View style={[styles.lockedIconWrap, { backgroundColor: theme.warningSoft }]}>
+                <Ionicons name="lock-closed" size={26} color={theme.warning} />
+              </View>
+              <Text style={[styles.lockedTitle, { color: theme.text }]}>
+                Chỉ thành viên được GVCN giao chức vụ mới được cộng Stamp
+              </Text>
+              <Text style={[styles.lockedMessage, { color: theme.textSecondary }]}>
+                Khi GVCN giao chức vụ (Tổ trưởng, Lớp phó lao động, Lớp trưởng, hoặc chức vụ tự
+                ghi...), bạn sẽ được cộng & xoá Stamp (+0,25đ) cho các thành viên trong Tổ của mình.
+              </Text>
+              <View style={styles.lockedBtnRow}>
+                <Button
+                  label={'Xem thống kê tuần'}
+                  icon={'bar-chart-outline'}
+                  size={'sm'}
+                  style={styles.flex}
+                  onPress={() => setActiveTab('weekly')}
+                />
+                <Button
+                  label={'Cộng dồn HK I'}
+                  variant={'soft'}
+                  icon={'ribbon-outline'}
+                  size={'sm'}
+                  style={styles.flex}
+                  onPress={() => setActiveTab('semester1')}
+                />
+              </View>
+            </Card>
+          </FadeIn>
+        ) : (
         <>
           <FadeIn index={2}>
             <Card
               style={[
                 styles.controlCard,
-                { borderColor: canRecordStudy ? theme.success : theme.border, borderWidth: 1.2 },
+                { borderColor: theme.success, borderWidth: 1.2 },
               ]}>
               <View style={styles.authorityRow}>
-                <View
-                  style={[
-                    styles.iconBox,
-                    { backgroundColor: canRecordStudy ? theme.successSoft : theme.accentSoft },
-                  ]}>
-                  <Ionicons
-                    name={canRecordStudy ? 'shield-checkmark' : 'book-outline'}
-                    size={18}
-                    color={canRecordStudy ? theme.success : theme.accent}
-                  />
+                <View style={[styles.iconBox, { backgroundColor: theme.successSoft }]}>
+                  <Ionicons name="shield-checkmark" size={18} color={theme.success} />
                 </View>
                 <View style={styles.flex}>
                   <Text style={[styles.cardTitle, { color: theme.text }]}>
@@ -609,6 +634,44 @@ export default function StudyParticipationScreen() {
                   </Text>
                 </View>
               </View>
+
+              {isGroupScopedStudy ? (
+                <View style={styles.scopeBadgeRow}>
+                  <Badge
+                    label={`Quyền ${officerPositionLabel || 'Ban cán sự'} · Cộng & xoá Stamp (+0,25đ) cho thành viên ${myGroup || 'trong Tổ'}`}
+                    color={'success'}
+                    soft={'successSoft'}
+                    icon={'shield-checkmark'}
+                  />
+                  {!isMissingGroup ? (
+                    <Badge
+                      label={`Thành viên ${myGroup} (${studyTargetStudents.length} HS)`}
+                      color={'accentText'}
+                      soft={'accentSoft'}
+                      icon={'people'}
+                    />
+                  ) : null}
+                </View>
+              ) : null}
+
+              {isMissingGroup ? (
+                <View
+                  style={[
+                    styles.missingGroupBox,
+                    { backgroundColor: theme.warningSoft, borderColor: theme.warning },
+                  ]}>
+                  <Ionicons name="alert-circle" size={18} color={theme.warning} />
+                  <View style={styles.flex}>
+                    <Text style={[styles.missingGroupTitle, { color: theme.warning }]}>
+                      Chưa được GVCN phân Tổ (Tổ 1–4)
+                    </Text>
+                    <Text style={{ color: theme.textSecondary, fontSize: 12, lineHeight: 17 }}>
+                      Bạn đã có chức vụ Ban cán sự nhưng hồ sơ chưa thuộc Tổ nào nên chưa thể chọn
+                      thành viên trong Tổ để cộng Stamp. Hãy nhờ GVCN cập nhật Tổ cho hồ sơ của bạn.
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
 
               {/* Subject Selector */}
               <View style={styles.sectionBlock}>
@@ -681,36 +744,42 @@ export default function StudyParticipationScreen() {
                 <>
                   <TextField
                     icon={'search'}
-                    placeholder={'Tìm học sinh theo tên, Số ID, tổ...'}
+                    placeholder={
+                      isGroupScopedStudy
+                        ? `Tìm thành viên ${myGroup} theo tên hoặc Số ID...`
+                        : 'Tìm học sinh theo tên, Số ID, tổ...'
+                    }
                     value={studentQuery}
                     onChangeText={setStudentQuery}
                     clearable
                   />
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={styles.chips}>
-                    {groups.map((g) => (
-                      <Chip
-                        key={g}
-                        label={g === 'all' ? `Cả danh sách (${recordCandidates.length})` : g}
-                        selected={groupFilter === g}
-                        onPress={() => setGroupFilter(g)}
-                      />
-                    ))}
-                  </ScrollView>
+                  {canRecordStudyClassWide ? (
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.chips}>
+                      {groups.map((g) => (
+                        <Chip
+                          key={g}
+                          label={g === 'all' ? `Cả danh sách (${recordCandidates.length})` : g}
+                          selected={groupFilter === g}
+                          onPress={() => setGroupFilter(g)}
+                        />
+                      ))}
+                    </ScrollView>
+                  ) : null}
                 </>
               ) : null}
             </Card>
           </FadeIn>
 
-          {visibleCandidates.length === 0 ? (
+          {isMissingGroup ? null : visibleCandidates.length === 0 ? (
             <EmptyState
               icon={'people-outline'}
               title={'Chưa có học sinh trong danh sách ghi nhận'}
               message={
-                isOfficer && !canRecordStudy
-                  ? 'Chức vụ hiện tại chưa có quyền ghi nhận phát biểu cho lớp.'
+                isGroupScopedStudy
+                  ? `Chưa có thành viên nào trong ${myGroup} khớp từ khóa tìm kiếm.`
                   : 'Thử đổi từ khóa tìm kiếm hoặc chọn tổ khác.'
               }
             />
@@ -860,6 +929,7 @@ export default function StudyParticipationScreen() {
             )}
           </Card>
         </>
+        )
       ) : null}
 
       {/* ==================== TAB 2: WEEKLY STATISTICS ==================== */}
@@ -1558,6 +1628,50 @@ const styles = StyleSheet.create({
   },
   segTabText: { fontSize: 12, fontWeight: '800' },
   controlCard: { gap: Spacing.three },
+  lockedCard: {
+    alignItems: 'center',
+    gap: Spacing.two + 2,
+    paddingVertical: Spacing.four,
+    paddingHorizontal: Spacing.three,
+  },
+  lockedIconWrap: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lockedTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  lockedMessage: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+  },
+  lockedBtnRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+    width: '100%',
+    marginTop: Spacing.one,
+  },
+  scopeBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  missingGroupBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.two,
+    padding: Spacing.two + 2,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  missingGroupTitle: { fontSize: 13, fontWeight: '900', marginBottom: 2 },
   sectionCard: { gap: Spacing.two + 2 },
   authorityRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
   iconBox: {

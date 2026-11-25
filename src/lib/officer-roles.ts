@@ -86,6 +86,7 @@ export type OfficerPermissions = {
   isGroupLeader: boolean;
   canAssignPositions: boolean;
   canManageDuty: boolean;
+  canRecordStudyClassWide: boolean;
   canRecordStudy: boolean;
   canRecordStudyForStudent: (target: { id: string; group?: string | null } | null | undefined) => boolean;
   canRecordBonus: boolean;
@@ -104,9 +105,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'shield-checkmark',
     color: 'accent',
     department: 'class_board',
-    summary: 'Điều phối toàn lớp, chấm trực nhật, ghi phát biểu, điểm cộng / vi phạm & sự kiện.',
+    summary: 'Điều phối toàn lớp, chấm trực nhật, cộng Stamp cho Tổ, ghi điểm cộng / vi phạm & sự kiện.',
     permissions: [
-      'Ghi nhận phát biểu học tập theo môn toàn lớp',
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Phân công & chấm trực nhật tính vào Điểm chuyên cần',
       'Ghi điểm cộng & ghi nhận học sinh vi phạm toàn lớp',
       'Quản lý Nhiệm vụ, Sự kiện, Phòng ban & đăng Bản tin lớp',
@@ -119,8 +120,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'flame',
     color: 'danger',
     department: 'youth_union',
-    summary: 'Phụ trách công tác Đoàn, phong trào thanh niên, sự kiện & thông báo lớp.',
+    summary: 'Phụ trách công tác Đoàn, phong trào thanh niên, cộng Stamp cho Tổ, sự kiện & thông báo lớp.',
     permissions: [
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Quản lý Nhiệm vụ & Sự kiện Ban Đoàn thể',
       'Đăng bản tin phong trào, hoạt động Đoàn lên Bảng tin',
       'Điều phối hoạt động tình nguyện & sự kiện tập thể',
@@ -133,9 +135,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'school',
     color: 'accent',
     department: 'academic',
-    summary: 'Phụ trách Ban Học tập, ghi phát biểu theo môn, bài tập GV giao & lịch kiểm tra.',
+    summary: 'Phụ trách Ban Học tập, cộng Stamp cho Tổ, theo dõi bài tập GV giao & lịch kiểm tra.',
     permissions: [
-      'Ghi nhận phát biểu theo môn & thống kê Học kỳ I toàn lớp',
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Quản lý Nhiệm vụ GV giao & lịch kiểm tra của lớp',
       'Đăng bản tin nhắc bài & thông báo học tập',
     ],
@@ -147,8 +149,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'sparkles',
     color: 'success',
     department: 'labor',
-    summary: 'Phân công trực nhật hàng ngày & chấm hoàn thành ghi trực tiếp vào Điểm chuyên cần.',
+    summary: 'Phân công & chấm trực nhật vào Điểm chuyên cần và cộng Stamp phát biểu cho thành viên Tổ.',
     permissions: [
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Điều chỉnh lịch Tổ trực nhật các ngày trong tuần',
       'Phân công học sinh trực nhật theo từng ngày',
       'Chấm Hoàn thành / Chưa hoàn thành trực nhật vào Điểm chuyên cần',
@@ -161,8 +164,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'alert-circle',
     color: 'warning',
     department: 'discipline',
-    summary: 'Theo dõi nề nếp tác phong, ghi nhận học sinh vi phạm & nhắc nhở kỷ luật lớp.',
+    summary: 'Theo dõi nề nếp, ghi nhận vi phạm, nhắc nhở kỷ luật lớp & cộng Stamp cho Tổ mình.',
     permissions: [
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Ghi nhận học sinh vi phạm / trừ điểm nề nếp toàn lớp',
       'Quản lý Nhiệm vụ & sự kiện Ban Kỷ luật',
       'Đăng thông báo nhắc nhở nề nếp lên Bảng tin lớp',
@@ -175,8 +179,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'musical-notes',
     color: 'purple',
     department: 'arts',
-    summary: 'Phụ trách Ban Văn thể mỹ, tổ chức văn nghệ, báo tường & sự kiện văn hóa lớp.',
+    summary: 'Phụ trách Ban Văn thể mỹ, cộng Stamp cho Tổ & tổ chức sự kiện văn nghệ, văn hóa lớp.',
     permissions: [
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Tạo & điều phối sự kiện Ban Văn thể mỹ',
       'Quản lý nhiệm vụ văn nghệ, trang trí & hội diễn',
       'Đăng bản tin thông báo & tuyển thành viên sự kiện',
@@ -189,8 +194,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'football',
     color: 'success',
     department: 'sports',
-    summary: 'Phụ trách Ban Thể thao, tổ chức giải đấu, hội khỏe & rèn luyện thể chất.',
+    summary: 'Phụ trách Ban Thể thao, cộng Stamp cho Tổ & tổ chức giải đấu, rèn luyện thể chất.',
     permissions: [
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Tạo & quản lý sự kiện, giải đấu thể thao của lớp',
       'Giao nhiệm vụ tập luyện & cổ vũ phong trào',
       'Đăng bản tin thể thao lên Bảng tin lớp',
@@ -203,9 +209,9 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
     icon: 'people',
     color: 'warning',
     department: 'class_board',
-    summary: 'Quản lý thành viên trong tổ, ghi phát biểu & điểm cộng thi đua cho tổ mình.',
+    summary: 'Quản lý thành viên trong tổ, cộng Stamp phát biểu (+0,25đ) & điểm cộng thi đua cho tổ mình.',
     permissions: [
-      'Ghi nhận phát biểu theo môn cho thành viên trong Tổ',
+      'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Ghi điểm cộng thi đua cho thành viên trong Tổ của mình',
       'Theo dõi tiến độ hoạt động & chuyên cần của Tổ',
     ],
@@ -303,11 +309,11 @@ export const CUSTOM_OFFICER_GRANTS: readonly CustomOfficerGrantMeta[] = [
   },
   {
     key: 'record_study',
-    label: 'Ghi nhận Phát biểu theo môn (toàn lớp)',
-    short: 'Ghi phát biểu',
+    label: 'Cộng & xoá Stamp phát biểu (toàn lớp)',
+    short: 'Stamp toàn lớp',
     icon: 'book',
     color: 'success',
-    description: 'Được ghi nhận lượt phát biểu học tập theo môn cho mọi học sinh trong lớp và xem thống kê tuần / Học kỳ I.',
+    description: 'Mở rộng quyền cộng & xoá Stamp phát biểu (+0,25đ) sang toàn bộ lớp (mặc định mọi chức vụ do GVCN giao đã có quyền cộng Stamp cho thành viên trong Tổ của mình).',
   },
   {
     key: 'manage_duty',
@@ -769,26 +775,24 @@ export function computeOfficerPermissions(params: {
       hasGrant('record_violation'),
   );
 
-  const canRecordStudyClass = Boolean(
-    params.isTeacher ||
-      params.isSubjectTeacher ||
-      isClassMonitor ||
-      isAcademicVP ||
-      hasFullCoordination ||
-      hasGrant('record_study') ||
-      inferredStudySubjects.length > 0,
+  const hasExplicitClassStudyGrant = customPermissions.includes('record_study');
+  const canRecordStudyClassWide = Boolean(
+    params.isTeacher || params.isSubjectTeacher || hasExplicitClassStudyGrant,
   );
-  const canRecordStudy = Boolean(canRecordStudyClass || canRecordBonusGroup);
+  const canRecordStudy = Boolean(canRecordStudyClassWide || isOfficer);
 
   const ownGroup = params.currentStudent?.group?.trim() || null;
+  const ownGroupLower = ownGroup?.toLowerCase() ?? '';
 
   const canRecordStudyForStudent = (
     target: { id: string; group?: string | null } | null | undefined,
   ): boolean => {
     if (!target) return false;
-    if (canRecordStudyClass) return true;
-    const targetGroup = target.group?.trim() || null;
-    if (canRecordBonusGroup && ownGroup && targetGroup === ownGroup) return true;
+    if (canRecordStudyClassWide) return true;
+    if (isOfficer) {
+      const targetGroupLower = target.group?.trim().toLowerCase() ?? '';
+      return Boolean(ownGroupLower && targetGroupLower && ownGroupLower === targetGroupLower);
+    }
     return false;
   };
 
@@ -797,8 +801,8 @@ export function computeOfficerPermissions(params: {
   ): boolean => {
     if (!target) return false;
     if (canRecordBonusClass) return true;
-    const targetGroup = target.group?.trim() || null;
-    if (canRecordBonusGroup && ownGroup && targetGroup === ownGroup) return true;
+    const targetGroupLower = target.group?.trim().toLowerCase() ?? '';
+    if (canRecordBonusGroup && ownGroupLower && targetGroupLower === ownGroupLower) return true;
     return false;
   };
 
@@ -845,6 +849,7 @@ export function computeOfficerPermissions(params: {
     isGroupLeader,
     canAssignPositions,
     canManageDuty,
+    canRecordStudyClassWide,
     canRecordStudy,
     canRecordStudyForStudent,
     canRecordBonus,

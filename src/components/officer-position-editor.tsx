@@ -118,8 +118,11 @@ export function OfficerPositionEditor({
         effectivePreview.inferredStudySubjects.length > 0
           ? ` (${effectivePreview.inferredStudySubjects.join(', ')})`
           : '';
+      const baseLabel = effectivePreview.canRecordStudyClassWide
+        ? 'Cộng Stamp toàn lớp'
+        : 'Cộng Stamp (+0,25đ) cho Tổ';
       list.push({
-        label: `Phát biểu môn${subjHint}`,
+        label: `${baseLabel}${subjHint}`,
         color: 'success',
         icon: 'book-outline',
       });
@@ -499,8 +502,9 @@ export function OfficerPositionEditor({
         {advancedOpen ? (
           <View style={styles.grantsList}>
             <Text style={{ color: theme.textSecondary, fontSize: 11.5, lineHeight: 16 }}>
-              Bật thêm bất kỳ quyền cụ thể nào cho chức vụ tự ghi (ví dụ cấp quyền ghi phát biểu
-              theo môn cho “Cán sự môn”, hoặc đăng bản tin cho “Trưởng ban Truyền thông”).
+              Mọi chức vụ đều mặc định có quyền cộng &amp; xoá Stamp (+0,25đ) cho thành viên trong
+              Tổ. Bật thêm quyền bên dưới nếu muốn mở rộng (VD: cộng Stamp toàn lớp, điểm cộng lớp,
+              đăng bản tin...).
             </Text>
             {CUSTOM_OFFICER_GRANTS.map((grant) => {
               const active = normalizedGrants.includes(grant.key);

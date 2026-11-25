@@ -134,6 +134,7 @@ export default function FeedScreen() {
     isOfficer,
     officerPositionLabel,
     canRecordStudy,
+    canRecordStudyClassWide,
     canRecordBonus,
     canRecordViolation,
     canDeleteStudyStamp,
@@ -310,11 +311,20 @@ export default function FeedScreen() {
     }
   };
 
-  const primaryCtaLabel =
+  const primaryCtaMode =
     canRecordViolation && !canRecordBonus && !canEditClass
-      ? 'Ghi học sinh vi phạm'
+      ? 'violation'
       : canRecordStudy && !canRecordBonus && !canEditClass
-        ? 'Ghi phát biểu Môn'
+        ? 'study'
+        : undefined;
+
+  const primaryCtaLabel =
+    primaryCtaMode === 'violation'
+      ? 'Ghi học sinh vi phạm'
+      : primaryCtaMode === 'study'
+        ? canRecordStudyClassWide
+          ? 'Ghi Stamp toàn lớp'
+          : 'Cộng Stamp Tổ'
         : canRecordBonus && !canEditClass && !canRecordViolation
           ? 'Ghi điểm cộng Tổ'
           : canRecordBonus && canRecordViolation && !canEditClass
@@ -408,7 +418,14 @@ export default function FeedScreen() {
 
           <View style={styles.bannerActions}>
             <Pressable
-              onPress={() => router.push('/entry-form' as never)}
+              onPress={() =>
+                primaryCtaMode
+                  ? router.push({
+                      pathname: '/entry-form',
+                      params: { mode: primaryCtaMode },
+                    } as never)
+                  : router.push('/entry-form' as never)
+              }
               style={({ pressed }) => [
                 styles.bannerPrimaryBtn,
                 pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
@@ -431,13 +448,24 @@ export default function FeedScreen() {
               </Pressable>
             ) : (
               <Pressable
-                onPress={() => router.push('/study' as never)}
+                onPress={() =>
+                  router.push({
+                    pathname: '/study',
+                    params: { tab: canRecordStudy ? 'record' : 'semester1' },
+                  } as never)
+                }
                 style={({ pressed }) => [
                   styles.bannerGlassBtn,
                   pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
                 ]}>
                 <Ionicons name="book" size={16} color="#FFFFFF" />
-                <Text style={styles.bannerGlassText}>Thống kê HK I →</Text>
+                <Text style={styles.bannerGlassText}>
+                  {canRecordStudy
+                    ? canRecordStudyClassWide
+                      ? 'Cộng & xem Stamp →'
+                      : 'Cộng & xem Stamp Tổ →'
+                    : 'Thống kê HK I →'}
+                </Text>
               </Pressable>
             )}
           </View>
@@ -451,7 +479,7 @@ export default function FeedScreen() {
               ]}>
               <Ionicons name="book" size={15} color="#A7F3D0" />
               <Text style={styles.bannerGlassText}>
-                Xem thống kê phát biểu tuần & cộng dồn HK I →
+                Cộng & xem thống kê Stamp tuần · HK I →
               </Text>
             </Pressable>
           ) : null}

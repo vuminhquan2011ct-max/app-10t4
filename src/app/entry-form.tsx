@@ -116,13 +116,13 @@ export default function EntryFormScreen() {
     canEditClass,
     currentStudent,
     isClassMonitor,
-    isAcademicVP,
     isGroupLeader,
     isDisciplineVP,
     officerPositionLabel,
     customOfficerPermissions,
     inferredStudySubjects,
     canRecordStudy,
+    canRecordStudyClassWide,
     canRecordBonus,
     canRecordViolation,
     canRecordStudyForStudent,
@@ -136,26 +136,19 @@ export default function EntryFormScreen() {
   const { showToast } = useToast();
   const existing = id ? getEntry(id) : undefined;
 
-  const hasClassWideStudy =
-    isTeacher ||
-    isSubjectTeacher ||
-    isClassMonitor ||
-    isAcademicVP ||
-    customOfficerPermissions.includes('full_coordination') ||
-    customOfficerPermissions.includes('record_study') ||
-    inferredStudySubjects.length > 0;
+  const hasClassWideStudy = canRecordStudyClassWide;
   const hasClassWideBonus =
     isTeacher ||
     isClassMonitor ||
     customOfficerPermissions.includes('full_coordination') ||
     customOfficerPermissions.includes('record_bonus_class');
   const isGroupScopedBonus = !hasClassWideBonus && canRecordBonus;
-  const isGroupScopedStudy = !hasClassWideStudy && canRecordStudy;
+  const isGroupScopedStudy = canRecordStudy && !hasClassWideStudy;
   const isDisciplineVPOnly =
     !isTeacher && !isClassMonitor && canRecordViolation && !canRecordBonus && !hasClassWideStudy;
   const canSelfSubmit = memberRole === 'student' && Boolean(currentStudent);
 
-  const allowStudyMode = canRecordStudy || canSelfSubmit || existing?.kind === 'study';
+  const allowStudyMode = canRecordStudy;
   const allowBonusMode =
     canRecordBonus ||
     canSelfSubmit ||
@@ -185,8 +178,14 @@ export default function EntryFormScreen() {
                   : 'violation';
 
   const [recordMode, setRecordMode] = useState<RecordMode>(initialMode);
-  const isViolationMode = recordMode === 'violation';
-  const isStudyMode = recordMode === 'study';
+  const effectiveRecordMode: RecordMode =
+    !existing && recordMode === 'study' && !allowStudyMode
+      ? allowBonusMode
+        ? 'bonus'
+        : 'violation'
+      : recordMode;
+  const isViolationMode = effectiveRecordMode === 'violation';
+  const isStudyMode = effectiveRecordMode === 'study';
   const isGroupLeaderOnly = isStudyMode ? isGroupScopedStudy : isGroupScopedBonus;
 
   const studyCandidates = useMemo<PublicStudentRosterItem[]>(
@@ -215,16 +214,16 @@ export default function EntryFormScreen() {
       ? canRecordStudy
       : canRecordBonus;
   const isGroupLeaderMissingGroup =
-    !isTeacher &&
-    !isClassMonitor &&
-    isGroupLeader &&
+    isGroupLeaderOnly &&
     !currentStudent?.group?.trim() &&
     activeCandidates.length === 0;
 
   const readOnly = Boolean(
     existing &&
       !canEditClass &&
-      (existing.status !== 'pending' || existing.studentId !== currentStudent?.id),
+      ((existing.kind === 'study' && !canRecordStudy) ||
+        existing.status !== 'pending' ||
+        existing.studentId !== currentStudent?.id),
   );
 
   const defaultOwner =
@@ -332,10 +331,15 @@ export default function EntryFormScreen() {
     });
   }, [activeCandidates, studentQuery, studentGroupFilter, isGroupLeaderOnly]);
 
-  const selectedTarget = useMemo(
-    () => activeCandidates.find((s) => s.id === owner) ?? null,
-    [activeCandidates, owner],
-  );
+  const effectiveOwner: string | null = existing
+    ? existing.studentId
+    : !isOfficerModeForTarget
+      ? (currentStudent?.id ?? null)
+      : owner && activeCandidates.some((s) => s.id === owner)
+        ? owner
+        : activeCandidates[0]?.id ?? null;
+
+  const selectedTarget = activeCandidates.find((s) => s.id === effectiveOwner) ?? null;
 
   const proofDriveId = extractDriveFileId(proofUrl);
   const inMemoryProofItem =
@@ -476,7 +480,7 @@ export default function EntryFormScreen() {
   }, [allowStudyMode, allowBonusMode, allowViolationMode]);
 
   const switchRecordMode = (next: RecordMode) => {
-    if (existing || next === recordMode) return;
+    if (existing || next === effectiveRecordMode) return;
     setRecordMode(next);
     setError(null);
     if (next === 'violation') {
@@ -574,7 +578,7 @@ export default function EntryFormScreen() {
       showToast('Đợi vài giây để tệp minh chứng hoàn tất đồng bộ lên Drive nhé!', 'info');
       return;
     }
-    if (!owner) {
+    if (!effectiveOwner) {
       setError(
         !isOfficerModeForTarget
           ? 'Tài khoản của bạn chưa được GVCN liên kết với hồ sơ học sinh trong danh sách lớp.'
@@ -602,24 +606,27 @@ export default function EntryFormScreen() {
       return;
     }
 
-    if (isViolationMode && !canRecordViolationForStudent(selectedTarget ?? { id: owner })) {
+    if (isViolationMode && !canRecordViolationForStudent(selectedTarget ?? { id: effectiveOwner })) {
       setError('Bạn không có quyền ghi nhận vi phạm cho học sinh này.');
       return;
     }
     if (
       isStudyMode &&
-      owner !== currentStudent?.id &&
-      !canRecordStudyForStudent(selectedTarget ?? { id: owner })
+      (!canRecordStudy || !canRecordStudyForStudent(selectedTarget ?? { id: effectiveOwner }))
     ) {
-      setError('Bạn không có quyền ghi nhận phát biểu cho học sinh này.');
+      setError(
+        !canRecordStudy
+          ? 'Chỉ Giáo viên và thành viên được GVCN giao chức vụ mới có quyền cộng Stamp phát biểu (+0,25đ).'
+          : 'Bạn chỉ được phép cộng Stamp phát biểu cho thành viên trong Tổ của mình.',
+      );
       return;
     }
     if (
       !isViolationMode &&
       !isStudyMode &&
       isOfficerModeForTarget &&
-      owner !== currentStudent?.id &&
-      !canRecordBonusForStudent(selectedTarget ?? { id: owner })
+      effectiveOwner !== currentStudent?.id &&
+      !canRecordBonusForStudent(selectedTarget ?? { id: effectiveOwner })
     ) {
       setError('Tổ trưởng chỉ được ghi điểm cộng cho thành viên trong Tổ của mình.');
       return;
@@ -638,10 +645,14 @@ export default function EntryFormScreen() {
         : kind === 'violation' || kind === 'study'
           ? 'achievement'
           : kind;
-    const finalCategory: EntryCategory = isStudyMode ? 'study' : category;
+    const finalCategory: EntryCategory = isStudyMode
+      ? 'study'
+      : category === 'study'
+        ? 'academic'
+        : category;
 
     const data = {
-      studentId: owner,
+      studentId: effectiveOwner,
       title: effectiveTitle,
       kind: finalKind,
       category: finalCategory,
@@ -731,9 +742,9 @@ export default function EntryFormScreen() {
   const authorityTitle = !isOfficerModeForTarget
     ? null
     : isStudyMode
-      ? isGroupLeaderOnly
-        ? `Quyền ${officerPositionLabel || 'Tổ trưởng'} · Ghi 1 Stamp phát biểu thành viên ${currentStudent?.group || 'trong Tổ'}`
-        : `Quyền ${isTeacher ? 'GVCN' : isSubjectTeacher ? `GV ${subjectName ?? 'Bộ môn'}` : officerPositionLabel || 'Ban cán sự'} · Ghi 1 Stamp phát biểu (+0,25đ)`
+      ? isGroupScopedStudy
+        ? `Quyền ${officerPositionLabel || 'Ban cán sự'} · Cộng 1 Stamp (+0,25đ) cho thành viên ${currentStudent?.group || 'trong Tổ'}`
+        : `Quyền ${isTeacher ? 'GVCN' : isSubjectTeacher ? `GV ${subjectName ?? 'Bộ môn'}` : officerPositionLabel || 'Ban cán sự'} · Cộng 1 Stamp phát biểu toàn lớp (+0,25đ)`
       : isViolationMode
         ? `Quyền ${isTeacher ? 'GVCN' : officerPositionLabel || 'Lớp phó kỷ luật'} · Ghi nhận học sinh vi phạm`
         : isGroupLeaderOnly
@@ -830,7 +841,9 @@ export default function EntryFormScreen() {
                 </Text>
                 <Text style={{ color: theme.textSecondary, fontSize: 11.5, lineHeight: 16 }}>
                   {isStudyMode
-                    ? 'Quy định chuẩn: 1 lần phát biểu = 1 Stamp = +0,25 điểm · Tự động thống kê theo Tuần và cộng dồn cuối Học kỳ I.'
+                    ? isGroupScopedStudy
+                      ? `Chức vụ được GVCN giao cho phép bạn cộng & xoá Stamp (+0,25đ) cho thành viên ${currentStudent?.group || 'trong Tổ của mình'}.`
+                      : 'Quy định chuẩn: 1 lần phát biểu = 1 Stamp = +0,25 điểm · Tự động thống kê theo Tuần và cộng dồn cuối Học kỳ I.'
                     : isGroupLeaderOnly
                       ? 'Tổ trưởng chỉ chọn được học sinh trong đúng Tổ của mình và ghi điểm cộng trên lớp.'
                       : isDisciplineVPOnly
@@ -845,7 +858,7 @@ export default function EntryFormScreen() {
           {availableModes.length > 1 && !existing ? (
             <View style={[styles.modeBar, { backgroundColor: theme.backgroundElement }]}>
               {availableModes.map((m) => {
-                const active = recordMode === m.key;
+                const active = effectiveRecordMode === m.key;
                 return (
                   <Pressable
                     key={m.key}
@@ -1099,8 +1112,9 @@ export default function EntryFormScreen() {
 
               {isGroupLeaderMissingGroup ? (
                 <Text style={{ color: theme.warning, fontSize: 12.5, lineHeight: 18, fontWeight: '700' }}>
-                  Bạn chưa được GVCN phân vào Tổ nên chưa thể ghi điểm cho thành viên Tổ. Hãy báo
-                  GVCN cập nhật Tổ cho hồ sơ của bạn.
+                  {isStudyMode
+                    ? 'Bạn chưa được GVCN phân vào Tổ (Tổ 1–4) nên chưa thể cộng Stamp cho thành viên trong Tổ. Hãy báo GVCN cập nhật Tổ cho hồ sơ của bạn.'
+                    : 'Bạn chưa được GVCN phân vào Tổ nên chưa thể ghi điểm cho thành viên Tổ. Hãy báo GVCN cập nhật Tổ cho hồ sơ của bạn.'}
                 </Text>
               ) : filteredCandidates.length === 0 ? (
                 <Text style={{ color: theme.textMuted, fontSize: 12.5 }}>
@@ -1114,7 +1128,7 @@ export default function EntryFormScreen() {
                     <Chip
                       key={s.id}
                       label={s.group && !isGroupLeaderOnly ? `${s.name} (${s.group})` : s.name}
-                      selected={owner === s.id}
+                      selected={effectiveOwner === s.id}
                       onPress={() => {
                         setOwner(s.id);
                         setError(null);

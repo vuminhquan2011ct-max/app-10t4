@@ -138,6 +138,7 @@ export default function DashboardScreen() {
     canAssignPositions,
     canManageDuty,
     canRecordStudy,
+    canRecordStudyClassWide,
     canRecordBonus,
     canRecordViolation,
     canManageTasksAndEvents,
@@ -1063,25 +1064,51 @@ export default function DashboardScreen() {
           ) : null}
 
           <View style={styles.officerHubBtns}>
-            <Button
-              label={'Ghi 1 Stamp (+0,25đ)'}
-              icon={'hand-left-outline'}
-              size={'sm'}
-              style={styles.flex}
-              onPress={() =>
-                router.push({ pathname: '/study', params: { tab: 'record' } } as never)
-              }
-            />
-            <Button
-              label={'Xem thống kê HK I →'}
-              variant={'soft'}
-              icon={'bar-chart-outline'}
-              size={'sm'}
-              style={styles.flex}
-              onPress={() =>
-                router.push({ pathname: '/study', params: { tab: 'semester1' } } as never)
-              }
-            />
+            {canRecordStudy ? (
+              <>
+                <Button
+                  label={canRecordStudyClassWide ? 'Ghi 1 Stamp (+0,25đ)' : 'Cộng Stamp Tổ (+0,25đ)'}
+                  icon={'hand-left-outline'}
+                  size={'sm'}
+                  style={styles.flex}
+                  onPress={() =>
+                    router.push({ pathname: '/study', params: { tab: 'record' } } as never)
+                  }
+                />
+                <Button
+                  label={'Xem thống kê HK I →'}
+                  variant={'soft'}
+                  icon={'bar-chart-outline'}
+                  size={'sm'}
+                  style={styles.flex}
+                  onPress={() =>
+                    router.push({ pathname: '/study', params: { tab: 'semester1' } } as never)
+                  }
+                />
+              </>
+            ) : (
+              <>
+                <Button
+                  label={'Xem thống kê Stamp →'}
+                  icon={'bar-chart-outline'}
+                  size={'sm'}
+                  style={styles.flex}
+                  onPress={() =>
+                    router.push({ pathname: '/study', params: { tab: 'weekly' } } as never)
+                  }
+                />
+                <Button
+                  label={'Cộng dồn HK I'}
+                  variant={'soft'}
+                  icon={'ribbon-outline'}
+                  size={'sm'}
+                  style={styles.flex}
+                  onPress={() =>
+                    router.push({ pathname: '/study', params: { tab: 'semester1' } } as never)
+                  }
+                />
+              </>
+            )}
           </View>
         </Card>
       </FadeIn>
@@ -1191,7 +1218,7 @@ export default function DashboardScreen() {
                 ) : null}
 
                 <View style={styles.officerActionGrid}>
-                  {canRecordStudy ? (
+                  {canRecordStudy || isOfficer ? (
                     <Pressable
                       onPress={() =>
                         router.push({ pathname: '/study', params: { tab: 'record' } } as never)
@@ -1201,9 +1228,11 @@ export default function DashboardScreen() {
                         { backgroundColor: theme.successSoft, borderColor: theme.success },
                         pressed && styles.pressed,
                       ]}>
-                      <Ionicons name="book" size={15} color={theme.success} />
+                      <Ionicons name="bookmark" size={15} color={theme.success} />
                       <Text style={[styles.officerActionText, { color: theme.success }]}>
-                        Ghi phát biểu theo môn
+                        {canRecordStudyClassWide
+                          ? 'Cộng Stamp toàn lớp (+0,25đ)'
+                          : 'Cộng Stamp Tổ (+0,25đ)'}
                       </Text>
                     </Pressable>
                   ) : null}
