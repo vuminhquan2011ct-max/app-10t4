@@ -325,17 +325,6 @@ function ProLockedVault() {
           <View style={styles.vaultOrbA} />
           <View style={styles.vaultOrbB} />
 
-          <View style={styles.vaultTopBadgeRow}>
-            <View style={styles.goldEyebrowPill}>
-              <Ionicons name="diamond" size={11} color="#FDE68A" />
-              <Text style={styles.goldEyebrowText}>GÓI PRO · BẢO MẬT ĐỘC QUYỀN</Text>
-            </View>
-            <View style={styles.lockStatusPill}>
-              <Ionicons name="lock-closed" size={11} color="#FCA5A5" />
-              <Text style={styles.lockStatusText}>ĐANG KHÓA</Text>
-            </View>
-          </View>
-
           <View style={styles.vaultShieldWrap}>
             <LinearGradient
               colors={ROYAL_GOLD_GRADIENT}
@@ -349,26 +338,7 @@ function ProLockedVault() {
             </LinearGradient>
           </View>
 
-          <Text style={styles.vaultTitle}>Két Sắt Gói Pro</Text>
-          <Text style={styles.vaultNotice}>
-            Khu vực khóa riêng — Giáo viên chủ nhiệm, giáo viên bộ môn và tất cả thành viên đều
-            không thể truy cập nếu không có Mật khẩu hoặc Mã PIN xác thực.
-          </Text>
-
-          <View style={styles.vaultFeatureStrip}>
-            <View style={styles.vaultChip}>
-              <Ionicons name="shield-checkmark-outline" size={12} color="#FDE68A" />
-              <Text style={styles.vaultChipText}>Khóa toàn hệ thống</Text>
-            </View>
-            <View style={styles.vaultChip}>
-              <Ionicons name="flash-outline" size={12} color="#FDE68A" />
-              <Text style={styles.vaultChipText}>Phiên RAM tạm</Text>
-            </View>
-            <View style={styles.vaultChip}>
-              <Ionicons name="exit-outline" size={12} color="#FDE68A" />
-              <Text style={styles.vaultChipText}>Tự khóa khi rời tab</Text>
-            </View>
-          </View>
+          <Text style={styles.vaultTitle}>Gói PRO</Text>
         </LinearGradient>
       </FadeIn>
 
@@ -1189,8 +1159,9 @@ const styles = StyleSheet.create({
   /* Locked Obsidian + Gold Hero */
   vaultHero: {
     borderRadius: Radius.xl,
-    padding: Spacing.four,
-    gap: Spacing.two + 2,
+    paddingVertical: Spacing.four + 6,
+    paddingHorizontal: Spacing.four,
+    gap: Spacing.three,
     borderWidth: 1.4,
     borderColor: 'rgba(245, 158, 11, 0.55)',
     overflow: 'hidden',
@@ -1214,50 +1185,7 @@ const styles = StyleSheet.create({
     left: -45,
     backgroundColor: 'rgba(217, 119, 6, 0.14)',
   },
-  vaultTopBadgeRow: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  goldEyebrowPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: 'rgba(245, 158, 11, 0.18)',
-    borderColor: 'rgba(253, 224, 71, 0.4)',
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: Radius.pill,
-  },
-  goldEyebrowText: {
-    color: '#FDE68A',
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.7,
-  },
-  lockStatusPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(239, 68, 68, 0.22)',
-    borderColor: 'rgba(252, 165, 165, 0.45)',
-    borderWidth: 1,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: Radius.pill,
-  },
-  lockStatusText: {
-    color: '#FECACA',
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.5,
-  },
   vaultShieldWrap: {
-    marginTop: Spacing.one,
     padding: 6,
     borderRadius: 42,
     backgroundColor: 'rgba(245, 158, 11, 0.15)',
@@ -1286,39 +1214,10 @@ const styles = StyleSheet.create({
   },
   vaultTitle: {
     color: '#FFFBEB',
-    fontSize: 22,
+    fontSize: 25,
     fontWeight: '900',
-    letterSpacing: -0.4,
+    letterSpacing: 0.4,
     textAlign: 'center',
-  },
-  vaultNotice: {
-    color: 'rgba(254, 243, 199, 0.85)',
-    fontSize: 12.5,
-    lineHeight: 19,
-    textAlign: 'center',
-  },
-  vaultFeatureStrip: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 6,
-    marginTop: Spacing.one,
-  },
-  vaultChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    borderColor: 'rgba(245, 158, 11, 0.28)',
-    borderWidth: 1,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: Radius.pill,
-  },
-  vaultChipText: {
-    color: '#FEF3C7',
-    fontSize: 10.5,
-    fontWeight: '700',
   },
 
   /* Auth Card */
