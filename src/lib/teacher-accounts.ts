@@ -17,8 +17,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+  hasStoredPasswordHash,
+  hashPasswordV2,
+  recordLoginFailure,
+  verifyPasswordHash,
+} from '@/lib/password-crypto';
+import {
   STUDENT_ACCOUNTS_KEY,
-  hashStudentPassword,
   isEmailTaken,
   mergeAuthProviders,
   normalizeAuthProviders,
@@ -26,7 +33,6 @@ import {
   normalizeLoginIdDisplay,
   normalizeLoginIdKey,
   validateEmail,
-  verifyStudentPassword,
 } from '@/lib/student-accounts';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
@@ -50,6 +56,17 @@ import type { AuthProviderKind } from '@/types/auth';
 import type { RegisteredTeacherPublic } from '@/types/models';
 
 export { isEmailTaken, normalizeEmail, validateEmail };
+
+export async function hashTeacherPassword(password: string): Promise<string> {
+  return hashPasswordV2(password);
+}
+
+export async function verifyTeacherPasswordHash(
+  password: string,
+  storedHash: string,
+): Promise<{ ok: boolean; needsRehash: boolean }> {
+  return verifyPasswordHash(password, storedHash);
+}
 
 export const TEACHER_ACCOUNTS_KEY = 'class10t4:teacher-accounts:v1';
 const APPLIED_ACCOUNTS_RESET_KEY = 'class10t4:applied-accounts-reset:v1';
@@ -189,7 +206,7 @@ function parseTeacherRecord(item: unknown): TeacherAccountRecord | null {
   }
 
   const rawPass = typeof r.passwordHash === 'string' ? r.passwordHash : '';
-  const hasValidPass = rawPass.includes(':');
+  const hasValidPass = hasStoredPasswordHash(rawPass);
   const cleanEmail =
     typeof r.email === 'string' && r.email.trim() ? normalizeEmail(r.email) : null;
   const cleanEmailKey =
@@ -265,9 +282,9 @@ function mergeTwoTeacherRecords(
   const emailKey = winner.emailKey || other.emailKey || (email ? normalizeEmail(email) : null);
   const authUserId = winner.authUserId || other.authUserId || null;
   const avatarUrl = winner.avatarUrl || other.avatarUrl || null;
-  const passwordHash = winner.passwordHash.includes(':')
+  const passwordHash = hasStoredPasswordHash(winner.passwordHash)
     ? winner.passwordHash
-    : other.passwordHash.includes(':')
+    : hasStoredPasswordHash(other.passwordHash)
       ? other.passwordHash
       : '';
 
@@ -674,8 +691,9 @@ export type VerifyTeacherLoginResult =
   | { ok: true; account: TeacherAccountRecord }
   | {
       ok: false;
-      reason: 'invalid' | 'not_found' | 'wrong_password' | 'wrong_role';
+      reason: 'invalid' | 'not_found' | 'wrong_password' | 'wrong_role' | 'rate_limited';
       actualRole?: TeacherRole;
+      waitSeconds?: number;
       error: string;
     };
 
@@ -693,6 +711,19 @@ export async function verifyTeacherLogin(
   }
   if (!password) {
     return { ok: false, reason: 'invalid', error: 'Vui lòng nhập mật khẩu cá nhân.' };
+  }
+
+  const inputRateKey = isEmailInput
+    ? `gv:email:${normalizeEmail(trimmedIdentifier)}`
+    : `gv:id:${normalizeLoginIdKey(trimmedIdentifier)}`;
+  const preLimit = await checkLoginRateLimit(inputRateKey);
+  if (!preLimit.allowed) {
+    return {
+      ok: false,
+      reason: 'rate_limited',
+      waitSeconds: preLimit.waitSeconds,
+      error: `Đăng nhập sai quá nhiều lần. Vui lòng thử lại sau ${preLimit.waitSeconds} giây.`,
+    };
   }
 
   // Live remote merge so teachers can sign in immediately from any device.
@@ -727,7 +758,22 @@ export async function verifyTeacherLogin(
     }
   }
 
-  if (!found.passwordHash.includes(':')) {
+  const rateKeys = [
+    inputRateKey,
+    `gv:id:${found.loginIdKey}`,
+    ...(found.emailKey ? [`gv:email:${found.emailKey}`] : []),
+  ];
+  const accountLimit = await checkLoginRateLimit(rateKeys);
+  if (!accountLimit.allowed) {
+    return {
+      ok: false,
+      reason: 'rate_limited',
+      waitSeconds: accountLimit.waitSeconds,
+      error: `Đăng nhập sai quá nhiều lần. Vui lòng thử lại sau ${accountLimit.waitSeconds} giây.`,
+    };
+  }
+
+  if (!hasStoredPasswordHash(found.passwordHash)) {
     return {
       ok: false,
       reason: 'wrong_password',
@@ -735,14 +781,49 @@ export async function verifyTeacherLogin(
     };
   }
 
-  if (!verifyStudentPassword(password, found.passwordHash)) {
+  const verifyRes = await verifyPasswordHash(password, found.passwordHash);
+  if (!verifyRes.ok) {
+    const failState = await recordLoginFailure(rateKeys);
+    if (failState.locked) {
+      return {
+        ok: false,
+        reason: 'rate_limited',
+        waitSeconds: failState.waitSeconds,
+        error: `Nhập sai mật khẩu quá nhiều lần. Tài khoản tạm khóa thử lại trong ${failState.waitSeconds} giây.`,
+      };
+    }
     return {
       ok: false,
       reason: 'wrong_password',
       error: isEmailInput
-        ? `Mật khẩu không đúng cho Gmail "${found.email ?? trimmedIdentifier}"! Vui lòng kiểm tra lại.`
-        : `Mật khẩu không đúng cho Mã ID "${found.loginId}"! Vui lòng kiểm tra lại.`,
+        ? `Mật khẩu không đúng cho Gmail "${found.email ?? trimmedIdentifier}" (còn ${failState.remainingAttempts} lần thử).`
+        : `Mật khẩu không đúng cho Mã ID "${found.loginId}" (còn ${failState.remainingAttempts} lần thử).`,
     };
+  }
+
+  await clearLoginRateLimit(rateKeys);
+
+  // Transparently upgrade legacy single-round SHA-256 hashes to PBKDF2-SHA256 on successful login.
+  if (verifyRes.needsRehash) {
+    try {
+      const upgradedHash = await hashPasswordV2(password);
+      const upgraded: TeacherAccountRecord = {
+        ...found,
+        passwordHash: upgradedHash,
+        updatedAt: safePostResetNowIso(),
+      };
+      found = upgraded;
+      await saveTeacherAccounts(
+        accounts.map((a) => (a.teacherId === upgraded.teacherId ? upgraded : a)),
+      );
+      if (isSupabaseConfigured) {
+        void upsertAuthRegistryRemote({
+          teacher: upgraded as unknown as Record<string, unknown>,
+        }).catch(() => false);
+      }
+    } catch {
+      // Never block login if background rehash fails.
+    }
   }
 
   if (expectedRole && found.role !== expectedRole) {
@@ -851,7 +932,8 @@ export async function registerTeacherAccount(
 
   const existing = accounts.find((a) => a.loginIdKey === loginIdKey);
   if (existing) {
-    const matched = password.length > 0 && verifyStudentPassword(password, existing.passwordHash);
+    const matched =
+      password.length > 0 && (await verifyPasswordHash(password, existing.passwordHash)).ok;
     if (!matched) {
       return {
         ok: false,
@@ -882,7 +964,7 @@ export async function registerTeacherAccount(
     name: cleanName,
     role: params.role,
     subject: cleanSubject,
-    passwordHash: password.length > 0 ? hashStudentPassword(password) : '',
+    passwordHash: password.length > 0 ? await hashTeacherPassword(password) : '',
     ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmail } : {}),
     ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
     ...(providers.length > 0 ? { authProviders: providers } : {}),
@@ -1077,7 +1159,7 @@ export async function syncTeacherPasswordHash(
   );
   const updated: TeacherAccountRecord = {
     ...current,
-    passwordHash: hashStudentPassword(cleanNew),
+    passwordHash: await hashTeacherPassword(cleanNew),
     authProviders: nextProviders,
     updatedAt: new Date().toISOString(),
   };
@@ -1158,7 +1240,7 @@ export async function updateTeacherAccount(params: {
         error: `Mật khẩu mới phải có ít nhất ${MIN_TEACHER_PASSWORD_LENGTH} ký tự.`,
       };
     }
-    nextPasswordHash = hashStudentPassword(cleanPass);
+    nextPasswordHash = await hashTeacherPassword(cleanPass);
   }
 
   const updated: TeacherAccountRecord = {
@@ -1207,8 +1289,8 @@ export async function changeOwnTeacherPassword(params: {
   }
   const current = accounts[idx];
   if (
-    current.passwordHash.includes(':') &&
-    !verifyStudentPassword(params.currentPassword.trim(), current.passwordHash)
+    hasStoredPasswordHash(current.passwordHash) &&
+    !(await verifyPasswordHash(params.currentPassword.trim(), current.passwordHash)).ok
   ) {
     return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
   }
@@ -1221,7 +1303,7 @@ export async function changeOwnTeacherPassword(params: {
   }
   const next: TeacherAccountRecord = {
     ...current,
-    passwordHash: hashStudentPassword(cleanNew),
+    passwordHash: await hashTeacherPassword(cleanNew),
     authProviders: mergeAuthProviders(
       current.authProviders,
       current.emailKey ? ['email'] : ['local'],

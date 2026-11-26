@@ -255,8 +255,26 @@ export type DriveMediaExcelRow = {
   createdAt: string;
 };
 
-function escapeCsvCell(value: unknown): string {
-  const str = value === null || value === undefined ? '' : String(value);
+const CSV_FORMULA_TRIGGER_REGEX = /^[\t\r]|^[\s]*[=+\-@]/;
+const CSV_PLAIN_SIGNED_NUMBER_REGEX = /^[+-]\d+(?:[.,]\d+)?$/;
+
+function sanitizeCsvFormula(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  const str = String(value);
+  if (!str) return '';
+  // Preserve legitimate signed numbers (e.g. "-5", "-0,25", "+1.5") while neutralizing formulas.
+  if (CSV_PLAIN_SIGNED_NUMBER_REGEX.test(str)) {
+    return str;
+  }
+  if (CSV_FORMULA_TRIGGER_REGEX.test(str)) {
+    return `'${str}`;
+  }
+  return str;
+}
+
+export function escapeCsvCell(value: unknown): string {
+  const str = sanitizeCsvFormula(value);
   if (/[",\r\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }

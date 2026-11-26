@@ -16,7 +16,7 @@
  */
 
 const CONFIG = {
-  // ID thư mục K8T4_app trên Google Drive
+  // ID thư mục K8T4_app trên Google Drive (khoá cứng phía server — bỏ qua mọi folderId từ client)
   FOLDER_ID: '1mjTLnW1ztWKD2PvKJ0aW8uowiLD5eR_D',
   FOLDER_NAME: 'K8T4_app',
   // Tuỳ chọn: ID Google Sheet ("Excel online"). Để trống '' nếu Apps Script đã gắn trực tiếp trong Google Sheet.
@@ -27,7 +27,129 @@ const CONFIG = {
   API_SECRET_KEY: 'THAY_BANG_EXPO_PUBLIC_DRIVE_API_KEY_CUA_BAN',
   // Bật chia sẻ "Bất kỳ ai có liên kết đều xem được" để học sinh & thầy cô xem ảnh/tải file trong App
   SHARE_ANYONE_VIEW: true,
+  // Giới hạn dung lượng tối đa cho mỗi tệp tải lên trực tiếp (25 MB)
+  MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
+  // Độ sâu tối đa khi kiểm tra thư mục cha trên Google Drive (chống xoá tệp ngoài K8T4_app)
+  MAX_PARENT_WALK_DEPTH: 6,
 };
+
+const VALID_DRIVE_FILE_ID_REGEX = /^[A-Za-z0-9_-]{15,120}$/;
+
+const BLOCKED_EXTENSIONS = {
+  html: true,
+  htm: true,
+  svg: true,
+  js: true,
+  mjs: true,
+  exe: true,
+  bat: true,
+  cmd: true,
+  sh: true,
+  msi: true,
+  scr: true,
+  vbs: true,
+  ps1: true,
+};
+
+const BLOCKED_MIME_TYPES = {
+  'text/html': true,
+  'application/xhtml+xml': true,
+  'image/svg+xml': true,
+  'application/javascript': true,
+  'text/javascript': true,
+  'application/ecmascript': true,
+  'application/x-javascript': true,
+  'application/x-msdownload': true,
+  'application/x-msdos-program': true,
+  'application/x-sh': true,
+  'application/x-bat': true,
+  'application/x-powershell': true,
+};
+
+const FORMULA_INJECTION_REGEX = /^[\s]*[=+\-@\t\r]/;
+
+function sanitizeSheetCell(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  const str = String(value);
+  if (FORMULA_INJECTION_REGEX.test(str)) {
+    return "'" + str;
+  }
+  return str;
+}
+
+function sanitizeFileName(rawName) {
+  const cleaned = String(rawName || '')
+    .replace(/[\u0000-\u001F\u007F/\\]/g, '_')
+    .trim();
+  return cleaned || 'file_' + Date.now();
+}
+
+function extractFileExtension(fileName) {
+  const idx = fileName.lastIndexOf('.');
+  if (idx <= 0 || idx === fileName.length - 1) return '';
+  return fileName.slice(idx + 1).toLowerCase();
+}
+
+function isBlockedUploadType(fileName, mimeType) {
+  const ext = extractFileExtension(fileName);
+  if (ext && BLOCKED_EXTENSIONS[ext]) {
+    return true;
+  }
+  const normalizedMime = String(mimeType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (normalizedMime && BLOCKED_MIME_TYPES[normalizedMime]) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeValidDriveFileId(rawFileId, rawFileUrl) {
+  const direct = rawFileId ? String(rawFileId).trim() : '';
+  const candidate = direct || extractDriveFileIdFromUrl(rawFileUrl);
+  return VALID_DRIVE_FILE_ID_REGEX.test(candidate) ? candidate : '';
+}
+
+/**
+ * Walk ancestor folders recursively (cycle-safe, bounded depth) to guarantee
+ * a Drive file belongs strictly inside CONFIG.FOLDER_ID (`K8T4_app`).
+ */
+function isFileInsideRootFolder(file, rootFolderId, maxDepth) {
+  if (!file || !rootFolderId) return false;
+  const limit = typeof maxDepth === 'number' && maxDepth > 0 ? maxDepth : 6;
+  const visited = {};
+  const queue = [];
+
+  const directParents = file.getParents();
+  while (directParents.hasNext()) {
+    queue.push({ folder: directParents.next(), depth: 1 });
+  }
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const folder = current.folder;
+    const folderId = folder.getId();
+    if (folderId === rootFolderId) return true;
+    if (visited[folderId]) continue;
+    visited[folderId] = true;
+
+    if (current.depth >= limit) continue;
+
+    const parents = folder.getParents();
+    while (parents.hasNext()) {
+      const parentFolder = parents.next();
+      const parentId = parentFolder.getId();
+      if (parentId === rootFolderId) return true;
+      if (!visited[parentId]) {
+        queue.push({ folder: parentFolder, depth: current.depth + 1 });
+      }
+    }
+  }
+
+  return false;
+}
 
 function jsonResponse(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(
@@ -101,15 +223,15 @@ function appendUploadRowToSheet(fileInfo, data) {
     }
 
     sheet.appendRow([
-      fileInfo.createdAt || new Date().toISOString(),
-      fileInfo.id || '',
-      fileInfo.name || '',
-      fileInfo.mimeType || '',
-      fileInfo.size || 0,
-      data.uploaderName || '',
-      data.uploaderRole || '',
-      data.category || '',
-      fileInfo.url || '',
+      sanitizeSheetCell(fileInfo.createdAt || new Date().toISOString()),
+      sanitizeSheetCell(fileInfo.id || ''),
+      sanitizeSheetCell(fileInfo.name || ''),
+      sanitizeSheetCell(fileInfo.mimeType || ''),
+      typeof fileInfo.size === 'number' && isFinite(fileInfo.size) ? fileInfo.size : 0,
+      sanitizeSheetCell(data.uploaderName || ''),
+      sanitizeSheetCell(data.uploaderRole || ''),
+      sanitizeSheetCell(data.category || ''),
+      sanitizeSheetCell(fileInfo.url || ''),
     ]);
   } catch (err) {
     // Upload to Drive must never fail if Spreadsheet logging is unavailable.
@@ -120,29 +242,31 @@ function extractDriveFileIdFromUrl(rawUrl) {
   const input = rawUrl ? String(rawUrl).trim() : '';
   if (!input) return '';
   const patterns = [
-    /\/file\/d\/([a-zA-Z0-9_-]{10,})/,
-    /\/document\/d\/([a-zA-Z0-9_-]{10,})/,
-    /\/spreadsheets\/d\/([a-zA-Z0-9_-]{10,})/,
-    /\/presentation\/d\/([a-zA-Z0-9_-]{10,})/,
-    /lh3\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]{10,})/i,
-    /[?&]id=([a-zA-Z0-9_-]{10,})/,
-    /\/d\/([a-zA-Z0-9_-]{10,})/,
+    /\/file\/d\/([a-zA-Z0-9_-]{15,120})/,
+    /\/document\/d\/([a-zA-Z0-9_-]{15,120})/,
+    /\/spreadsheets\/d\/([a-zA-Z0-9_-]{15,120})/,
+    /\/presentation\/d\/([a-zA-Z0-9_-]{15,120})/,
+    /lh3\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]{15,120})/i,
+    /[?&]id=([a-zA-Z0-9_-]{15,120})/,
+    /\/d\/([a-zA-Z0-9_-]{15,120})/,
   ];
   for (let i = 0; i < patterns.length; i += 1) {
     const m = input.match(patterns[i]);
     if (m && m[1]) return m[1];
   }
-  return /^[a-zA-Z0-9_-]{20,}$/.test(input) ? input : '';
+  return VALID_DRIVE_FILE_ID_REGEX.test(input) ? input : '';
 }
 
 function removeMatchingRowsFromSheets(fileId, fileUrl) {
   const ss = resolveSpreadsheet();
   if (!ss) return 0;
 
-  const rawId = fileId ? String(fileId).trim() : '';
-  const targetId = rawId.length >= 10 ? rawId : '';
-  const targetUrl = fileUrl ? String(fileUrl).trim() : '';
-  if (!targetId && !targetUrl) return 0;
+  // Strictly require a valid Drive fileId — NEVER match arbitrary substring fileUrl (prevents full Sheet wipe).
+  const targetId = normalizeValidDriveFileId(fileId, fileUrl);
+  if (!targetId) return 0;
+
+  // Match exact fileId token (standalone cell or embedded Drive URL segment, never partial ID prefix).
+  const exactIdTokenRegex = new RegExp('(?:^|[^A-Za-z0-9_-])' + targetId + '(?:$|[^A-Za-z0-9_-])');
 
   let removedCount = 0;
   const sheets = ss.getSheets();
@@ -159,11 +283,12 @@ function removeMatchingRowsFromSheets(fileId, fileUrl) {
       const row = values[r];
       let matched = false;
       for (let c = 0; c < row.length; c += 1) {
-        const cell = String(row[c] || '');
+        const cell = String(row[c] || '').trim();
         if (!cell) continue;
         if (
-          (targetId && cell.indexOf(targetId) !== -1) ||
-          (targetUrl && cell.indexOf(targetUrl) !== -1)
+          cell === targetId ||
+          extractDriveFileIdFromUrl(cell) === targetId ||
+          exactIdTokenRegex.test(cell)
         ) {
           matched = true;
           break;
@@ -182,24 +307,41 @@ function removeMatchingRowsFromSheets(fileId, fileUrl) {
 function handleDelete(data) {
   const fileUrl = data.fileUrl ? String(data.fileUrl).trim() : '';
   const rawFileId = data.fileId ? String(data.fileId).trim() : '';
-  const fileId = rawFileId || extractDriveFileIdFromUrl(fileUrl);
+  const fileId = normalizeValidDriveFileId(rawFileId, fileUrl);
 
-  if (!fileId && !fileUrl) {
-    return jsonResponse({ ok: false, status: 'error', message: 'Thiếu fileId hoặc fileUrl cần xoá.' });
+  if (!fileId) {
+    return jsonResponse({
+      ok: false,
+      status: 'error',
+      error: 'Invalid or missing Drive fileId',
+      message: 'Thiếu hoặc mã Drive fileId không hợp lệ.',
+    });
   }
 
   let trashedDrive = false;
-  if (fileId) {
+  let file = null;
+  try {
+    file = DriveApp.getFileById(fileId);
+  } catch (err) {
+    // File may already be permanently deleted or inaccessible; still proceed to clean exact fileId Sheet rows.
+    file = null;
+  }
+
+  if (file) {
+    if (!isFileInsideRootFolder(file, CONFIG.FOLDER_ID, CONFIG.MAX_PARENT_WALK_DEPTH)) {
+      return jsonResponse({
+        ok: false,
+        status: 'error',
+        error: 'Forbidden: file is outside K8T4_app folder',
+        message: 'Từ chối xoá: tệp không nằm trong thư mục K8T4_app.',
+      });
+    }
     try {
-      const file = DriveApp.getFileById(fileId);
-      if (file) {
-        if (!file.isTrashed()) {
-          file.setTrashed(true);
-        }
-        trashedDrive = true;
+      if (!file.isTrashed()) {
+        file.setTrashed(true);
       }
+      trashedDrive = true;
     } catch (err) {
-      // File may already be deleted or inaccessible; still proceed to clean Google Sheets rows.
       trashedDrive = false;
     }
   }
@@ -225,14 +367,42 @@ function handleUpload(data) {
     return jsonResponse({ status: 'error', message: 'Thiếu tên tệp hoặc dữ liệu fileBase64.' });
   }
 
-  const targetFolderId = data.folderId || CONFIG.FOLDER_ID;
-  const rootFolder = DriveApp.getFolderById(targetFolderId);
+  const safeFileName = sanitizeFileName(data.fileName);
+  const mimeType = String(data.mimeType || 'application/octet-stream').trim() || 'application/octet-stream';
+
+  if (isBlockedUploadType(safeFileName, mimeType)) {
+    return jsonResponse({
+      status: 'error',
+      error: 'Forbidden file type',
+      message: 'Định dạng tệp không được phép tải lên vì lý do bảo mật.',
+    });
+  }
+
+  const rawBase64 = String(data.fileBase64).trim();
+  const estimatedBytes = Math.ceil((rawBase64.length * 3) / 4);
+  if (estimatedBytes > CONFIG.MAX_UPLOAD_BYTES + 1024) {
+    return jsonResponse({
+      status: 'error',
+      error: 'File too large',
+      message: 'Tệp vượt quá giới hạn dung lượng 25 MB.',
+    });
+  }
+
+  const bytes = Utilities.base64Decode(rawBase64);
+  if (bytes.length > CONFIG.MAX_UPLOAD_BYTES) {
+    return jsonResponse({
+      status: 'error',
+      error: 'File too large',
+      message: 'Tệp vượt quá giới hạn dung lượng 25 MB.',
+    });
+  }
+
+  // Strictly lock uploads inside server-configured CONFIG.FOLDER_ID (ignore client data.folderId).
+  const rootFolder = DriveApp.getFolderById(CONFIG.FOLDER_ID);
   const subName = resolveSubfolderName(data.uploaderRole, data.category);
   const destFolder = subName ? getOrCreateSubfolder(rootFolder, subName) : rootFolder;
 
-  const bytes = Utilities.base64Decode(data.fileBase64);
-  const mimeType = data.mimeType || 'application/octet-stream';
-  const blob = Utilities.newBlob(bytes, mimeType, data.fileName);
+  const blob = Utilities.newBlob(bytes, mimeType, safeFileName);
   const file = destFolder.createFile(blob);
 
   if (CONFIG.SHARE_ANYONE_VIEW) {

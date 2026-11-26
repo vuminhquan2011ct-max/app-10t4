@@ -47,10 +47,65 @@ const webStorage = {
   },
 };
 
+const READ_TIMEOUT_MS = 10_000;
+const WRITE_TIMEOUT_MS = 15_000;
+
+function resolveRequestMethod(input: RequestInfo | URL, init?: RequestInit): string {
+  if (init?.method) return init.method.toUpperCase();
+  if (typeof Request !== 'undefined' && input instanceof Request && input.method) {
+    return input.method.toUpperCase();
+  }
+  return 'GET';
+}
+
+const fetchWithTimeout: typeof fetch = async (input, init) => {
+  if (typeof AbortController === 'undefined') {
+    return fetch(input, init);
+  }
+
+  const method = resolveRequestMethod(input, init);
+  const timeoutMs = method === 'GET' || method === 'HEAD' ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS;
+  const controller = new AbortController();
+  const callerSignal =
+    init?.signal ??
+    (typeof Request !== 'undefined' && input instanceof Request ? input.signal : undefined);
+
+  const onCallerAbort = () => {
+    controller.abort();
+  };
+
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort();
+    } else {
+      callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+  }
+
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+    if (callerSignal) {
+      callerSignal.removeEventListener('abort', onCallerAbort);
+    }
+  }
+};
+
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co',
   supabaseAnonKey || 'placeholder',
   {
+    global: {
+      fetch: fetchWithTimeout,
+    },
     auth: {
       storage: Platform.OS === 'web' ? webStorage : AsyncStorage,
       autoRefreshToken: true,

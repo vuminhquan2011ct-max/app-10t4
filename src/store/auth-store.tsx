@@ -28,6 +28,7 @@ import {
 } from 'react';
 import { Platform } from 'react-native';
 
+import { hasStoredPasswordHash, verifyPasswordHash } from '@/lib/password-crypto';
 import { subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import {
   MIN_STUDENT_PASSWORD_LENGTH,
@@ -50,7 +51,6 @@ import {
   validateEmail,
   validateLoginId,
   verifyStudentLogin,
-  verifyStudentPassword,
   wipeLocalStudentAccounts,
   type StudentAccountRecord,
 } from '@/lib/student-accounts';
@@ -836,14 +836,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         authProviders: mergeAuthProviders(
           activeAccount.authProviders,
           info?.authProviders,
-          activeAccount.passwordHash.includes(':')
+          hasStoredPasswordHash(activeAccount.passwordHash)
             ? activeAccount.emailKey
               ? ['email']
               : ['local']
             : [],
         ),
         authUserId: info?.authUserId ?? activeAccount.authUserId ?? null,
-        hasAccountPassword: activeAccount.passwordHash.includes(':'),
+        hasAccountPassword: hasStoredPasswordHash(activeAccount.passwordHash),
         signedInAt: options?.signedInAt,
       });
 
@@ -926,14 +926,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         authProviders: mergeAuthProviders(
           activeAccount.authProviders,
           info?.authProviders,
-          activeAccount.passwordHash.includes(':')
+          hasStoredPasswordHash(activeAccount.passwordHash)
             ? activeAccount.emailKey
               ? ['email']
               : ['local']
             : [],
         ),
         authUserId: info?.authUserId ?? activeAccount.authUserId ?? null,
-        hasAccountPassword: activeAccount.passwordHash.includes(':'),
+        hasAccountPassword: hasStoredPasswordHash(activeAccount.passwordHash),
         signedInAt: options?.signedInAt,
       });
 
@@ -1433,7 +1433,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const resolvedProviders = mergeAuthProviders(
               linkedAccount.authProviders,
               parsed.authProviders,
-              linkedAccount.passwordHash.includes(':')
+              hasStoredPasswordHash(linkedAccount.passwordHash)
                 ? linkedAccount.emailKey
                   ? ['email']
                   : ['local']
@@ -1458,7 +1458,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               avatarUrl: resolvedAvatar,
               authProviders: resolvedProviders,
               authUserId: resolvedUid,
-              hasAccountPassword: linkedAccount.passwordHash.includes(':'),
+              hasAccountPassword: hasStoredPasswordHash(linkedAccount.passwordHash),
               signedInAt: ts,
             });
             return;
@@ -1481,7 +1481,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const resolvedProviders = mergeAuthProviders(
               linkedTeacher.authProviders,
               parsed.authProviders,
-              linkedTeacher.passwordHash.includes(':')
+              hasStoredPasswordHash(linkedTeacher.passwordHash)
                 ? linkedTeacher.emailKey
                   ? ['email']
                   : ['local']
@@ -1506,7 +1506,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               avatarUrl: resolvedAvatar,
               authProviders: resolvedProviders,
               authUserId: resolvedUid,
-              hasAccountPassword: linkedTeacher.passwordHash.includes(':'),
+              hasAccountPassword: hasStoredPasswordHash(linkedTeacher.passwordHash),
               signedInAt: ts,
             });
             return;
@@ -2595,13 +2595,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (!acc) {
             return { ok: false, error: 'Không tìm thấy tài khoản học sinh để cập nhật mật khẩu.' };
           }
-          const alreadyHasPass = acc.passwordHash.includes(':');
+          const alreadyHasPass = hasStoredPasswordHash(acc.passwordHash);
           if (alreadyHasPass) {
             const cur = input.currentPassword?.trim() ?? '';
             if (!cur) {
               return { ok: false, error: 'Vui lòng nhập mật khẩu hiện tại.' };
             }
-            if (!verifyStudentPassword(cur, acc.passwordHash)) {
+            const verified = await verifyPasswordHash(cur, acc.passwordHash);
+            if (!verified.ok) {
               return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
             }
           }
@@ -2650,13 +2651,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (!acc) {
             return { ok: false, error: 'Không tìm thấy tài khoản giáo viên để cập nhật mật khẩu.' };
           }
-          const alreadyHasPass = acc.passwordHash.includes(':');
+          const alreadyHasPass = hasStoredPasswordHash(acc.passwordHash);
           if (alreadyHasPass) {
             const cur = input.currentPassword?.trim() ?? '';
             if (!cur) {
               return { ok: false, error: 'Vui lòng nhập mật khẩu hiện tại.' };
             }
-            if (!verifyStudentPassword(cur, acc.passwordHash)) {
+            const verified = await verifyPasswordHash(cur, acc.passwordHash);
+            if (!verified.ok) {
               return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
             }
           }

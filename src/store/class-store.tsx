@@ -272,6 +272,7 @@ export type ClassStore = BaseActions & {
   ready: boolean;
   syncStatus: SyncStatus;
   lastSyncedAt: string | null;
+  hasPendingPush: boolean;
   pullNow: () => Promise<void>;
   classInfo: ClassInfo;
   students: Student[];
@@ -1038,7 +1039,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [mutate, applyAccountsResetIfNeeded],
   );
 
-  const { syncStatus, lastSyncedAt, pullNow, flushNow } = useRemoteSync({
+  const { syncStatus, lastSyncedAt, hasPendingPush, pullNow, flushNow } = useRemoteSync({
     state,
     commit,
     ready,
@@ -2658,6 +2659,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       ready,
       syncStatus,
       lastSyncedAt,
+      hasPendingPush,
       pullNow,
       classInfo,
       students: visibleStudents,
@@ -2803,6 +2805,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       ready,
       syncStatus,
       lastSyncedAt,
+      hasPendingPush,
       pullNow,
       classInfo,
       visibleStudents,

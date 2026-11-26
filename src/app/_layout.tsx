@@ -1,4 +1,4 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { DarkTheme, DefaultTheme, ThemeProvider, type ErrorBoundaryProps } from 'expo-router';
 import { Stack } from 'expo-router/stack';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
@@ -10,11 +10,17 @@ import { AssistantOverlay } from '@/components/assistant/assistant-overlay';
 import { AuthGate } from '@/components/auth-gate';
 import { CommandPaletteProvider } from '@/components/command-palette';
 import { NewAccountHologramWelcome } from '@/components/new-account-hologram-welcome';
+import { AppErrorFallback, SectionErrorBoundary } from '@/components/ui/section-error-boundary';
+import { SyncStatusBanner } from '@/components/ui/sync-status-banner';
 import { ToastProvider } from '@/components/ui/toast';
 import { AuthProvider, useAuth } from '@/store/auth-store';
 import { ClassStoreProvider, useClassStore } from '@/store/class-store';
 import { DecorProvider } from '@/store/decor-store';
 import { ThemePreferenceProvider, useThemePreference } from '@/store/theme-store';
+
+export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
+  return <AppErrorFallback error={error} retry={retry} />;
+}
 
 try {
   WebBrowser.maybeCompleteAuthSession();
@@ -62,7 +68,10 @@ function WorkspaceStack() {
         <Stack.Screen name={'entry-form'} options={{ presentation: 'modal' }} />
         <Stack.Screen name={'bulk-students'} options={{ presentation: 'modal' }} />
       </Stack>
-      <AssistantOverlay />
+      <SyncStatusBanner />
+      <SectionErrorBoundary compact title={'Trợ lý 10T4'}>
+        <AssistantOverlay />
+      </SectionErrorBoundary>
     </CommandPaletteProvider>
   );
 }
@@ -94,7 +103,9 @@ function AppShell() {
                 <WorkspaceStack />
               </ClassStoreProvider>
             </AuthGate>
-            <NewAccountHologramWelcome />
+            <SectionErrorBoundary compact title={'Thẻ chào mừng'}>
+              <NewAccountHologramWelcome />
+            </SectionErrorBoundary>
           </ToastProvider>
         </DecorProvider>
       </AuthProvider>

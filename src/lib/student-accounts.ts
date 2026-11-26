@@ -22,6 +22,16 @@ import {
   normalizePositionsList,
   type CustomOfficerGrantKey,
 } from '@/lib/officer-roles';
+import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+  hasStoredPasswordHash,
+  hashPasswordV2,
+  recordLoginFailure,
+  sha256HexPure,
+  verifyPasswordHash,
+  verifyPasswordHashSync,
+} from '@/lib/password-crypto';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
 import {
@@ -149,148 +159,23 @@ async function awaitBriefly<T>(promise: Promise<T>, timeoutMs = 2_500): Promise<
   }
 }
 
-/* ---------- Pure-TS SHA-256 (UTF-8 safe, works on HTTP, HTTPS, iOS, Android) ---------- */
+/* ---------- Cryptographic Password Hashing (PBKDF2-HMAC-SHA256 + Legacy SHA-256) ---------- */
 
-const SHA256_K = new Uint32Array([
-  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-]);
+export { hasStoredPasswordHash, sha256HexPure as sha256Hex };
 
-function utf8Bytes(str: string): Uint8Array {
-  const out: number[] = [];
-  for (let i = 0; i < str.length; i += 1) {
-    let code = str.charCodeAt(i);
-    if (code < 0x80) {
-      out.push(code);
-    } else if (code < 0x800) {
-      out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
-      const next = str.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        code = 0x10000 + (((code - 0xd800) << 10) | (next - 0xdc00));
-        i += 1;
-        out.push(
-          0xf0 | (code >> 18),
-          0x80 | ((code >> 12) & 0x3f),
-          0x80 | ((code >> 6) & 0x3f),
-          0x80 | (code & 0x3f),
-        );
-      } else {
-        out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-      }
-    } else {
-      out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-    }
-  }
-  return new Uint8Array(out);
-}
-
-function rotr(value: number, bits: number): number {
-  return (value >>> bits) | (value << (32 - bits));
-}
-
-export function sha256Hex(message: string): string {
-  const bytes = utf8Bytes(message);
-  const bitLen = bytes.length * 8;
-  const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
-  const padded = new Uint8Array(paddedLen);
-  padded.set(bytes);
-  padded[bytes.length] = 0x80;
-
-  const view = new DataView(padded.buffer);
-  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
-  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
-
-  let h0 = 0x6a09e667;
-  let h1 = 0xbb67ae85;
-  let h2 = 0x3c6ef372;
-  let h3 = 0xa54ff53a;
-  let h4 = 0x510e527f;
-  let h5 = 0x9b05688c;
-  let h6 = 0x1f83d9ab;
-  let h7 = 0x5be0cd19;
-
-  const w = new Uint32Array(64);
-
-  for (let offset = 0; offset < paddedLen; offset += 64) {
-    for (let i = 0; i < 16; i += 1) {
-      w[i] = view.getUint32(offset + i * 4, false);
-    }
-    for (let i = 16; i < 64; i += 1) {
-      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
-    }
-
-    let a = h0;
-    let b = h1;
-    let c = h2;
-    let d = h3;
-    let e = h4;
-    let f = h5;
-    let g = h6;
-    let h = h7;
-
-    for (let i = 0; i < 64; i += 1) {
-      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
-      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const temp2 = (S0 + maj) >>> 0;
-
-      h = g;
-      g = f;
-      f = e;
-      e = (d + temp1) >>> 0;
-      d = c;
-      c = b;
-      b = a;
-      a = (temp1 + temp2) >>> 0;
-    }
-
-    h0 = (h0 + a) >>> 0;
-    h1 = (h1 + b) >>> 0;
-    h2 = (h2 + c) >>> 0;
-    h3 = (h3 + d) >>> 0;
-    h4 = (h4 + e) >>> 0;
-    h5 = (h5 + f) >>> 0;
-    h6 = (h6 + g) >>> 0;
-    h7 = (h7 + h) >>> 0;
-  }
-
-  return [h0, h1, h2, h3, h4, h5, h6, h7]
-    .map((n) => n.toString(16).padStart(8, '0'))
-    .join('');
-}
-
-function randomSalt(): string {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 8)}`;
-}
-
-export function hashStudentPassword(password: string, salt = randomSalt()): string {
-  const digest = sha256Hex(`class10t4:${salt}:${password}`);
-  return `${salt}:${digest}`;
+export async function hashStudentPassword(password: string): Promise<string> {
+  return hashPasswordV2(password);
 }
 
 export function verifyStudentPassword(password: string, storedHash: string): boolean {
-  const idx = storedHash.indexOf(':');
-  if (idx <= 0) return false;
-  const salt = storedHash.slice(0, idx);
-  const expected = storedHash.slice(idx + 1);
-  const actual = sha256Hex(`class10t4:${salt}:${password}`);
-  if (actual.length !== expected.length) return false;
-  let diff = 0;
-  for (let i = 0; i < actual.length; i += 1) {
-    diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-  return diff === 0;
+  return verifyPasswordHashSync(password, storedHash).ok;
+}
+
+export async function verifyStudentPasswordAsync(
+  password: string,
+  storedHash: string,
+): Promise<{ ok: boolean; needsRehash: boolean }> {
+  return verifyPasswordHash(password, storedHash);
 }
 
 /* ---------- Email, Provider & Login ID Validation Helpers ---------- */
@@ -398,7 +283,7 @@ function parseStudentRecord(item: unknown): StudentAccountRecord | null {
   }
 
   const rawPass = typeof r.passwordHash === 'string' ? r.passwordHash : '';
-  const hasValidPass = rawPass.includes(':');
+  const hasValidPass = hasStoredPasswordHash(rawPass);
   const cleanEmail =
     typeof r.email === 'string' && r.email.trim() ? normalizeEmail(r.email) : null;
   const cleanEmailKey =
@@ -482,9 +367,9 @@ function mergeTwoStudentRecords(
   const emailKey = winner.emailKey || other.emailKey || (email ? normalizeEmail(email) : null);
   const authUserId = winner.authUserId || other.authUserId || null;
   const avatarUrl = winner.avatarUrl || other.avatarUrl || null;
-  const passwordHash = winner.passwordHash.includes(':')
+  const passwordHash = hasStoredPasswordHash(winner.passwordHash)
     ? winner.passwordHash
-    : other.passwordHash.includes(':')
+    : hasStoredPasswordHash(other.passwordHash)
       ? other.passwordHash
       : '';
   const winnerHasPos = winner.positions !== undefined || winner.position !== undefined;
@@ -979,7 +864,12 @@ export async function suggestNextLoginId(
 
 export type VerifyLoginResult =
   | { ok: true; account: StudentAccountRecord }
-  | { ok: false; reason: 'invalid' | 'not_found' | 'wrong_password'; error: string };
+  | {
+      ok: false;
+      reason: 'invalid' | 'not_found' | 'wrong_password' | 'rate_limited';
+      waitSeconds?: number;
+      error: string;
+    };
 
 export async function verifyStudentLogin(
   rawIdentifier: string,
@@ -994,6 +884,19 @@ export async function verifyStudentLogin(
   }
   if (!password) {
     return { ok: false, reason: 'invalid', error: 'Vui lòng nhập mật khẩu cá nhân.' };
+  }
+
+  const inputRateKey = isEmailInput
+    ? `stu:email:${normalizeEmail(trimmedIdentifier)}`
+    : `stu:id:${normalizeLoginIdKey(trimmedIdentifier)}`;
+  const preLimit = await checkLoginRateLimit(inputRateKey);
+  if (!preLimit.allowed) {
+    return {
+      ok: false,
+      reason: 'rate_limited',
+      waitSeconds: preLimit.waitSeconds,
+      error: `Đăng nhập sai quá nhiều lần. Vui lòng thử lại sau ${preLimit.waitSeconds} giây.`,
+    };
   }
 
   // Live remote merge so students can sign in immediately from any device.
@@ -1038,7 +941,22 @@ export async function verifyStudentLogin(
     }
   }
 
-  if (!found.passwordHash.includes(':')) {
+  const rateKeys = [
+    inputRateKey,
+    `stu:id:${found.loginIdKey}`,
+    ...(found.emailKey ? [`stu:email:${found.emailKey}`] : []),
+  ];
+  const accountLimit = await checkLoginRateLimit(rateKeys);
+  if (!accountLimit.allowed) {
+    return {
+      ok: false,
+      reason: 'rate_limited',
+      waitSeconds: accountLimit.waitSeconds,
+      error: `Đăng nhập sai quá nhiều lần. Vui lòng thử lại sau ${accountLimit.waitSeconds} giây.`,
+    };
+  }
+
+  if (!hasStoredPasswordHash(found.passwordHash)) {
     return {
       ok: false,
       reason: 'wrong_password',
@@ -1046,14 +964,49 @@ export async function verifyStudentLogin(
     };
   }
 
-  if (!verifyStudentPassword(password, found.passwordHash)) {
+  const verifyRes = await verifyPasswordHash(password, found.passwordHash);
+  if (!verifyRes.ok) {
+    const failState = await recordLoginFailure(rateKeys);
+    if (failState.locked) {
+      return {
+        ok: false,
+        reason: 'rate_limited',
+        waitSeconds: failState.waitSeconds,
+        error: `Nhập sai mật khẩu quá nhiều lần. Tài khoản tạm khóa thử lại trong ${failState.waitSeconds} giây.`,
+      };
+    }
     return {
       ok: false,
       reason: 'wrong_password',
       error: isEmailInput
-        ? `Mật khẩu không đúng cho Gmail "${found.email ?? trimmedIdentifier}"! Vui lòng kiểm tra lại.`
-        : `Mật khẩu không đúng cho Số ID "${found.loginId}"! Vui lòng kiểm tra lại.`,
+        ? `Mật khẩu không đúng cho Gmail "${found.email ?? trimmedIdentifier}" (còn ${failState.remainingAttempts} lần thử).`
+        : `Mật khẩu không đúng cho Số ID "${found.loginId}" (còn ${failState.remainingAttempts} lần thử).`,
     };
+  }
+
+  await clearLoginRateLimit(rateKeys);
+
+  // Transparently upgrade legacy single-round SHA-256 hashes to PBKDF2-SHA256 on successful login.
+  if (verifyRes.needsRehash) {
+    try {
+      const upgradedHash = await hashPasswordV2(password);
+      const upgraded: StudentAccountRecord = {
+        ...found,
+        passwordHash: upgradedHash,
+        updatedAt: safePostResetNowIso(),
+      };
+      found = upgraded;
+      await saveStudentAccounts(
+        accounts.map((a) => (a.studentId === upgraded.studentId ? upgraded : a)),
+      );
+      if (isSupabaseConfigured) {
+        void upsertAuthRegistryRemote({
+          student: upgraded as unknown as Record<string, unknown>,
+        }).catch(() => false);
+      }
+    } catch {
+      // Never block login if background rehash fails.
+    }
   }
 
   // Self-heal: ensure Student record exists in class_state (local + cloud) so profile & posts always work.
@@ -1168,7 +1121,8 @@ export async function registerStudentAccount(
   // Duplicate Login ID check — enforce exact rule: duplicate ID + wrong password => mật khẩu không đúng!
   const existingAccount = accounts.find((a) => a.loginIdKey === loginIdKey);
   if (existingAccount) {
-    const matched = password.length > 0 && verifyStudentPassword(password, existingAccount.passwordHash);
+    const matched =
+      password.length > 0 && (await verifyPasswordHash(password, existingAccount.passwordHash)).ok;
     if (!matched) {
       return {
         ok: false,
@@ -1229,7 +1183,7 @@ export async function registerStudentAccount(
     loginId,
     loginIdKey,
     name: student.name,
-    passwordHash: password.length > 0 ? hashStudentPassword(password) : '',
+    passwordHash: password.length > 0 ? await hashStudentPassword(password) : '',
     ...(cleanEmail ? { email: cleanEmail, emailKey: cleanEmail } : {}),
     ...(cleanAuthUserId ? { authUserId: cleanAuthUserId } : {}),
     ...(providers.length > 0 ? { authProviders: providers } : {}),
@@ -1440,7 +1394,7 @@ export async function syncStudentPasswordHash(
   );
   const updated: StudentAccountRecord = {
     ...current,
-    passwordHash: hashStudentPassword(cleanNew),
+    passwordHash: await hashStudentPassword(cleanNew),
     authProviders: nextProviders,
     updatedAt: new Date().toISOString(),
   };
@@ -1723,7 +1677,7 @@ export async function updateStudentAccountCredentials(params: {
         error: `Mật khẩu mới phải có ít nhất ${MIN_STUDENT_PASSWORD_LENGTH} ký tự.`,
       };
     }
-    nextPasswordHash = hashStudentPassword(cleanPass);
+    nextPasswordHash = await hashStudentPassword(cleanPass);
   }
 
   // If no existing account and no password provided, nothing to write yet unless password was set
@@ -1779,8 +1733,8 @@ export async function changeOwnStudentPassword(params: {
   }
   const current = accounts[idx];
   if (
-    current.passwordHash.includes(':') &&
-    !verifyStudentPassword(params.currentPassword.trim(), current.passwordHash)
+    hasStoredPasswordHash(current.passwordHash) &&
+    !(await verifyPasswordHash(params.currentPassword.trim(), current.passwordHash)).ok
   ) {
     return { ok: false, error: 'Mật khẩu hiện tại không đúng!' };
   }
@@ -1793,7 +1747,7 @@ export async function changeOwnStudentPassword(params: {
   }
   const next: StudentAccountRecord = {
     ...current,
-    passwordHash: hashStudentPassword(cleanNew),
+    passwordHash: await hashStudentPassword(cleanNew),
     authProviders: mergeAuthProviders(
       current.authProviders,
       current.emailKey ? ['email'] : ['local'],
@@ -1882,7 +1836,7 @@ export async function ensureAccountsForBulkStudents(
       loginId,
       loginIdKey,
       name: s.name,
-      passwordHash: hashStudentPassword(cleanPass),
+      passwordHash: await hashStudentPassword(cleanPass),
       authProviders: ['local'],
       createdAt: now,
       updatedAt: now,

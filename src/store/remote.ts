@@ -1181,6 +1181,19 @@ type ClassStateRow = {
   updated_at?: string | null;
 };
 
+/** Lightweight (~48-byte) check for the latest `updated_at` of `class10t4` in `public.class_state`. */
+export async function fetchClassStateUpdatedAtRemote(): Promise<string | null> {
+  if (!isSupabaseConfigured) return null;
+  const { data, error } = await supabase
+    .from('class_state')
+    .select('updated_at')
+    .eq('id', REMOTE_ROW_ID)
+    .maybeSingle<{ updated_at?: string | null }>();
+
+  if (error) throw error;
+  return data?.updated_at ?? null;
+}
+
 /** Pull the shared `class10t4` state directly from `public.class_state`. */
 export async function fetchClassStateRemote(): Promise<{
   state: PersistedState;

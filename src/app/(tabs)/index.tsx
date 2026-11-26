@@ -21,6 +21,7 @@ import { Card } from '@/components/ui/card';
 import { FadeIn } from '@/components/ui/fade-in';
 import { ProgressRing } from '@/components/ui/progress-ring';
 import { Screen } from '@/components/ui/screen';
+import { SectionErrorBoundary } from '@/components/ui/section-error-boundary';
 import { SectionHeader } from '@/components/ui/section-header';
 import { StatCard } from '@/components/ui/stat-card';
 import { useToast } from '@/components/ui/toast';
@@ -523,7 +524,9 @@ export default function DashboardScreen() {
 
       {/* Live Class Photo & File Upload Hub — replaces historical showcase, Overview tab only */}
       <FadeIn index={1}>
-        <LiveRecentPhotosStrip />
+        <SectionErrorBoundary compact title={'Kho ảnh & Tệp gần đây'}>
+          <LiveRecentPhotosStrip />
+        </SectionErrorBoundary>
       </FadeIn>
 
       {/* First-Time Mascot Welcome & Interactive Guided Tour Invite */}
