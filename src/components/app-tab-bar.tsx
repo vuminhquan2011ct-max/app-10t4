@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
+import { useSyncExternalStore } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { LinearTransition } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -9,9 +10,12 @@ import Svg, { Circle, Path } from 'react-native-svg';
 
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useBrandGradient, useIsDark, useTheme } from '@/hooks/use-theme';
+import { isProVaultUnlocked, subscribeProVault } from '@/lib/pro-vault';
 import { useClassStore } from '@/store/class-store';
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
+
+const PRO_ACTIVE_GRADIENT = ['#92400E', '#D97706', '#F59E0B'] as const;
 
 const TAB_ITEMS: { name: string; label: string; icon: IoniconName; activeIcon: IoniconName }[] = [
   { name: 'index', label: 'Tổng quan', icon: 'grid-outline', activeIcon: 'grid' },
@@ -19,6 +23,7 @@ const TAB_ITEMS: { name: string; label: string; icon: IoniconName; activeIcon: I
   { name: 'feed', label: 'Nhật ký', icon: 'sparkles-outline', activeIcon: 'sparkles' },
   { name: 'tools', label: 'Tiện ích', icon: 'apps-outline', activeIcon: 'apps' },
   { name: 'settings', label: 'Cài đặt', icon: 'settings-outline', activeIcon: 'settings' },
+  { name: 'pro', label: 'Gói Pro', icon: 'diamond-outline', activeIcon: 'diamond' },
 ];
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
@@ -33,10 +38,11 @@ const SAWTOOTH_D = (() => {
 })();
 
 /**
- * Royal Đông Sơn Bronze & Gold floating 5-tab pill dock shared by every platform.
+ * Royal Đông Sơn Bronze & Gold floating 6-tab pill dock shared by every platform.
  *
  * The active tab expands into a glowing gradient capsule with icon + label while
- * inactive tabs show crisp icons (plus a live pending count badge on Nhật ký).
+ * inactive tabs show crisp icons (plus a live pending count badge on Nhật ký and
+ * a royal gold diamond + subtle lock dot on Gói Pro).
  */
 export function AppTabBar({
   state,
@@ -48,11 +54,17 @@ export function AppTabBar({
   const gradient = useBrandGradient();
   const insets = useSafeAreaInsets();
   const { role, totals } = useClassStore();
+  const proUnlocked = useSyncExternalStore(
+    subscribeProVault,
+    isProVaultUnlocked,
+    isProVaultUnlocked,
+  );
 
   const barBg = isDark ? 'rgba(26, 15, 9, 0.94)' : 'rgba(255, 250, 240, 0.95)';
   const barBorder = isDark ? 'rgba(245, 158, 11, 0.45)' : 'rgba(180, 83, 9, 0.35)';
   const ornamentGold = isDark ? '#FBBF24' : '#B45309';
   const ornamentOpacity = isDark ? 0.55 : 0.42;
+  const proIdleColor = isDark ? '#F59E0B' : '#B45309';
 
   return (
     <View
@@ -127,6 +139,7 @@ export function AppTabBar({
           const item = TAB_ITEMS.find((tab) => tab.name === route.name);
           if (!item) return null;
           const focused = state.index === index;
+          const isPro = route.name === 'pro';
           const badgeCount = route.name === 'feed' && role === 'teacher' ? totals.pending : 0;
 
           const onPress = () => {
@@ -146,12 +159,20 @@ export function AppTabBar({
               style={[
                 styles.item,
                 focused
-                  ? [styles.itemActive, { shadowColor: gradient[0] }]
+                  ? [
+                      styles.itemActive,
+                      {
+                        shadowColor: isPro ? '#D97706' : gradient[0],
+                        borderColor: isPro
+                          ? 'rgba(254, 243, 199, 0.65)'
+                          : 'rgba(253, 224, 71, 0.45)',
+                      },
+                    ]
                   : styles.itemIdle,
               ]}>
               {focused ? (
                 <LinearGradient
-                  colors={gradient}
+                  colors={isPro ? PRO_ACTIVE_GRADIENT : gradient}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 1 }}
                   style={StyleSheet.absoluteFill}
@@ -161,8 +182,20 @@ export function AppTabBar({
                 <Ionicons
                   name={focused ? item.activeIcon : item.icon}
                   size={20}
-                  color={focused ? '#FFFFFF' : theme.textMuted}
+                  color={focused ? '#FFFFFF' : isPro ? proIdleColor : theme.textMuted}
                 />
+                {isPro && !proUnlocked && !focused ? (
+                  <View
+                    style={[
+                      styles.proLockDot,
+                      {
+                        backgroundColor: proIdleColor,
+                        borderColor: barBg,
+                      },
+                    ]}>
+                    <Ionicons name="lock-closed" size={7} color="#FFFBEB" />
+                  </View>
+                ) : null}
                 {badgeCount > 0 && !focused ? (
                   <View
                     style={[
@@ -204,11 +237,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
-    maxWidth: 488,
+    maxWidth: 530,
     borderRadius: Radius.pill,
     borderWidth: 1.5,
-    padding: 6,
-    gap: 4,
+    padding: 5,
+    gap: 3,
     overflow: 'hidden',
   },
   topOrnamentWrap: {
@@ -223,13 +256,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
     borderRadius: Radius.pill,
     overflow: 'hidden',
   },
   itemActive: {
-    flex: 2.4,
-    paddingHorizontal: 12,
+    flex: 2.05,
+    paddingHorizontal: 10,
     borderWidth: 1,
     borderColor: 'rgba(253, 224, 71, 0.45)',
     shadowOpacity: 0.34,
@@ -239,6 +272,17 @@ const styles = StyleSheet.create({
   },
   itemIdle: { flex: 1 },
   iconBox: { alignItems: 'center', justifyContent: 'center' },
+  proLockDot: {
+    position: 'absolute',
+    top: -4,
+    right: -6,
+    width: 13,
+    height: 13,
+    borderRadius: 6.5,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   badge: {
     position: 'absolute',
     top: -6,
@@ -261,5 +305,5 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   badgeText: { color: '#FFFFFF', fontSize: 9.5, fontWeight: '900' },
-  label: { color: '#FFFFFF', fontSize: 12.5, fontWeight: '800', letterSpacing: -0.1 },
+  label: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', letterSpacing: -0.1 },
 });
