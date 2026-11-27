@@ -11,15 +11,16 @@
  * - Privileged Pro content only mounts AFTER `isProVaultUnlocked()` succeeds.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
   Pressable,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -46,7 +47,12 @@ import {
   downloadOrShareExcelCsv,
   exportJsonBackup,
   formatVnd,
+  shareOrCopyText,
 } from '@/lib/export';
+import {
+  buildWeeklyZaloReport,
+  type WeeklyZaloPreset,
+} from '@/lib/weekly-zalo-report';
 import {
   PRO_LOCKOUT_SECONDS,
   PRO_MAX_ATTEMPTS,
@@ -61,7 +67,7 @@ import {
   type ProVaultUnlockInfo,
 } from '@/lib/pro-vault';
 import { useAuth } from '@/store/auth-store';
-import { useClassStore } from '@/store/class-store';
+import { useClassStore, useClassSync } from '@/store/class-store';
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
@@ -612,26 +618,79 @@ function ProUnlockedCenter({
     classInfo,
     students,
     entries,
+    attendance,
+    dutyLogs,
     announcements,
     tasks,
     resources,
+    fundTransactions,
+    fundPaid,
     registeredMembers,
     registeredTeachers,
     totals,
     fundSummary,
     activityLog,
-    syncStatus,
-    lastSyncedAt,
     getStudyParticipationReport,
     exportStateJson,
     pullNow,
   } = useClassStore();
+  const { syncStatus, lastSyncedAt } = useClassSync();
   const driveGallery = useDriveGallery();
 
   const [syncingNow, setSyncingNow] = useState(false);
   const [busyExport, setBusyExport] = useState<string | null>(null);
+  const [zaloPreset, setZaloPreset] = useState<WeeklyZaloPreset>('parents');
+  const [zaloOpen, setZaloOpen] = useState(false);
 
   const studyReport = getStudyParticipationReport();
+  const zaloReport = useMemo(
+    () =>
+      buildWeeklyZaloReport({
+        classInfo,
+        students,
+        entries,
+        attendance,
+        dutyLogs,
+        fundTransactions,
+        fundPaid,
+        tasks,
+        preset: zaloPreset,
+      }),
+    [classInfo, students, entries, attendance, dutyLogs, fundTransactions, fundPaid, tasks, zaloPreset],
+  );
+
+  const handleCopyZaloSummary = async () => {
+    const res = await shareOrCopyText(zaloReport.text, zaloReport.title);
+    showToast(
+      res === 'copied'
+        ? `Đã sao chép ${zaloPreset === 'parents' ? 'Bản tin Phụ huynh' : 'Bản tin Lớp 10T4'} cho Zalo!`
+        : res === 'shared'
+          ? 'Đã mở chia sẻ bản tin tổng kết tuần!'
+          : 'Không thể sao chép bản tin lúc này',
+      res === 'failed' ? 'danger' : 'success',
+    );
+  };
+
+  const handleShareZaloSummary = async () => {
+    if (Platform.OS === 'web' && typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ title: zaloReport.title, text: zaloReport.text });
+        showToast('Đã mở hộp thoại chia sẻ bản tin Zalo!', 'success');
+        return;
+      } catch {
+        // Fallback to copy
+      }
+    } else if (Platform.OS !== 'web') {
+      try {
+        await Share.share({ title: zaloReport.title, message: zaloReport.text });
+        showToast('Đã mở hộp thoại chia sẻ Zalo!', 'success');
+        return;
+      } catch {
+        // Fallback to copy
+      }
+    }
+    await handleCopyZaloSummary();
+  };
   const registeredStudentCount = registeredMembers.filter((m) => m.role === 'student').length;
   const recentAudit = activityLog.slice(0, 15);
 
@@ -994,6 +1053,94 @@ function ProUnlockedCenter({
         </Card>
       </FadeIn>
 
+      {/* Quick Weekly Zalo Summary Card (Pro Unlocked Center) */}
+      <FadeIn index={3}>
+        <Card style={styles.exportCard}>
+          <Pressable
+            onPress={() => setZaloOpen((v) => !v)}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Mở hoặc thu gọn bản tin tổng kết tuần Zalo"
+            style={styles.syncRow}>
+            <View style={[styles.metricIcon, { backgroundColor: theme.accentSoft }]}>
+              <Ionicons name="chatbubble-ellipses" size={18} color={theme.accent} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={[styles.syncTitle, { color: theme.text }]}>
+                Bản tin Tổng kết Tuần (Zalo 1-chạm)
+              </Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
+                {`${zaloReport.weekLabel} · ${zaloReport.metrics.weeklySpeeches} stamps tuần · Quỹ ${formatVnd(zaloReport.metrics.fundBalance)}`}
+              </Text>
+            </View>
+            <Ionicons
+              name={zaloOpen ? 'chevron-up' : 'chevron-down'}
+              size={18}
+              color={theme.textMuted}
+            />
+          </Pressable>
+
+          <View style={styles.exportRow}>
+            <Button
+              label={'Phụ huynh (Zalo)'}
+              variant={zaloPreset === 'parents' ? 'primary' : 'soft'}
+              icon={'people-outline'}
+              size={'sm'}
+              style={styles.flex}
+              onPress={() => setZaloPreset('parents')}
+            />
+            <Button
+              label={'Lớp 10T4'}
+              variant={zaloPreset === 'class' ? 'primary' : 'soft'}
+              icon={'flame-outline'}
+              size={'sm'}
+              style={styles.flex}
+              onPress={() => setZaloPreset('class')}
+            />
+          </View>
+
+          {zaloOpen ? (
+            <View
+              style={{
+                backgroundColor: theme.backgroundElement,
+                borderColor: theme.border,
+                borderWidth: StyleSheet.hairlineWidth,
+                borderRadius: Radius.md,
+                padding: Spacing.three,
+              }}>
+              <Text selectable style={{ color: theme.text, fontSize: 12.5, lineHeight: 19 }}>
+                {zaloReport.text}
+              </Text>
+            </View>
+          ) : null}
+
+          <View style={styles.exportRow}>
+            <Button
+              label={'Copy Zalo'}
+              icon={'copy-outline'}
+              size={'sm'}
+              style={styles.flex}
+              onPress={() => void handleCopyZaloSummary()}
+            />
+            <Button
+              label={'Chia sẻ'}
+              variant={'soft'}
+              icon={'share-social-outline'}
+              size={'sm'}
+              style={styles.flex}
+              onPress={() => void handleShareZaloSummary()}
+            />
+            <Button
+              label={zaloOpen ? 'Ẩn' : 'Xem'}
+              variant={'soft'}
+              icon={zaloOpen ? 'eye-off-outline' : 'eye-outline'}
+              size={'sm'}
+              onPress={() => setZaloOpen((v) => !v)}
+            />
+          </View>
+        </Card>
+      </FadeIn>
+
       {/* Quick Pro Admin Shortcuts */}
       <FadeIn index={4}>
         <SectionHeader
@@ -1304,15 +1451,19 @@ const styles = StyleSheet.create({
   /* PIN Mode */
   pinPanel: { gap: Spacing.three, alignItems: 'center' },
   pinDotsRow: {
+    width: '100%',
+    maxWidth: 320,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
+    gap: 6,
     paddingVertical: 4,
   },
   pinDotSlot: {
-    width: 38,
-    height: 44,
+    flex: 1,
+    minWidth: 32,
+    maxWidth: 40,
+    aspectRatio: 0.88,
     borderRadius: Radius.sm,
     borderWidth: 1.4,
     alignItems: 'center',

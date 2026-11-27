@@ -13,6 +13,7 @@
 
 import { roundPoints } from '@/constants/entry-meta';
 import { extractDriveFileIdFromUrl } from '@/lib/drive';
+import { reportNonFatal } from '@/lib/logger';
 import {
   formatPositionsDisplay,
   normalizeCustomGrants,
@@ -1286,6 +1287,41 @@ type ClassStateRow = {
   updated_at?: string | null;
 };
 
+const CAS_MAX_ATTEMPTS = 3;
+
+function nextMonotonicIso(previousIso?: string | null): string {
+  const nowMs = Date.now();
+  const prevMs = previousIso ? Date.parse(previousIso) : 0;
+  if (Number.isFinite(prevMs) && prevMs >= nowMs) {
+    return new Date(prevMs + 1).toISOString();
+  }
+  return new Date(nowMs).toISOString();
+}
+
+async function fetchClassStateRaw(): Promise<{
+  state: PersistedState;
+  updatedAt: string;
+  rawUpdatedAt: string | null;
+} | null> {
+  if (!isSupabaseConfigured) return null;
+  const { data, error } = await supabase
+    .from('class_state')
+    .select('data, updated_at')
+    .eq('id', REMOTE_ROW_ID)
+    .maybeSingle<ClassStateRow>();
+
+  if (error) throw error;
+  if (!data?.data) return null;
+
+  const rawUpdatedAt =
+    typeof data.updated_at === 'string' && data.updated_at.trim() ? data.updated_at : null;
+  return {
+    state: hydrateRemotePayload(data.data),
+    updatedAt: rawUpdatedAt || new Date().toISOString(),
+    rawUpdatedAt,
+  };
+}
+
 /** Lightweight (~48-byte) check for the latest `updated_at` of `class10t4` in `public.class_state`. */
 export async function fetchClassStateUpdatedAtRemote(): Promise<string | null> {
   if (!isSupabaseConfigured) return null;
@@ -1304,24 +1340,14 @@ export async function fetchClassStateRemote(): Promise<{
   state: PersistedState;
   updatedAt: string;
 } | null> {
-  if (!isSupabaseConfigured) return null;
-  const { data, error } = await supabase
-    .from('class_state')
-    .select('data, updated_at')
-    .eq('id', REMOTE_ROW_ID)
-    .maybeSingle<ClassStateRow>();
-
-  if (error) throw error;
-  if (!data?.data) return null;
-
-  return {
-    state: hydrateRemotePayload(data.data),
-    updatedAt: data.updated_at || new Date().toISOString(),
-  };
+  const raw = await fetchClassStateRaw();
+  if (!raw) return null;
+  return { state: raw.state, updatedAt: raw.updatedAt };
 }
 
 /**
- * Atomic fetch -> merge -> upsert into `public.class_state` (`id = 'class10t4'`),
+ * Atomic fetch -> merge -> optimistic CAS update (with up to 2 conflict retries
+ * and safe first-write upsert fallback) into `public.class_state` (`id = 'class10t4'`),
  * followed by an immediate cross-device Realtime Broadcast.
  */
 export async function pushClassStateMerged(
@@ -1331,31 +1357,90 @@ export async function pushClassStateMerged(
   if (!isSupabaseConfigured) return null;
 
   return enqueueClassStateWrite(async () => {
-    // Do NOT swallow read errors: aborting prevents wiping cloud state on transient network failure.
-    const remote = await fetchClassStateRemote();
-    const merged = mergeClassStates(remote?.state ?? null, localState, { prefer: 'local' });
-    const now = new Date().toISOString();
-    const payload = stripForSharedSync(merged);
+    for (let attempt = 0; attempt < CAS_MAX_ATTEMPTS; attempt += 1) {
+      // Do NOT swallow read errors: aborting prevents wiping cloud state on transient network failure.
+      const remote = await fetchClassStateRaw();
+      const merged = mergeClassStates(remote?.state ?? null, localState, { prefer: 'local' });
+      const now = nextMonotonicIso(remote?.rawUpdatedAt);
+      const payload = stripForSharedSync(merged);
 
-    const { data, error } = await supabase
-      .from('class_state')
-      .upsert(
-        { id: REMOTE_ROW_ID, data: payload, updated_at: now },
-        { onConflict: 'id' },
-      )
-      .select('updated_at')
-      .maybeSingle<{ updated_at?: string | null }>();
+      const expectedUpdatedAt = remote?.rawUpdatedAt ?? null;
+      const isFinalAttempt = attempt === CAS_MAX_ATTEMPTS - 1;
 
-    if (error) throw error;
+      if (expectedUpdatedAt && !isFinalAttempt) {
+        const { data, error } = await supabase
+          .from('class_state')
+          .update({ data: payload, updated_at: now })
+          .eq('id', REMOTE_ROW_ID)
+          .eq('updated_at', expectedUpdatedAt)
+          .select('updated_at')
+          .maybeSingle<{ updated_at?: string | null }>();
 
-    const updatedAt = data?.updated_at || now;
-    emitLiveBroadcast({
-      type: 'state-updated',
-      updatedAt,
-      reason: options?.reason,
-    });
+        if (error) throw error;
+        if (!data) {
+          // Concurrent writer updated `updated_at` during RTT -> re-fetch, re-merge & retry.
+          continue;
+        }
 
-    return { state: merged, updatedAt };
+        const updatedAt = data.updated_at || now;
+        emitLiveBroadcast({
+          type: 'state-updated',
+          updatedAt,
+          reason: options?.reason,
+        });
+        return { state: merged, updatedAt };
+      }
+
+      if (expectedUpdatedAt && isFinalAttempt) {
+        // Try CAS one last time before falling back to upsert so concurrent edits still win cleanly.
+        const { data: casData, error: casErr } = await supabase
+          .from('class_state')
+          .update({ data: payload, updated_at: now })
+          .eq('id', REMOTE_ROW_ID)
+          .eq('updated_at', expectedUpdatedAt)
+          .select('updated_at')
+          .maybeSingle<{ updated_at?: string | null }>();
+
+        if (casErr) throw casErr;
+        if (casData) {
+          const updatedAt = casData.updated_at || now;
+          emitLiveBroadcast({
+            type: 'state-updated',
+            updatedAt,
+            reason: options?.reason,
+          });
+          return { state: merged, updatedAt };
+        }
+        reportNonFatal(
+          'remote',
+          new Error('CAS retry limit reached; falling back to merged upsert'),
+          `pushClassStateMerged:${options?.reason ?? 'sync'}`,
+        );
+      }
+
+      // First-write (row absent) or post-CAS-contention fallback upsert.
+      const { data, error } = await supabase
+        .from('class_state')
+        .upsert(
+          { id: REMOTE_ROW_ID, data: payload, updated_at: now },
+          { onConflict: 'id' },
+        )
+        .select('updated_at')
+        .maybeSingle<{ updated_at?: string | null }>();
+
+      if (error) throw error;
+
+      const updatedAt = data?.updated_at || now;
+      emitLiveBroadcast({
+        type: 'state-updated',
+        updatedAt,
+        reason: options?.reason,
+      });
+
+      return { state: merged, updatedAt };
+    }
+
+    return null;
   });
 }
 
@@ -1508,7 +1593,8 @@ export async function upsertRegisteredMemberToCloud(
 
       return nextState;
     });
-  } catch {
+  } catch (err) {
+    reportNonFatal('remote', err, `upsertRegisteredMemberToCloud:${member.kind}`);
     return null;
   }
 }
@@ -1582,8 +1668,8 @@ export async function removeRegisteredMemberFromCloud(
         reason: kind === 'student' ? 'student-removed' : 'teacher-removed',
       });
     });
-  } catch {
-    // Non-blocking on offline devices.
+  } catch (err) {
+    reportNonFatal('remote', err, `removeRegisteredMemberFromCloud:${kind}`);
   }
 }
 
@@ -1790,12 +1876,13 @@ export async function fetchAuthRegistryRemote(): Promise<{
       accountsResetAt,
       updatedAt: data.updated_at || new Date().toISOString(),
     };
-  } catch {
+  } catch (err) {
+    reportNonFatal('remote', err, 'fetchAuthRegistryRemote');
     return null;
   }
 }
 
-/** Pull-merge-upsert student/teacher account records into `id = 'class10t4_accounts_v1'`. */
+/** Pull-merge-CAS-update student/teacher account records into `id = 'class10t4_accounts_v1'`. */
 export async function upsertAuthRegistryRemote(patch: {
   student?: Record<string, unknown>;
   removeStudentId?: string;
@@ -1808,125 +1895,173 @@ export async function upsertAuthRegistryRemote(patch: {
 
   try {
     return await enqueueAuthRegistryWrite(async () => {
-      const { data: existingRow, error: readErr } = await supabase
-        .from('class_state')
-        .select('data')
-        .eq('id', AUTH_REGISTRY_ROW_ID)
-        .maybeSingle<{ data: AuthRegistryDoc | null }>();
+      for (let attempt = 0; attempt < CAS_MAX_ATTEMPTS; attempt += 1) {
+        const { data: existingRow, error: readErr } = await supabase
+          .from('class_state')
+          .select('data, updated_at')
+          .eq('id', AUTH_REGISTRY_ROW_ID)
+          .maybeSingle<{ data: AuthRegistryDoc | null; updated_at?: string | null }>();
 
-      if (readErr) return false;
+        if (readErr) {
+          reportNonFatal('remote', readErr, 'upsertAuthRegistryRemote:read');
+          return false;
+        }
 
-      const existing = existingRow?.data ?? {};
-      const now = new Date().toISOString();
-      const existingResetAt = nonEmptyStr(existing.accountsResetAt);
-      const existingResetMs = ts(existingResetAt);
-      const epochResetMs = ts(ACCOUNTS_RESET_EPOCH);
-      const effectiveResetMs = Math.max(epochResetMs, existingResetMs);
-      const accountsResetAt =
-        existingResetAt && existingResetMs >= epochResetMs ? existingResetAt : ACCOUNTS_RESET_EPOCH;
+        const expectedUpdatedAt =
+          typeof existingRow?.updated_at === 'string' && existingRow.updated_at.trim()
+            ? existingRow.updated_at
+            : null;
+        const existing = existingRow?.data ?? {};
+        const now = nextMonotonicIso(expectedUpdatedAt);
+        const existingResetAt = nonEmptyStr(existing.accountsResetAt);
+        const existingResetMs = ts(existingResetAt);
+        const epochResetMs = ts(ACCOUNTS_RESET_EPOCH);
+        const effectiveResetMs = Math.max(epochResetMs, existingResetMs);
+        const accountsResetAt =
+          existingResetAt && existingResetMs >= epochResetMs
+            ? existingResetAt
+            : ACCOUNTS_RESET_EPOCH;
 
-      const delStudents: Record<string, string> = { ...(existing.deletedStudentIds ?? {}) };
-      const delTeachers: Record<string, string> = { ...(existing.deletedTeacherIds ?? {}) };
+        const delStudents: Record<string, string> = { ...(existing.deletedStudentIds ?? {}) };
+        const delTeachers: Record<string, string> = { ...(existing.deletedTeacherIds ?? {}) };
 
-      const studentMap = new Map<string, Record<string, unknown>>();
-      for (const item of Array.isArray(existing.students) ? existing.students : []) {
-        if (!item || typeof item !== 'object') continue;
-        if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) continue;
-        const id = recordIdOf(item, 'studentId');
-        if (id) studentMap.set(id, item);
-      }
+        const studentMap = new Map<string, Record<string, unknown>>();
+        for (const item of Array.isArray(existing.students) ? existing.students : []) {
+          if (!item || typeof item !== 'object') continue;
+          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) continue;
+          const id = recordIdOf(item, 'studentId');
+          if (id) studentMap.set(id, item);
+        }
 
-      const teacherMap = new Map<string, Record<string, unknown>>();
-      for (const item of Array.isArray(existing.teachers) ? existing.teachers : []) {
-        if (!item || typeof item !== 'object') continue;
-        if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) continue;
-        const id = recordIdOf(item, 'teacherId');
-        if (id) teacherMap.set(id, item);
-      }
+        const teacherMap = new Map<string, Record<string, unknown>>();
+        for (const item of Array.isArray(existing.teachers) ? existing.teachers : []) {
+          if (!item || typeof item !== 'object') continue;
+          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) continue;
+          const id = recordIdOf(item, 'teacherId');
+          if (id) teacherMap.set(id, item);
+        }
 
-      if (patch.removeStudentId) {
-        delStudents[patch.removeStudentId] = now;
-        studentMap.delete(patch.removeStudentId);
-      }
-      if (Array.isArray(patch.removeStudentIds)) {
-        for (const id of patch.removeStudentIds) {
-          if (typeof id === 'string' && id.trim()) {
-            const cleanId = id.trim();
-            delStudents[cleanId] = now;
-            studentMap.delete(cleanId);
+        if (patch.removeStudentId) {
+          delStudents[patch.removeStudentId] = now;
+          studentMap.delete(patch.removeStudentId);
+        }
+        if (Array.isArray(patch.removeStudentIds)) {
+          for (const id of patch.removeStudentIds) {
+            if (typeof id === 'string' && id.trim()) {
+              const cleanId = id.trim();
+              delStudents[cleanId] = now;
+              studentMap.delete(cleanId);
+            }
           }
         }
-      }
 
-      const applyStudentUpsert = (incoming: Record<string, unknown>) => {
-        const id = recordIdOf(incoming, 'studentId');
-        if (!id) return;
-        if (effectiveResetMs > 0 && recordUpdatedAtOf(incoming) < effectiveResetMs) return;
-        delete delStudents[id];
-        const prev = studentMap.get(id);
-        studentMap.set(id, mergeAuthAccountRecord(prev, incoming));
-      };
+        const applyStudentUpsert = (incoming: Record<string, unknown>) => {
+          const id = recordIdOf(incoming, 'studentId');
+          if (!id) return;
+          if (effectiveResetMs > 0 && recordUpdatedAtOf(incoming) < effectiveResetMs) return;
+          delete delStudents[id];
+          const prev = studentMap.get(id);
+          studentMap.set(id, mergeAuthAccountRecord(prev, incoming));
+        };
 
-      if (patch.student) {
-        applyStudentUpsert(patch.student);
-      }
-      if (Array.isArray(patch.bulkStudents)) {
-        for (const stu of patch.bulkStudents) {
-          if (stu && typeof stu === 'object') applyStudentUpsert(stu);
+        if (patch.student) {
+          applyStudentUpsert(patch.student);
         }
-      }
-
-      if (patch.removeTeacherId) {
-        delTeachers[patch.removeTeacherId] = now;
-        teacherMap.delete(patch.removeTeacherId);
-      }
-
-      if (patch.teacher) {
-        const id = recordIdOf(patch.teacher, 'teacherId');
-        if (id && (effectiveResetMs <= 0 || recordUpdatedAtOf(patch.teacher) >= effectiveResetMs)) {
-          delete delTeachers[id];
-          const prev = teacherMap.get(id);
-          teacherMap.set(id, mergeAuthAccountRecord(prev, patch.teacher));
+        if (Array.isArray(patch.bulkStudents)) {
+          for (const stu of patch.bulkStudents) {
+            if (stu && typeof stu === 'object') applyStudentUpsert(stu);
+          }
         }
+
+        if (patch.removeTeacherId) {
+          delTeachers[patch.removeTeacherId] = now;
+          teacherMap.delete(patch.removeTeacherId);
+        }
+
+        if (patch.teacher) {
+          const id = recordIdOf(patch.teacher, 'teacherId');
+          if (
+            id &&
+            (effectiveResetMs <= 0 || recordUpdatedAtOf(patch.teacher) >= effectiveResetMs)
+          ) {
+            delete delTeachers[id];
+            const prev = teacherMap.get(id);
+            teacherMap.set(id, mergeAuthAccountRecord(prev, patch.teacher));
+          }
+        }
+
+        const nextDoc: AuthRegistryDoc = {
+          students: Array.from(studentMap.values()).filter((item) => {
+            const id = recordIdOf(item, 'studentId');
+            if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
+            return !isTombstoned(
+              delStudents,
+              id,
+              item.updatedAt as string | undefined,
+              item.createdAt as string | undefined,
+            );
+          }),
+          teachers: Array.from(teacherMap.values()).filter((item) => {
+            const id = recordIdOf(item, 'teacherId');
+            if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
+            return !isTombstoned(
+              delTeachers,
+              id,
+              item.updatedAt as string | undefined,
+              item.createdAt as string | undefined,
+            );
+          }),
+          deletedStudentIds: delStudents,
+          deletedTeacherIds: delTeachers,
+          accountsResetAt,
+          updatedAt: now,
+        };
+
+        const isFinalAttempt = attempt === CAS_MAX_ATTEMPTS - 1;
+
+        if (expectedUpdatedAt) {
+          const { data: casRow, error: casErr } = await supabase
+            .from('class_state')
+            .update({ data: nextDoc, updated_at: now })
+            .eq('id', AUTH_REGISTRY_ROW_ID)
+            .eq('updated_at', expectedUpdatedAt)
+            .select('updated_at')
+            .maybeSingle<{ updated_at?: string | null }>();
+
+          if (casErr) {
+            reportNonFatal('remote', casErr, 'upsertAuthRegistryRemote:cas-update');
+            return false;
+          }
+          if (casRow) return true;
+          if (!isFinalAttempt) {
+            // Concurrent writer won -> re-read latest registry, re-merge, and retry.
+            continue;
+          }
+          reportNonFatal(
+            'remote',
+            new Error('CAS retry limit reached; falling back to merged upsert'),
+            'upsertAuthRegistryRemote',
+          );
+        }
+
+        const { error: writeErr } = await supabase
+          .from('class_state')
+          .upsert(
+            { id: AUTH_REGISTRY_ROW_ID, data: nextDoc, updated_at: now },
+            { onConflict: 'id' },
+          );
+
+        if (writeErr) {
+          reportNonFatal('remote', writeErr, 'upsertAuthRegistryRemote:upsert');
+          return false;
+        }
+        return true;
       }
 
-      const nextDoc: AuthRegistryDoc = {
-        students: Array.from(studentMap.values()).filter((item) => {
-          const id = recordIdOf(item, 'studentId');
-          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
-          return !isTombstoned(
-            delStudents,
-            id,
-            item.updatedAt as string | undefined,
-            item.createdAt as string | undefined,
-          );
-        }),
-        teachers: Array.from(teacherMap.values()).filter((item) => {
-          const id = recordIdOf(item, 'teacherId');
-          if (effectiveResetMs > 0 && recordUpdatedAtOf(item) < effectiveResetMs) return false;
-          return !isTombstoned(
-            delTeachers,
-            id,
-            item.updatedAt as string | undefined,
-            item.createdAt as string | undefined,
-          );
-        }),
-        deletedStudentIds: delStudents,
-        deletedTeacherIds: delTeachers,
-        accountsResetAt,
-        updatedAt: now,
-      };
-
-      const { error: writeErr } = await supabase
-        .from('class_state')
-        .upsert(
-          { id: AUTH_REGISTRY_ROW_ID, data: nextDoc, updated_at: now },
-          { onConflict: 'id' },
-        );
-
-      return !writeErr;
+      return false;
     });
-  } catch {
+  } catch (err) {
+    reportNonFatal('remote', err, 'upsertAuthRegistryRemote');
     return false;
   }
 }
@@ -2263,7 +2398,8 @@ export async function fetchPrivateBundle(): Promise<PrivateBundle> {
     }
 
     return { contacts, notes };
-  } catch {
+  } catch (err) {
+    reportNonFatal('remote', err, 'fetchPrivateBundle');
     return { contacts: {}, notes: {} };
   }
 }
@@ -2305,7 +2441,9 @@ export async function deleteStudentPrivateRemote(studentId: string): Promise<voi
   await Promise.all([
     supabase.from('student_private').delete().eq('student_id', studentId),
     supabase.from('student_notes').delete().eq('student_id', studentId),
-  ]).catch(() => {});
+  ]).catch((err) => {
+    reportNonFatal('remote', err, 'deleteStudentPrivateRemote');
+  });
 }
 
 type FeedbackRow = {
@@ -2343,7 +2481,8 @@ export async function fetchFeedbackRemote(): Promise<FeedbackItem[]> {
       .order('created_at', { ascending: false });
     if (error) return [];
     return ((data as FeedbackRow[] | null) ?? []).map(toFeedback);
-  } catch {
+  } catch (err) {
+    reportNonFatal('remote', err, 'fetchFeedbackRemote');
     return [];
   }
 }

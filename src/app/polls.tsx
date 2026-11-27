@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/page-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { ConfirmActionButton } from '@/components/ui/confirm-action-button';
 import { DatePickerField } from '@/components/ui/date-picker-field';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
@@ -171,6 +172,9 @@ export default function PollsScreen() {
                         key={opt.id}
                         disabled={poll.closed}
                         onPress={() => handleVote(poll.id, opt.id)}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: picked, disabled: poll.closed }}
+                        accessibilityLabel={`${opt.label}, ${pct}% (${count} phiếu)`}
                         style={({ pressed }) => [
                           styles.optBox,
                           {
@@ -224,6 +228,9 @@ export default function PollsScreen() {
                           togglePollClosed(poll.id);
                           showToast(poll.closed ? 'Đã mở lại bình chọn' : 'Đã chốt bình chọn', 'info');
                         }}
+                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                        accessibilityRole="button"
+                        accessibilityLabel={poll.closed ? 'Mở lại bình chọn' : 'Chốt bình chọn'}
                         style={[styles.miniBtn, { backgroundColor: theme.backgroundElement }]}>
                         <Ionicons
                           name={poll.closed ? 'lock-open-outline' : 'lock-closed-outline'}
@@ -234,14 +241,14 @@ export default function PollsScreen() {
                           {poll.closed ? 'Mở lại' : 'Chốt'}
                         </Text>
                       </Pressable>
-                      <Pressable
-                        onPress={() => {
+                      <ConfirmActionButton
+                        onConfirm={() => {
                           removePoll(poll.id);
                           showToast('Đã xoá bình chọn', 'warning');
                         }}
-                        style={[styles.miniBtn, { backgroundColor: theme.dangerSoft }]}>
-                        <Ionicons name="trash-outline" size={14} color={theme.danger} />
-                      </Pressable>
+                        accessibilityLabel={`Xoá bình chọn ${poll.question}`}
+                        confirmAccessibilityLabel={`Nhấn lại để xoá bình chọn ${poll.question}`}
+                      />
                     </View>
                   ) : null}
                 </View>
@@ -289,10 +296,12 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.two + 2,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
-  footerBtns: { flexDirection: 'row', gap: 6 },
+  footerBtns: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   miniBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 32,
     gap: 4,
     paddingHorizontal: 10,
     paddingVertical: 6,

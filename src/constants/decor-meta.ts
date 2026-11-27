@@ -3,7 +3,7 @@
  * Creative Canvas, Card Studio, and In-App Companion Mascots.
  */
 
-import type { Ionicons } from '@expo/vector-icons';
+import type Ionicons from '@expo/vector-icons/Ionicons';
 
 import type { StickerRarity } from '@/constants/rewards-meta';
 import type { AccentKey, ThemeMode } from '@/constants/theme';

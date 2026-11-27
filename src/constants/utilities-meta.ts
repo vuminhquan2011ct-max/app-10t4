@@ -3,7 +3,7 @@
  * and Timetable features.
  */
 
-import type { Ionicons } from '@expo/vector-icons';
+import type Ionicons from '@expo/vector-icons/Ionicons';
 
 import type { ThemeColor } from '@/constants/theme';
 import type {

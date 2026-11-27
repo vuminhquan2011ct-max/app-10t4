@@ -15,11 +15,11 @@
  *   Replies (`addAnnouncementReply` / `removeAnnouncementReply` with 2-tap confirm).
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -60,6 +60,7 @@ import {
   SUBJECT_TEACHER_PRESETS,
 } from '@/constants/utilities-meta';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
+import { useTwoTapConfirm } from '@/hooks/use-two-tap-confirm';
 import { formatDate, relativeDay } from '@/lib/date';
 import { DRIVE_CONFIG, extractDriveFileIdFromUrl, getLocalPreviewUri } from '@/lib/drive';
 import { saveUploadedFilesToGallery } from '@/lib/drive-gallery';
@@ -295,6 +296,7 @@ function AudienceSelector({
                 <Pressable
                   key={grp}
                   onPress={() => toggleGroupShortcut(grp)}
+                  hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
                   accessibilityRole="button"
                   accessibilityLabel={`Chọn nhanh ${grp}`}
                   style={({ pressed }) => [
@@ -317,6 +319,7 @@ function AudienceSelector({
             })}
             <Pressable
               onPress={toggleOfficersShortcut}
+              hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
               accessibilityRole="button"
               accessibilityLabel="Chọn nhanh Ban cán sự"
               style={({ pressed }) => [
@@ -331,6 +334,7 @@ function AudienceSelector({
             {selectedIds.length > 0 ? (
               <Pressable
                 onPress={() => onChangeSelectedIds([])}
+                hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
                 accessibilityRole="button"
                 accessibilityLabel="Bỏ chọn hết thành viên"
                 style={({ pressed }) => [
@@ -369,6 +373,7 @@ function AudienceSelector({
                   <Pressable
                     key={member.id}
                     onPress={() => toggleMember(member.id)}
+                    hitSlop={{ top: 5, bottom: 5, left: 4, right: 4 }}
                     accessibilityRole="checkbox"
                     accessibilityState={{ checked: picked }}
                     accessibilityLabel={`Chọn ${member.name}`}
@@ -702,6 +707,7 @@ function AnnouncementComposer({
           <DriveAttachmentList
             attachments={attachments}
             editable
+            confirmBeforeRemove
             onRemove={handleRemoveDraftAttachment}
           />
         </View>
@@ -928,9 +934,8 @@ export function AnnouncementsHub({
   const [openRepliesIds, setOpenRepliesIds] = useState<Record<string, boolean>>({});
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
 
-  // 2-tap safe deletion for announcements AND replies (single timer with unmount cleanup)
-  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
-  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 2-tap safe deletion for announcements AND replies (shared hook with unmount cleanup)
+  const { isArmed: isDeleteArmed, armOrConfirm: armOrConfirmTwoTap } = useTwoTapConfirm(3_500);
 
   // Subject teacher quick unlock portal (for viewers without post access)
   const [portalOpen, setPortalOpen] = useState(false);
@@ -943,15 +948,6 @@ export function AnnouncementsHub({
   const [portalPassword, setPortalPassword] = useState('');
   const [showPortalPass, setShowPortalPass] = useState(false);
   const [portalError, setPortalError] = useState<string | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (confirmTimerRef.current) {
-        clearTimeout(confirmTimerRef.current);
-        confirmTimerRef.current = null;
-      }
-    };
-  }, []);
 
   const rosterById = useMemo(
     () => new Map(classRosterPublic.map((s) => [s.id, s])),
@@ -1053,22 +1049,14 @@ export function AnnouncementsHub({
   };
 
   const armOrConfirmDelete = (key: string, warnMessage: string, onConfirmed: () => void) => {
-    if (confirmDeleteKey !== key) {
-      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
-      setConfirmDeleteKey(key);
-      confirmTimerRef.current = setTimeout(() => {
-        confirmTimerRef.current = null;
-        setConfirmDeleteKey(null);
-      }, 3_500);
+    const wasArmed = isDeleteArmed(key);
+    armOrConfirmTwoTap(key, onConfirmed);
+    if (!wasArmed) {
+      if (Platform.OS !== 'web') {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      }
       showToast(warnMessage, 'warning');
-      return;
     }
-    if (confirmTimerRef.current) {
-      clearTimeout(confirmTimerRef.current);
-      confirmTimerRef.current = null;
-    }
-    setConfirmDeleteKey(null);
-    onConfirmed();
   };
 
   const handleOpenAudienceEditor = (item: Announcement) => {
@@ -1372,7 +1360,7 @@ export function AnnouncementsHub({
                   />
                   <Pressable
                     onPress={() => setShowPortalPass((v) => !v)}
-                    hitSlop={10}
+                    hitSlop={14}
                     accessibilityRole="button"
                     accessibilityLabel={showPortalPass ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}>
                     <Ionicons
@@ -1478,7 +1466,7 @@ export function AnnouncementsHub({
           const readersOpen = openReadersId === item.id;
           const audienceOpen = editingAudienceId === item.id;
           const delPostKey = `ann:${item.id}`;
-          const confirmingDelPost = confirmDeleteKey === delPostKey;
+          const confirmingDelPost = isDeleteArmed(delPostKey);
 
           const recipientNames = (item.visibleToStudentIds ?? [])
             .map((sid) => rosterById.get(sid)?.name ?? 'Thành viên')
@@ -1659,7 +1647,7 @@ export function AnnouncementsHub({
                     {canEditAudience ? (
                       <Pressable
                         onPress={() => handleOpenAudienceEditor(item)}
-                        hitSlop={6}
+                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                         accessibilityRole="button"
                         accessibilityLabel="Chỉnh quyền xem bài đăng"
                         style={({ pressed }) => [
@@ -1691,7 +1679,7 @@ export function AnnouncementsHub({
                           togglePinAnnouncement(item.id);
                           showToast(item.pinned ? 'Đã bỏ ghim bài đăng' : 'Đã ghim bài đăng', 'info');
                         }}
-                        hitSlop={6}
+                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                         accessibilityRole="button"
                         accessibilityLabel={item.pinned ? 'Bỏ ghim bài đăng' : 'Ghim bài đăng'}
                         style={({ pressed }) => [
@@ -1732,19 +1720,19 @@ export function AnnouncementsHub({
                             },
                           )
                         }
-                        hitSlop={6}
+                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                         accessibilityRole="button"
                         accessibilityLabel={confirmingDelPost ? 'Xác nhận xoá bài đăng' : 'Xoá bài đăng'}
                         style={({ pressed }) => [
                           styles.manageBtn,
                           {
-                            backgroundColor: confirmingDelPost ? theme.danger : theme.dangerSoft,
-                            borderColor: theme.danger,
+                            backgroundColor: confirmingDelPost ? '#DC2626' : theme.dangerSoft,
+                            borderColor: confirmingDelPost ? '#DC2626' : theme.danger,
                           },
                           pressed && styles.pressed,
                         ]}>
                         <Ionicons
-                          name={confirmingDelPost ? 'trash' : 'trash-outline'}
+                          name={confirmingDelPost ? 'alert-circle' : 'trash-outline'}
                           size={13}
                           color={confirmingDelPost ? '#FFFFFF' : theme.danger}
                         />
@@ -1753,7 +1741,7 @@ export function AnnouncementsHub({
                             styles.manageBtnText,
                             { color: confirmingDelPost ? '#FFFFFF' : theme.danger },
                           ]}>
-                          {confirmingDelPost ? 'Xoá?' : 'Xoá'}
+                          {confirmingDelPost ? 'Xác nhận?' : 'Xoá'}
                         </Text>
                       </Pressable>
                     ) : null}
@@ -1764,7 +1752,7 @@ export function AnnouncementsHub({
                 <View style={[styles.footer, { borderColor: theme.border }]}>
                   <Pressable
                     onPress={() => handleLike(item.id)}
-                    hitSlop={6}
+                    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                     accessibilityRole="button"
                     accessibilityLabel={`Thích bài đăng (${item.likes})`}
                     style={({ pressed }) => [
@@ -1791,7 +1779,7 @@ export function AnnouncementsHub({
 
                   <Pressable
                     onPress={() => handleAcknowledge(item.id, hasAcked)}
-                    hitSlop={6}
+                    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                     accessibilityRole="button"
                     accessibilityLabel={hasAcked ? 'Đã xác nhận xem' : 'Đánh dấu đã xem'}
                     style={({ pressed }) => [
@@ -1819,7 +1807,7 @@ export function AnnouncementsHub({
                   {(isAuthor || isTeacher) && ackList.length > 0 ? (
                     <Pressable
                       onPress={() => setOpenReadersId((cur) => (cur === item.id ? null : item.id))}
-                      hitSlop={6}
+                      hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                       accessibilityRole="button"
                       accessibilityLabel={`Xem ${ackList.length} người đã xác nhận đọc`}
                       style={({ pressed }) => [
@@ -1849,7 +1837,7 @@ export function AnnouncementsHub({
                     onPress={() =>
                       setOpenRepliesIds((prev) => ({ ...prev, [item.id]: !prev[item.id] }))
                     }
-                    hitSlop={6}
+                    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                     accessibilityRole="button"
                     accessibilityLabel={`Mở tin nhắn trao đổi (${replies.length})`}
                     style={({ pressed }) => [
@@ -1919,7 +1907,7 @@ export function AnnouncementsHub({
                         {replies.map((rep) => {
                           const canDelRep = canDeleteReply(item, rep);
                           const delRepKey = `rep:${item.id}:${rep.id}`;
-                          const confirmingRep = confirmDeleteKey === delRepKey;
+                          const confirmingRep = isDeleteArmed(delRepKey);
                           return (
                             <View
                               key={rep.id}
@@ -1962,7 +1950,7 @@ export function AnnouncementsHub({
                                       },
                                     )
                                   }
-                                  hitSlop={8}
+                                  hitSlop={10}
                                   accessibilityRole="button"
                                   accessibilityLabel={
                                     confirmingRep ? 'Xác nhận xoá tin nhắn' : 'Xoá tin nhắn'
@@ -1971,9 +1959,9 @@ export function AnnouncementsHub({
                                     styles.replyDelBtn,
                                     {
                                       backgroundColor: confirmingRep
-                                        ? theme.danger
+                                        ? '#DC2626'
                                         : theme.dangerSoft,
-                                      borderColor: theme.danger,
+                                      borderColor: confirmingRep ? '#DC2626' : theme.danger,
                                     },
                                   ]}>
                                   <Text
@@ -1982,7 +1970,7 @@ export function AnnouncementsHub({
                                       fontSize: 10.5,
                                       fontWeight: '800',
                                     }}>
-                                    {confirmingRep ? 'Xoá?' : 'Xoá'}
+                                    {confirmingRep ? 'Xác nhận?' : 'Xoá'}
                                   </Text>
                                 </Pressable>
                               ) : null}
@@ -2012,6 +2000,7 @@ export function AnnouncementsHub({
                       <Pressable
                         disabled={!(replyDrafts[item.id] ?? '').trim()}
                         onPress={() => handleSendReply(item.id)}
+                        hitSlop={8}
                         accessibilityRole="button"
                         accessibilityLabel="Gửi tin nhắn phản hồi"
                         style={({ pressed }) => [
@@ -2027,7 +2016,7 @@ export function AnnouncementsHub({
                           name="send"
                           size={14}
                           color={
-                            (replyDrafts[item.id] ?? '').trim() ? '#FFFFFF' : theme.textMuted
+                            (replyDrafts[item.id] ?? '').trim() ? theme.accentOnFill : theme.textMuted
                           }
                         />
                       </Pressable>
@@ -2297,6 +2286,8 @@ const styles = StyleSheet.create({
   manageBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 30,
     gap: 4,
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -2317,6 +2308,8 @@ const styles = StyleSheet.create({
   footerPill: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 30,
     gap: 5,
     paddingHorizontal: 10,
     paddingVertical: 7,
@@ -2345,8 +2338,12 @@ const styles = StyleSheet.create({
   replyAuthor: { fontSize: 12, fontWeight: '800' },
   replyContent: { fontSize: 12.5, lineHeight: 18, marginTop: 2 },
   replyDelBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    minHeight: 28,
+    minWidth: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
     borderRadius: Radius.pill,
     borderWidth: StyleSheet.hairlineWidth,
   },

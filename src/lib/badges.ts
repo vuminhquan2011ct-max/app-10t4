@@ -3,7 +3,7 @@
  * their real entries, rank and attendance.
  */
 
-import type { Ionicons } from '@expo/vector-icons';
+import type Ionicons from '@expo/vector-icons/Ionicons';
 
 import type { ThemeColor } from '@/constants/theme';
 import type { AttendanceStats, Entry, StudentStats } from '@/types/models';

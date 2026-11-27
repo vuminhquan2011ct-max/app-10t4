@@ -1,8 +1,18 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useMemo, useState } from 'react';
+import {
+  FlatList,
+  Platform,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { OfficerPositionEditor } from '@/components/officer-position-editor';
 import { Avatar } from '@/components/ui/avatar';
@@ -17,7 +27,14 @@ import { SectionHeader } from '@/components/ui/section-header';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
 import { GROUP_PRESETS, formatPoints } from '@/constants/entry-meta';
-import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
+import {
+  MaxContentWidth,
+  Radius,
+  Shadow,
+  Spacing,
+  TabBarSpace,
+  type ThemeColor,
+} from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { stripVietnamese } from '@/lib/intelligence';
 import {
@@ -72,6 +89,10 @@ function isRecentlyJoined(iso: string | null | undefined): boolean {
   return Date.now() - ts <= RECENT_JOIN_WINDOW_MS;
 }
 
+function ListItemGap() {
+  return <View style={styles.itemGap} />;
+}
+
 export default function StudentsScreen() {
   const auth = useAuth();
   const decor = useDecor();
@@ -102,13 +123,41 @@ export default function StudentsScreen() {
   } = useClassStore();
   const theme = useTheme();
   const gradient = useBrandGradient();
+  const insets = useSafeAreaInsets();
   const { showToast } = useToast();
+  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [smartFilter, setSmartFilter] = useState<SmartFilter>('all');
   const [sortBy, setSortBy] = useState<SortKey>('points');
   const [positionRowId, setPositionRowId] = useState<string | null>(null);
   const [savingPositionId, setSavingPositionId] = useState<string | null>(null);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await pullNow();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [pullNow]);
+
+  const refreshControl = (
+    <RefreshControl
+      refreshing={refreshing}
+      onRefresh={handleRefresh}
+      tintColor={theme.accent}
+      colors={[theme.accent]}
+    />
+  );
+
+  const listContentStyle = [
+    styles.listContent,
+    {
+      paddingTop: insets.top + Spacing.three,
+      paddingBottom: TabBarSpace + insets.bottom,
+    },
+  ];
 
   const handleAssignPositions = async (
     studentId: string,
@@ -210,8 +259,8 @@ export default function StudentsScreen() {
     const teacherName = auth.profile?.displayName?.trim() || `GV ${subjectName ?? 'Bộ môn'}`;
     const totalPublicStudents = registeredMembers.filter((m) => m.role === 'student').length;
 
-    return (
-      <Screen onRefresh={pullNow}>
+    const subjectHeader = (
+      <View style={styles.listHeader}>
         <FadeIn index={0}>
           <SectionHeader
             large
@@ -268,6 +317,8 @@ export default function StudentsScreen() {
             <View style={styles.myHeroBtns}>
               <Pressable
                 onPress={() => router.push('/announcements' as never)}
+                accessibilityRole="button"
+                accessibilityLabel="Đăng thông báo lớp"
                 style={({ pressed }) => [styles.heroWhiteBtn, pressed && { opacity: 0.85 }]}>
                 <Ionicons name="megaphone" size={17} color={gradient[0]} />
                 <Text style={[styles.heroWhiteBtnText, { color: gradient[0] }]}>
@@ -276,6 +327,8 @@ export default function StudentsScreen() {
               </Pressable>
               <Pressable
                 onPress={() => router.push('/teacher-form' as never)}
+                accessibilityRole="button"
+                accessibilityLabel="Tạo tài khoản giáo viên"
                 style={({ pressed }) => [styles.heroGlassBtn, pressed && { opacity: 0.85 }]}>
                 <Ionicons name="shield-checkmark" size={17} color="#FFFFFF" />
                 <Text style={styles.heroGlassBtnText}>Tạo TK giáo viên</Text>
@@ -326,57 +379,75 @@ export default function StudentsScreen() {
             </ScrollView>
           </Card>
         </FadeIn>
+      </View>
+    );
 
-        {publicStudentRoster.length === 0 ? (
-          <EmptyState
-            icon={'people-outline'}
-            title={
-              totalPublicStudents === 0
-                ? 'Chưa có học sinh nào đăng ký'
-                : 'Không tìm thấy học sinh phù hợp'
-            }
-            message={
-              totalPublicStudents === 0
-                ? 'Ngay khi học sinh tạo tài khoản, tên sẽ tự động cập nhật trực tiếp tại đây!'
-                : 'Thử đổi từ khóa hoặc chọn lại bộ lọc tổ.'
-            }
-          />
-        ) : (
-          publicStudentRoster.map((member, i) => {
+    const subjectEmpty = (
+      <EmptyState
+        icon={'people-outline'}
+        title={
+          totalPublicStudents === 0
+            ? 'Chưa có học sinh nào đăng ký'
+            : 'Không tìm thấy học sinh phù hợp'
+        }
+        message={
+          totalPublicStudents === 0
+            ? 'Ngay khi học sinh tạo tài khoản, tên sẽ tự động cập nhật trực tiếp tại đây!'
+            : 'Thử đổi từ khóa hoặc chọn lại bộ lọc tổ.'
+        }
+      />
+    );
+
+    return (
+      <Screen scrollable={false}>
+        <FlatList
+          data={publicStudentRoster}
+          keyExtractor={(member) => member.id}
+          ListHeaderComponent={subjectHeader}
+          ListEmptyComponent={subjectEmpty}
+          ItemSeparatorComponent={ListItemGap}
+          refreshControl={refreshControl}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          windowSize={5}
+          initialNumToRender={15}
+          maxToRenderPerBatch={10}
+          removeClippedSubviews={Platform.OS !== 'web'}
+          style={styles.list}
+          contentContainerStyle={listContentStyle}
+          renderItem={({ item: member }) => {
             const recent = isRecentlyJoined(member.joinedAt);
             return (
-              <FadeIn key={member.id} index={Math.min(i + 4, 10)}>
-                <Card style={styles.memberRowCard}>
-                  <Avatar name={member.name} size={46} />
-                  <View style={styles.body}>
-                    <View style={styles.nameLine}>
-                      <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
-                        {member.name}
-                      </Text>
-                      {recent ? (
-                        <Badge label={'Mới'} color={'success'} soft={'successSoft'} />
-                      ) : null}
-                    </View>
-                    <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
-                      {[
-                        `ID: ${member.loginId}`,
-                        member.group || 'Chưa phân tổ',
-                        member.position || null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')}
+              <Card style={styles.memberRowCard}>
+                <Avatar name={member.name} size={46} />
+                <View style={styles.body}>
+                  <View style={styles.nameLine}>
+                    <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
+                      {member.name}
                     </Text>
+                    {recent ? (
+                      <Badge label={'Mới'} color={'success'} soft={'successSoft'} />
+                    ) : null}
                   </View>
-                  <Badge
-                    label={member.group || `Lớp ${classInfo.name}`}
-                    color={'accentText'}
-                    soft={'accentSoft'}
-                  />
-                </Card>
-              </FadeIn>
+                  <Text style={{ color: theme.textSecondary, fontSize: 12 }} numberOfLines={1}>
+                    {[
+                      `ID: ${member.loginId}`,
+                      member.group || 'Chưa phân tổ',
+                      member.position || null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </Text>
+                </View>
+                <Badge
+                  label={member.group || `Lớp ${classInfo.name}`}
+                  color={'accentText'}
+                  soft={'accentSoft'}
+                />
+              </Card>
             );
-          })
-        )}
+          }}
+        />
       </Screen>
     );
   }
@@ -388,8 +459,8 @@ export default function StudentsScreen() {
     const mySeat = currentStudent ? seatOfStudent(currentStudent.id) : null;
     const myKudos = currentStudent ? kudosOfStudent(currentStudent.id).length : 0;
 
-    return (
-      <Screen onRefresh={pullNow}>
+    const studentHeader = (
+      <View style={styles.listHeader}>
         <FadeIn index={0}>
           <SectionHeader
             large
@@ -513,6 +584,8 @@ export default function StudentsScreen() {
                       params: { id: currentStudent.id },
                     } as never)
                   }
+                  accessibilityRole="button"
+                  accessibilityLabel="Mở hồ sơ cá nhân của tôi"
                   style={({ pressed }) => [styles.heroWhiteBtn, pressed && { opacity: 0.85 }]}>
                   <Ionicons name="person-circle" size={17} color={gradient[0]} />
                   <Text style={[styles.heroWhiteBtnText, { color: gradient[0] }]}>
@@ -526,6 +599,8 @@ export default function StudentsScreen() {
                       params: { studentId: currentStudent.id },
                     } as never)
                   }
+                  accessibilityRole="button"
+                  accessibilityLabel="Đăng thành tích mới"
                   style={({ pressed }) => [styles.heroGlassBtn, pressed && { opacity: 0.85 }]}>
                   <Ionicons name="add-circle" size={17} color="#FFFFFF" />
                   <Text style={styles.heroGlassBtnText}>Đăng thành tích</Text>
@@ -584,17 +659,59 @@ export default function StudentsScreen() {
             />
           </FadeIn>
         ) : null}
+      </View>
+    );
 
-        {publicDirectoryMembers.length === 0 ? (
-          <FadeIn index={4}>
-            <Card>
-              <Text style={{ color: theme.textSecondary, fontSize: 13 }}>
-                Chưa có thành viên nào khớp từ khóa tìm kiếm.
+    const studentEmpty = (
+      <Card>
+        <Text style={{ color: theme.textSecondary, fontSize: 13 }}>
+          Chưa có thành viên nào khớp từ khóa tìm kiếm.
+        </Text>
+      </Card>
+    );
+
+    const privacyFooter = (
+      <View style={styles.listFooter}>
+        {/* Privacy Shield Explanation Card */}
+        <Card style={[styles.privacyCard, { borderColor: theme.accent }]}>
+          <View style={styles.privacyHead}>
+            <View style={[styles.privacyIcon, { backgroundColor: theme.accentSoft }]}>
+              <Ionicons name="shield-checkmark" size={20} color={theme.accent} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={[styles.privacyTitle, { color: theme.text }]}>
+                Dữ liệu cá nhân luôn được bảo vệ 🔒
               </Text>
-            </Card>
-          </FadeIn>
-        ) : (
-          publicDirectoryMembers.map((member, idx) => {
+              <Text style={{ color: theme.textSecondary, fontSize: 12.5, lineHeight: 19 }}>
+                Danh sách trên chỉ hiển thị tên, Số ID và tổ/vai trò để cả lớp biết ai đã tham gia.
+                Bài đăng, điểm số, SĐT/Email, Xu & Sticker của từng bạn vẫn hoàn toàn riêng tư —
+                chỉ chính bạn và GVCN xem được!
+              </Text>
+            </View>
+          </View>
+        </Card>
+      </View>
+    );
+
+    return (
+      <Screen scrollable={false}>
+        <FlatList
+          data={publicDirectoryMembers}
+          keyExtractor={(member) => `${member.role}:${member.id}`}
+          ListHeaderComponent={studentHeader}
+          ListEmptyComponent={studentEmpty}
+          ListFooterComponent={privacyFooter}
+          ItemSeparatorComponent={ListItemGap}
+          refreshControl={refreshControl}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          windowSize={5}
+          initialNumToRender={15}
+          maxToRenderPerBatch={10}
+          removeClippedSubviews={Platform.OS !== 'web'}
+          style={styles.list}
+          contentContainerStyle={listContentStyle}
+          renderItem={({ item: member }) => {
             const isSelf = member.role === 'student' && member.id === currentStudent?.id;
             const recent = isRecentlyJoined(member.joinedAt);
             const roleBadgeLabel =
@@ -619,62 +736,39 @@ export default function StudentsScreen() {
                   : 'accentSoft';
 
             return (
-              <FadeIn key={`${member.role}:${member.id}`} index={Math.min(idx + 4, 10)}>
-                <Card
-                  style={[
-                    styles.memberRowCard,
-                    isSelf && { borderColor: theme.accent, borderWidth: 1.2 },
-                  ]}>
-                  <Avatar name={member.name} size={42} ring={isSelf} />
-                  <View style={styles.body}>
-                    <View style={styles.nameLine}>
-                      <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
-                        {member.name + (isSelf ? ' (Bạn)' : '')}
-                      </Text>
-                      {recent ? (
-                        <Badge label={'Mới'} color={'success'} soft={'successSoft'} />
-                      ) : null}
-                    </View>
-                    <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
-                      {[`ID: ${member.loginId}`, member.position || null]
-                        .filter(Boolean)
-                        .join(' · ')}
+              <Card
+                style={[
+                  styles.memberRowCard,
+                  isSelf && { borderColor: theme.accent, borderWidth: 1.2 },
+                ]}>
+                <Avatar name={member.name} size={42} ring={isSelf} />
+                <View style={styles.body}>
+                  <View style={styles.nameLine}>
+                    <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
+                      {member.name + (isSelf ? ' (Bạn)' : '')}
                     </Text>
+                    {recent ? (
+                      <Badge label={'Mới'} color={'success'} soft={'successSoft'} />
+                    ) : null}
                   </View>
-                  <Badge label={roleBadgeLabel} color={roleColor} soft={roleSoft} />
-                </Card>
-              </FadeIn>
+                  <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
+                    {[`ID: ${member.loginId}`, member.position || null]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </Text>
+                </View>
+                <Badge label={roleBadgeLabel} color={roleColor} soft={roleSoft} />
+              </Card>
             );
-          })
-        )}
-
-        {/* Privacy Shield Explanation Card */}
-        <FadeIn index={5}>
-          <Card style={[styles.privacyCard, { borderColor: theme.accent }]}>
-            <View style={styles.privacyHead}>
-              <View style={[styles.privacyIcon, { backgroundColor: theme.accentSoft }]}>
-                <Ionicons name="shield-checkmark" size={20} color={theme.accent} />
-              </View>
-              <View style={styles.flex}>
-                <Text style={[styles.privacyTitle, { color: theme.text }]}>
-                  Dữ liệu cá nhân luôn được bảo vệ 🔒
-                </Text>
-                <Text style={{ color: theme.textSecondary, fontSize: 12.5, lineHeight: 19 }}>
-                  Danh sách trên chỉ hiển thị tên, Số ID và tổ/vai trò để cả lớp biết ai đã tham gia.
-                  Bài đăng, điểm số, SĐT/Email, Xu & Sticker của từng bạn vẫn hoàn toàn riêng tư —
-                  chỉ chính bạn và GVCN xem được!
-                </Text>
-              </View>
-            </View>
-          </Card>
-        </FadeIn>
+          }}
+        />
       </Screen>
     );
   }
 
   /* ==================== HOMEROOM TEACHER FULL ROSTER VIEW ==================== */
-  return (
-    <Screen onRefresh={pullNow}>
+  const teacherHeader = (
+    <View style={styles.listHeader}>
       <FadeIn index={0}>
         <SectionHeader
           large
@@ -865,6 +959,10 @@ export default function StudentsScreen() {
                 <Pressable
                   key={s.key}
                   onPress={() => setSortBy(s.key)}
+                  hitSlop={{ top: 4, bottom: 4, left: 2, right: 2 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Sắp xếp danh sách theo ${s.label}`}
+                  accessibilityState={{ selected: active }}
                   style={[
                     styles.segmentBtn,
                     active && [
@@ -891,19 +989,40 @@ export default function StudentsScreen() {
           </View>
         </Card>
       </FadeIn>
+    </View>
+  );
 
-      {rows.length === 0 ? (
-        <EmptyState
-          icon={'people-outline'}
-          title={ranking.length === 0 ? 'Chưa có học sinh nào' : 'Không tìm thấy học sinh'}
-          message={
-            ranking.length === 0
-              ? 'Bấm "Thêm học sinh" hoặc "Nhập nhanh DS" ở trên để tạo tài khoản học sinh kèm Số ID & mật khẩu riêng.'
-              : 'Thử đổi từ khóa hoặc chọn lại bộ lọc.'
-          }
-        />
-      ) : (
-        rows.map((row, i) => {
+  const teacherEmpty = (
+    <EmptyState
+      icon={'people-outline'}
+      title={ranking.length === 0 ? 'Chưa có học sinh nào' : 'Không tìm thấy học sinh'}
+      message={
+        ranking.length === 0
+          ? 'Bấm "Thêm học sinh" hoặc "Nhập nhanh DS" ở trên để tạo tài khoản học sinh kèm Số ID & mật khẩu riêng.'
+          : 'Thử đổi từ khóa hoặc chọn lại bộ lọc.'
+      }
+    />
+  );
+
+  return (
+    <Screen scrollable={false}>
+      <FlatList
+        data={rows}
+        keyExtractor={(row) => row.student.id}
+        ListHeaderComponent={teacherHeader}
+        ListEmptyComponent={teacherEmpty}
+        ItemSeparatorComponent={ListItemGap}
+        extraData={`${positionRowId ?? ''}|${savingPositionId ?? ''}|${paidCount}`}
+        refreshControl={refreshControl}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+        windowSize={5}
+        initialNumToRender={15}
+        maxToRenderPerBatch={10}
+        removeClippedSubviews={Platform.OS !== 'web' && !positionRowId}
+        style={styles.list}
+        contentContainerStyle={listContentStyle}
+        renderItem={({ item: row }) => {
           const stats = statsOfStudent(row.student.id);
           const att = attendanceStatsOfStudent(row.student.id);
           const seat = seatOfStudent(row.student.id);
@@ -920,280 +1039,294 @@ export default function StudentsScreen() {
           const isSavingPos = savingPositionId === row.student.id;
 
           return (
-            <FadeIn key={row.student.id} index={Math.min(i + 4, 10)}>
-              <Card
-                style={[
-                  styles.rowCard,
-                  medal && {
-                    borderColor: theme[medal.color],
-                    borderWidth: 1.5,
-                  },
-                ]}
-                onPress={() =>
-                  router.push({ pathname: '/student/[id]', params: { id: row.student.id } } as never)
-                }>
-                <View style={styles.row}>
-                  {/* Left Avatar + Glowing Medal Rank Badge */}
-                  <View style={styles.avatarWrap}>
-                    <Avatar name={row.student.name} size={54} ring={Boolean(medal)} />
-                    <View
-                      style={[
-                        styles.rankBadge,
-                        medal ? styles.rankBadgeMedal : null,
-                        {
-                          backgroundColor: medal ? theme[medal.soft] : theme.backgroundElement,
-                          borderColor: medal ? theme[medal.color] : theme.card,
-                          shadowColor: medal ? theme[medal.color] : 'transparent',
-                        },
-                      ]}>
-                      {medal ? (
-                        <View style={styles.medalInner}>
-                          <Ionicons name={medal.icon} size={10} color={theme[medal.color]} />
-                          <Text style={[styles.medalRankNum, { color: theme[medal.color] }]}>
-                            {row.rank}
-                          </Text>
-                        </View>
-                      ) : (
-                        <Text style={[styles.rankText, { color: theme.textSecondary }]}>
-                          #{row.rank}
+            <Card
+              style={[
+                styles.rowCard,
+                medal && {
+                  borderColor: theme[medal.color],
+                  borderWidth: 1.5,
+                },
+              ]}
+              onPress={() =>
+                router.push({ pathname: '/student/[id]', params: { id: row.student.id } } as never)
+              }>
+              <View style={styles.row}>
+                {/* Left Avatar + Glowing Medal Rank Badge */}
+                <View style={styles.avatarWrap}>
+                  <Avatar name={row.student.name} size={54} ring={Boolean(medal)} />
+                  <View
+                    style={[
+                      styles.rankBadge,
+                      medal ? styles.rankBadgeMedal : null,
+                      {
+                        backgroundColor: medal ? theme[medal.soft] : theme.backgroundElement,
+                        borderColor: medal ? theme[medal.color] : theme.card,
+                        shadowColor: medal ? theme[medal.color] : 'transparent',
+                      },
+                    ]}>
+                    {medal ? (
+                      <View style={styles.medalInner}>
+                        <Ionicons name={medal.icon} size={10} color={theme[medal.color]} />
+                        <Text style={[styles.medalRankNum, { color: theme[medal.color] }]}>
+                          {row.rank}
                         </Text>
-                      )}
-                    </View>
-                  </View>
-
-                  {/* Center Body: Name, Group & Officer Pills, Progress Bar */}
-                  <View style={styles.body}>
-                    <View style={styles.nameLine}>
-                      <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
-                        {row.student.name}
+                      </View>
+                    ) : (
+                      <Text style={[styles.rankText, { color: theme.textSecondary }]}>
+                        #{row.rank}
                       </Text>
-                      {medal ? (
-                        <View
-                          style={[
-                            styles.topCrownPill,
-                            { backgroundColor: theme[medal.soft], borderColor: theme[medal.color] },
-                          ]}>
-                          <Text style={[styles.topCrownText, { color: theme[medal.color] }]}>
-                            {medal.label}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </View>
-
-                    <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
-                      {[
-                        `ID: ${row.student.code}`,
-                        seat ? `Bàn H${seat.row}·G${seat.col}` : null,
-                        `${stats.total} ghi nhận`,
-                        isPaid ? 'Đã đóng quỹ' : null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    </Text>
-
-                    {/* Group, Multi-Position Officer & Diligence Pills */}
-                    <View style={styles.metaBadges}>
-                      <Badge
-                        label={row.student.group?.trim() || 'Chưa phân tổ'}
-                        color={'accentText'}
-                        soft={'accentSoft'}
-                      />
-                      {studentPositions.map((posTitle) => {
-                        const meta = getOfficerPositionMeta(posTitle);
-                        return (
-                          <Badge
-                            key={posTitle}
-                            label={posTitle}
-                            color={meta?.color ?? 'purple'}
-                            soft={meta ? softToneOf(meta.color) : 'purpleSoft'}
-                            icon={(meta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap}
-                          />
-                        );
-                      })}
-                      {diligence !== null ? (
-                        <Badge
-                          label={`CC ${diligence}%`}
-                          color={diligence >= 90 ? 'success' : diligence >= 75 ? 'warning' : 'danger'}
-                          soft={
-                            diligence >= 90
-                              ? 'successSoft'
-                              : diligence >= 75
-                                ? 'warningSoft'
-                                : 'dangerSoft'
-                          }
-                        />
-                      ) : null}
-                      {att.dutyTotal > 0 ? (
-                        <Badge
-                          label={`TN ${att.dutyCompleted}/${att.dutyTotal}`}
-                          color={att.dutyMissed > 0 ? 'warning' : 'success'}
-                          soft={att.dutyMissed > 0 ? 'warningSoft' : 'successSoft'}
-                          icon={'leaf-outline'}
-                        />
-                      ) : null}
-                    </View>
-
-                    {/* Smooth Gradient Progress Bar */}
-                    <View
-                      style={[
-                        styles.progressTrack,
-                        { backgroundColor: theme.backgroundElement },
-                      ]}>
-                      <LinearGradient
-                        colors={
-                          medal
-                            ? [theme[medal.color], gradient[1]]
-                            : [gradient[0], gradient[1]]
-                        }
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 0 }}
-                        style={[styles.progressFill, { width: `${progressPct}%` }]}
-                      />
-                    </View>
-                  </View>
-
-                  {/* Right Column: Score Pill, +2đ Quick Reward & GVCN Quick Position Toggle */}
-                  <View style={styles.rightCol}>
-                    <View
-                      style={[
-                        styles.pointsPill,
-                        {
-                          backgroundColor: medal ? theme[medal.soft] : theme.accentSoft,
-                          borderColor: medal ? theme[medal.color] : theme.border,
-                        },
-                      ]}>
-                      <Text
-                        style={[
-                          styles.points,
-                          { color: medal ? theme[medal.color] : theme.accentText },
-                        ]}>
-                        {formatPoints(row.points)}
-                      </Text>
-                      <Text
-                        style={[
-                          styles.pointsUnit,
-                          { color: medal ? theme[medal.color] : theme.accentText },
-                        ]}>
-                        điểm
-                      </Text>
-                    </View>
-                    {canEditClass ? (
-                      <Pressable
-                        onPress={(e) => {
-                          e.stopPropagation?.();
-                          quickReward(
-                            row.student.id,
-                            'Phát biểu & tích cực xây dựng bài',
-                            2,
-                            'study',
-                            'activity',
-                            'class',
-                          );
-                          showToast(`Đã thưởng nhanh +2đ cho ${row.student.name}! ⚡`);
-                        }}
-                        hitSlop={6}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Thưởng nhanh +2 điểm cho ${row.student.name}`}
-                        style={({ pressed }) => [
-                          styles.quickPlus,
-                          {
-                            backgroundColor: theme.successSoft,
-                            borderColor: theme.success,
-                          },
-                          pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
-                        ]}>
-                        <Ionicons name="flash" size={10} color={theme.success} />
-                        <Text style={[styles.quickPlusText, { color: theme.success }]}>+2đ</Text>
-                      </Pressable>
-                    ) : null}
-                    {canAssignPositions ? (
-                      <Pressable
-                        onPress={(e) => {
-                          e.stopPropagation?.();
-                          setPositionRowId((cur) =>
-                            cur === row.student.id ? null : row.student.id,
-                          );
-                        }}
-                        hitSlop={6}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Phân công chức vụ cho ${row.student.name}`}
-                        style={({ pressed }) => [
-                          styles.quickPlus,
-                          {
-                            backgroundColor: posExpanded ? theme.purple : theme.purpleSoft,
-                            borderColor: theme.purple,
-                          },
-                          pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
-                        ]}>
-                        <Ionicons
-                          name={posExpanded ? 'chevron-up' : 'shield-checkmark-outline'}
-                          size={10}
-                          color={posExpanded ? '#FFFFFF' : theme.purple}
-                        />
-                        <Text
-                          style={[
-                            styles.quickPlusText,
-                            { color: posExpanded ? '#FFFFFF' : theme.purple },
-                          ]}>
-                          Chức vụ
-                        </Text>
-                      </Pressable>
-                    ) : null}
+                    )}
                   </View>
                 </View>
 
-                {/* Inline GVCN-Only Multi-Position & Custom Position Editor Drawer */}
-                {posExpanded ? (
-                  <Pressable
-                    onPress={(e) => e.stopPropagation?.()}
-                    style={[styles.posDrawer, { borderColor: theme.border }]}>
-                    <Text style={[styles.posDrawerLabel, { color: theme.textSecondary }]}>
-                      Đa chức vụ & Chức vụ tự ghi (Chỉ GVCN)
+                {/* Center Body: Name, Group & Officer Pills, Progress Bar */}
+                <View style={styles.body}>
+                  <View style={styles.nameLine}>
+                    <Text style={[styles.name, { color: theme.text }]} numberOfLines={1}>
+                      {row.student.name}
                     </Text>
-                    <OfficerPositionEditor
-                      compact
-                      positions={studentPositions}
-                      customPermissions={row.student.customPermissions ?? []}
-                      customPresets={customPositionPresets}
-                      disabled={isSavingPos}
-                      onChange={(nextPositions, nextCustomPermissions) => {
-                        void handleAssignPositions(
+                    {medal ? (
+                      <View
+                        style={[
+                          styles.topCrownPill,
+                          { backgroundColor: theme[medal.soft], borderColor: theme[medal.color] },
+                        ]}>
+                        <Text style={[styles.topCrownText, { color: theme[medal.color] }]}>
+                          {medal.label}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <Text style={{ color: theme.textSecondary, fontSize: 11.5 }} numberOfLines={1}>
+                    {[
+                      `ID: ${row.student.code}`,
+                      seat ? `Bàn H${seat.row}·G${seat.col}` : null,
+                      `${stats.total} ghi nhận`,
+                      isPaid ? 'Đã đóng quỹ' : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </Text>
+
+                  {/* Group, Multi-Position Officer & Diligence Pills */}
+                  <View style={styles.metaBadges}>
+                    <Badge
+                      label={row.student.group?.trim() || 'Chưa phân tổ'}
+                      color={'accentText'}
+                      soft={'accentSoft'}
+                    />
+                    {studentPositions.map((posTitle) => {
+                      const meta = getOfficerPositionMeta(posTitle);
+                      return (
+                        <Badge
+                          key={posTitle}
+                          label={posTitle}
+                          color={meta?.color ?? 'purple'}
+                          soft={meta ? softToneOf(meta.color) : 'purpleSoft'}
+                          icon={(meta?.icon ?? 'star') as keyof typeof Ionicons.glyphMap}
+                        />
+                      );
+                    })}
+                    {diligence !== null ? (
+                      <Badge
+                        label={`CC ${diligence}%`}
+                        color={diligence >= 90 ? 'success' : diligence >= 75 ? 'warning' : 'danger'}
+                        soft={
+                          diligence >= 90
+                            ? 'successSoft'
+                            : diligence >= 75
+                              ? 'warningSoft'
+                              : 'dangerSoft'
+                        }
+                      />
+                    ) : null}
+                    {att.dutyTotal > 0 ? (
+                      <Badge
+                        label={`TN ${att.dutyCompleted}/${att.dutyTotal}`}
+                        color={att.dutyMissed > 0 ? 'warning' : 'success'}
+                        soft={att.dutyMissed > 0 ? 'warningSoft' : 'successSoft'}
+                        icon={'leaf-outline'}
+                      />
+                    ) : null}
+                  </View>
+
+                  {/* Smooth Gradient Progress Bar */}
+                  <View
+                    style={[
+                      styles.progressTrack,
+                      { backgroundColor: theme.backgroundElement },
+                    ]}>
+                    <LinearGradient
+                      colors={
+                        medal
+                          ? [theme[medal.color], gradient[1]]
+                          : [gradient[0], gradient[1]]
+                      }
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={[styles.progressFill, { width: `${progressPct}%` }]}
+                    />
+                  </View>
+                </View>
+
+                {/* Right Column: Score Pill, +2đ Quick Reward & GVCN Quick Position Toggle */}
+                <View style={styles.rightCol}>
+                  <View
+                    style={[
+                      styles.pointsPill,
+                      {
+                        backgroundColor: medal ? theme[medal.soft] : theme.accentSoft,
+                        borderColor: medal ? theme[medal.color] : theme.border,
+                      },
+                    ]}>
+                    <Text
+                      style={[
+                        styles.points,
+                        { color: medal ? theme[medal.color] : theme.accentText },
+                      ]}>
+                      {formatPoints(row.points)}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.pointsUnit,
+                        { color: medal ? theme[medal.color] : theme.accentText },
+                      ]}>
+                      điểm
+                    </Text>
+                  </View>
+                  {canEditClass ? (
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        quickReward(
                           row.student.id,
-                          row.student.name,
-                          nextPositions,
-                          nextCustomPermissions,
+                          'Phát biểu & tích cực xây dựng bài',
+                          2,
+                          'study',
+                          'activity',
+                          'class',
+                        );
+                        showToast(`Đã thưởng nhanh +2đ cho ${row.student.name}! ⚡`);
+                      }}
+                      hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Thưởng nhanh +2 điểm cho ${row.student.name}`}
+                      style={({ pressed }) => [
+                        styles.quickPlus,
+                        {
+                          backgroundColor: theme.successSoft,
+                          borderColor: theme.success,
+                        },
+                        pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
+                      ]}>
+                      <Ionicons name="flash" size={10} color={theme.success} />
+                      <Text style={[styles.quickPlusText, { color: theme.success }]}>+2đ</Text>
+                    </Pressable>
+                  ) : null}
+                  {canAssignPositions ? (
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        setPositionRowId((cur) =>
+                          cur === row.student.id ? null : row.student.id,
                         );
                       }}
-                      onSaveCustomPreset={(preset) => {
-                        addCustomPositionPreset(preset);
-                        showToast(`Đã lưu “${preset}” vào mẫu chức vụ lớp!`, 'info');
-                      }}
-                      onRemoveCustomPreset={(preset) => {
-                        removeCustomPositionPreset(preset);
-                        showToast(`Đã xoá mẫu “${preset}”`, 'info');
-                      }}
-                    />
-                    <View style={styles.posDrawerBtns}>
-                      <Button
-                        label={'Đóng'}
-                        variant={'ghost'}
-                        size={'sm'}
-                        style={styles.flex}
-                        onPress={() => setPositionRowId(null)}
+                      hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Phân công chức vụ Ban cán sự cho ${row.student.name}`}
+                      accessibilityState={{ expanded: posExpanded }}
+                      style={({ pressed }) => [
+                        styles.quickPlus,
+                        {
+                          backgroundColor: posExpanded ? theme.purple : theme.purpleSoft,
+                          borderColor: theme.purple,
+                        },
+                        pressed && { opacity: 0.72, transform: [{ scale: 0.96 }] },
+                      ]}>
+                      <Ionicons
+                        name={posExpanded ? 'chevron-up' : 'shield-checkmark-outline'}
+                        size={10}
+                        color={posExpanded ? '#FFFFFF' : theme.purple}
                       />
-                    </View>
-                  </Pressable>
-                ) : null}
-              </Card>
-            </FadeIn>
+                      <Text
+                        style={[
+                          styles.quickPlusText,
+                          { color: posExpanded ? '#FFFFFF' : theme.purple },
+                        ]}>
+                        Chức vụ
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </View>
+
+              {/* Inline GVCN-Only Multi-Position & Custom Position Editor Drawer */}
+              {posExpanded ? (
+                <Pressable
+                  onPress={(e) => e.stopPropagation?.()}
+                  style={[styles.posDrawer, { borderColor: theme.border }]}>
+                  <Text style={[styles.posDrawerLabel, { color: theme.textSecondary }]}>
+                    Đa chức vụ & Chức vụ tự ghi (Chỉ GVCN)
+                  </Text>
+                  <OfficerPositionEditor
+                    compact
+                    positions={studentPositions}
+                    customPermissions={row.student.customPermissions ?? []}
+                    customPresets={customPositionPresets}
+                    disabled={isSavingPos}
+                    onChange={(nextPositions, nextCustomPermissions) => {
+                      void handleAssignPositions(
+                        row.student.id,
+                        row.student.name,
+                        nextPositions,
+                        nextCustomPermissions,
+                      );
+                    }}
+                    onSaveCustomPreset={(preset) => {
+                      addCustomPositionPreset(preset);
+                      showToast(`Đã lưu “${preset}” vào mẫu chức vụ lớp!`, 'info');
+                    }}
+                    onRemoveCustomPreset={(preset) => {
+                      removeCustomPositionPreset(preset);
+                      showToast(`Đã xoá mẫu “${preset}”`, 'info');
+                    }}
+                  />
+                  <View style={styles.posDrawerBtns}>
+                    <Button
+                      label={'Đóng'}
+                      variant={'ghost'}
+                      size={'sm'}
+                      style={styles.flex}
+                      onPress={() => setPositionRowId(null)}
+                    />
+                  </View>
+                </Pressable>
+              ) : null}
+            </Card>
           );
-        })
-      )}
+        }}
+      />
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
+  list: { flex: 1, width: '100%' },
+  listContent: {
+    width: '100%',
+    maxWidth: MaxContentWidth + Spacing.three * 2,
+    alignSelf: 'center',
+    paddingHorizontal: Spacing.three,
+  },
+  listHeader: {
+    gap: Spacing.three,
+    marginBottom: Spacing.three,
+  },
+  listFooter: {
+    marginTop: Spacing.three,
+  },
+  itemGap: { height: Spacing.three },
   flex: { flex: 1 },
   rowCard: { gap: Spacing.two + 2 },
   posDrawer: {
@@ -1277,6 +1410,7 @@ const styles = StyleSheet.create({
   },
   segmentBtn: {
     flex: 1,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1429,6 +1563,7 @@ const styles = StyleSheet.create({
   myHeroBtns: { flexDirection: 'row', gap: Spacing.two },
   heroWhiteBtn: {
     flex: 1,
+    minHeight: 44,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1440,6 +1575,7 @@ const styles = StyleSheet.create({
   heroWhiteBtnText: { fontSize: 13, fontWeight: '900' },
   heroGlassBtn: {
     flex: 1,
+    minHeight: 44,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',

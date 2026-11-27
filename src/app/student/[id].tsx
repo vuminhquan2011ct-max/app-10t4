@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
@@ -40,6 +40,7 @@ import {
   normalizePositionsList,
   type CustomOfficerGrantKey,
 } from '@/lib/officer-roles';
+import { exportVisualReportCardPng } from '@/lib/report-card-image';
 import { buildCategoryStats } from '@/lib/stats';
 import { useClassStore } from '@/store/class-store';
 import type { Entry } from '@/types/models';
@@ -82,6 +83,7 @@ export default function StudentDetailScreen() {
   const [emailDraft, setEmailDraft] = useState('');
   const [addressDraft, setAddressDraft] = useState('');
   const [updatingPosition, setUpdatingPosition] = useState(false);
+  const [exportingPng, setExportingPng] = useState(false);
   const [confirmStampId, setConfirmStampId] = useState<string | null>(null);
   const [deletingStampId, setDeletingStampId] = useState<string | null>(null);
   const stampTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -234,6 +236,44 @@ export default function StudentDetailScreen() {
     );
   };
 
+  const handleExportReportCardPng = async () => {
+    if (exportingPng) return;
+    setExportingPng(true);
+    try {
+      const studySubjectBreakdown = studySubjectPills.map(([subject, speeches]) => ({
+        subject,
+        speeches,
+        points: Math.round(speeches * STUDY_STAMP_POINTS * 100) / 100,
+      }));
+      const res = await exportVisualReportCardPng({
+        classInfo,
+        student,
+        stats,
+        attendance: att,
+        rank,
+        positions: studentPositions,
+        studyWeeklySpeeches: studyRow?.weeklySpeeches ?? 0,
+        studyHk1Speeches: studyRow?.hk1Speeches ?? stats.studySpeeches,
+        studyHk1Points: studyRow?.hk1Points ?? stats.studyPoints,
+        studySubjectBreakdown,
+        semesterLabel: studyReport.semester1.label,
+        teacherNote: canViewNotes ? student.note : null,
+      });
+      showToast(
+        res === 'downloaded'
+          ? `Đã tải ảnh Phiếu điểm PNG của ${student.name}!`
+          : res === 'shared'
+            ? `Đã mở chia sẻ Phiếu điểm của ${student.name}!`
+            : res === 'copied'
+              ? 'Đã sao chép nội dung Phiếu điểm!'
+              : 'Không thể xuất ảnh Phiếu điểm lúc này',
+        res === 'failed' ? 'danger' : 'success',
+      );
+    } finally {
+      setExportingPng(false);
+    }
+  };
+
   return (
     <Screen withTabBar={false}>
       <PageHeader
@@ -285,6 +325,9 @@ export default function StudentDetailScreen() {
               {student.phone ? (
                 <Pressable
                   onPress={() => Linking.openURL(`tel:${student.phone}`).catch(() => {})}
+                  hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Gọi số điện thoại ${student.phone}`}
                   style={styles.contactPill}>
                   <Ionicons name="call" size={14} color="#FFFFFF" />
                   <Text style={styles.contactText}>{student.phone}</Text>
@@ -293,6 +336,9 @@ export default function StudentDetailScreen() {
               {student.email ? (
                 <Pressable
                   onPress={() => Linking.openURL(`mailto:${student.email}`).catch(() => {})}
+                  hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Gửi email tới ${student.email}`}
                   style={styles.contactPill}>
                   <Ionicons name="mail" size={14} color="#FFFFFF" />
                   <Text style={styles.contactText} numberOfLines={1}>
@@ -303,6 +349,27 @@ export default function StudentDetailScreen() {
             </View>
           ) : null}
         </LinearGradient>
+      </FadeIn>
+
+      {/* 1-Tap Visual Report Card PNG + Text Share Strip */}
+      <FadeIn index={0}>
+        <View style={styles.actions}>
+          <Button
+            label={exportingPng ? 'Đang xuất ảnh...' : 'Tải ảnh Phiếu điểm (PNG)'}
+            icon={'image-outline'}
+            size={'sm'}
+            style={styles.flex}
+            disabled={exportingPng}
+            onPress={() => void handleExportReportCardPng()}
+          />
+          <Button
+            label={'Phiếu văn bản'}
+            variant={'soft'}
+            icon={'share-social-outline'}
+            size={'sm'}
+            onPress={() => void handleShareReport()}
+          />
+        </View>
       </FadeIn>
 
       {/* Protected Personal Contact Card */}
@@ -466,7 +533,11 @@ export default function StudentDetailScreen() {
                 {`Tuần này: ${studyRow?.weeklySpeeches ?? 0} stamps · Cộng dồn ${studyReport.semester1.label}: ${studyRow?.hk1Speeches ?? stats.studySpeeches} stamps (+${formatPoints(studyRow?.hk1Points ?? stats.studyPoints)}đ)`}
               </Text>
             </View>
-            <Pressable onPress={() => router.push('/study' as never)} hitSlop={8}>
+            <Pressable
+              onPress={() => router.push('/study' as never)}
+              hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+              accessibilityRole="button"
+              accessibilityLabel="Xem chi tiết thống kê học tập và stamp phát biểu">
               <Text style={{ color: theme.success, fontSize: 12, fontWeight: '800' }}>
                 Chi tiết →
               </Text>
@@ -527,7 +598,7 @@ export default function StudentDetailScreen() {
                         onPress={() => {
                           void handleDeleteStudyStamp(stamp);
                         }}
-                        hitSlop={6}
+                        hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
                         accessibilityRole="button"
                         accessibilityLabel={
                           confirming ? 'Xác nhận xoá stamp phát biểu' : 'Xoá stamp phát biểu'
@@ -625,6 +696,9 @@ export default function StudentDetailScreen() {
                     quickReward(student.id, tpl.title, tpl.points, tpl.category, tpl.kind, tpl.level);
                     showToast(`Đã thưởng +${tpl.points}đ (${tpl.title}) cho ${student.name}!`);
                   }}
+                  hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Khen thưởng nhanh ${tpl.label} cho ${student.name}`}
                   style={({ pressed }) => [
                     styles.rewardPill,
                     { backgroundColor: theme.accentSoft, borderColor: theme.accent },
@@ -678,7 +752,11 @@ export default function StudentDetailScreen() {
             <Text style={[styles.cardLabel, { color: theme.text, flex: 1 }]}>
               {`Lời khen Kudos đã nhận (${studentKudos.length}) 💖`}
             </Text>
-            <Pressable onPress={() => router.push('/kudos' as never)}>
+            <Pressable
+              onPress={() => router.push('/kudos' as never)}
+              hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+              accessibilityRole="button"
+              accessibilityLabel="Xem bức tường lời khen Kudos">
               <Text style={{ color: theme.accentText, fontSize: 12, fontWeight: '800' }}>
                 Xem tường →
               </Text>

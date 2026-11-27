@@ -6,12 +6,41 @@ import {
   normalizeCustomGrants,
   normalizePositionsList,
 } from '@/lib/officer-roles';
+import { sanitizeHttpUrl } from '@/lib/url-safety';
 import { createId, normalizeName } from '@/lib/utils';
-import type { Entry, Student } from '@/types/models';
+import type { DriveAttachment, Entry, Student } from '@/types/models';
 
 import type { EntryInput, StudentInput } from './types';
 
 const text = (value: string | null | undefined): string | null => value?.trim() || null;
+
+/** Sanitize a resource URL, returning `''` when the scheme/format is unsafe (e.g., `javascript:`, `data:`). */
+export function sanitizeResourceUrl(raw: string | null | undefined): string {
+  return sanitizeHttpUrl(raw) ?? '';
+}
+
+/** Drop any attachment whose `url` fails HTTP(S) validation and sanitize optional thumbnail/download URLs. */
+export function sanitizeDriveAttachments(
+  list?: DriveAttachment[] | null,
+): DriveAttachment[] | undefined {
+  if (!Array.isArray(list) || list.length === 0) return undefined;
+  const cleaned: DriveAttachment[] = [];
+  for (const att of list) {
+    const safeUrl = sanitizeHttpUrl(att.url);
+    if (!safeUrl) continue;
+    cleaned.push({
+      ...att,
+      url: safeUrl,
+      ...(att.thumbnailUrl !== undefined
+        ? { thumbnailUrl: sanitizeHttpUrl(att.thumbnailUrl) }
+        : {}),
+      ...(att.downloadUrl !== undefined
+        ? { downloadUrl: sanitizeHttpUrl(att.downloadUrl) }
+        : {}),
+    });
+  }
+  return cleaned.length > 0 ? cleaned : undefined;
+}
 
 /** Next free `10T4-XX` code, so two students never share a code by accident. */
 function nextCode(students: Student[], className: string): string {
@@ -113,7 +142,7 @@ export function buildEntry(input: EntryInput): Entry {
     level: input.level,
     date: input.date,
     description: text(input.description),
-    proofUrl: text(input.proofUrl),
+    proofUrl: sanitizeHttpUrl(input.proofUrl) ?? null,
     points: resolvedPoints,
     // Explicit status wins (used for officer-recorded entries); otherwise teacher=approved, student=pending.
     status: input.status ?? (fromStudent ? 'pending' : 'approved'),
@@ -143,7 +172,7 @@ export function mergeEntry(entry: Entry, patch: Partial<EntryInput>): Entry {
   if (patch.level) next.level = patch.level;
   if (patch.date) next.date = patch.date;
   if (patch.description !== undefined) next.description = text(patch.description);
-  if (patch.proofUrl !== undefined) next.proofUrl = text(patch.proofUrl);
+  if (patch.proofUrl !== undefined) next.proofUrl = sanitizeHttpUrl(patch.proofUrl) ?? null;
   if (patch.status !== undefined) next.status = patch.status;
   if (patch.reviewNote !== undefined) next.reviewNote = text(patch.reviewNote);
   if (patch.subject !== undefined) next.subject = text(patch.subject);

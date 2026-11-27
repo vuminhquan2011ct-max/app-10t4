@@ -11,7 +11,7 @@
  * 4. Graceful handling for pending Gmail confirmation and unconfigured OAuth providers.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useState, type ReactNode } from 'react';

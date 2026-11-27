@@ -4,7 +4,7 @@
  * the entire application.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { router } from 'expo-router';
 import { Component, useState, type ErrorInfo, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, useColorScheme, View } from 'react-native';

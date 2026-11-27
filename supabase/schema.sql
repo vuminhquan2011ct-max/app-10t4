@@ -357,7 +357,7 @@ create or replace function public.app_submit_entry(entry jsonb) returns void
 language plpgsql security definer set search_path = public as $$
 declare
   sid text;
-  pts int;
+  pts numeric(6,2);
   clean jsonb;
 begin
   if not public.app_is_member() then
@@ -371,20 +371,21 @@ begin
     raise exception 'Thiếu tên thành tích';
   end if;
 
-  pts := least(greatest(coalesce(nullif(entry ->> 'points', '')::numeric, 0)::int, 0), 50);
+  pts := round(least(greatest(coalesce(nullif(entry ->> 'points', '')::numeric, 0), 0), 50), 2);
 
   clean := jsonb_build_object(
     'id', coalesce(nullif(entry ->> 'id', ''), 'ent_' || md5(random()::text)),
     'studentId', sid,
     'title', left(trim(entry ->> 'title'), 200),
     'kind', case when entry ->> 'kind' in ('achievement', 'activity') then entry ->> 'kind' else 'activity' end,
-    'category', case when entry ->> 'category' in ('study', 'sport', 'art', 'volunteer', 'skill', 'other')
+    'category', case when entry ->> 'category' in ('study', 'academic', 'sport', 'art', 'volunteer', 'skill', 'other')
                      then entry ->> 'category' else 'other' end,
     'level', case when entry ->> 'level' in ('class', 'school', 'district', 'city', 'national', 'international')
                   then entry ->> 'level' else 'class' end,
     'date', coalesce(nullif(entry ->> 'date', ''), to_char(now(), 'YYYY-MM-DD')),
     'description', left(entry ->> 'description', 2000),
-    'proofUrl', left(entry ->> 'proofUrl', 500),
+    'proofUrl', case when trim(coalesce(entry ->> 'proofUrl', '')) ~* '^https?://'
+                     then left(trim(entry ->> 'proofUrl'), 500) else null end,
     'points', pts,
     'status', 'pending',
     'submittedBy', 'student',
@@ -701,6 +702,9 @@ begin
   if coalesce(trim(resource ->> 'title'), '') = '' or coalesce(trim(resource ->> 'url'), '') = '' then
     raise exception 'Thiếu tiêu đề hoặc liên kết tài liệu';
   end if;
+  if not (trim(resource ->> 'url') ~* '^https?://') then
+    raise exception 'Liên kết tài liệu chỉ chấp nhận giao thức http:// hoặc https://';
+  end if;
 
   clean := jsonb_build_object(
     'id', coalesce(nullif(resource ->> 'id', ''), 'res_' || md5(random()::text)),
@@ -807,7 +811,7 @@ begin
     'email', null,
     'address', null,
     'group', nullif(left(trim(coalesce(student ->> 'group', '')), 40), ''),
-    'position', nullif(left(trim(coalesce(student ->> 'position', '')), 60), ''),
+    'position', case when public.app_is_teacher() then nullif(left(trim(coalesce(student ->> 'position', '')), 60), '') else null end,
     'note', null,
     'createdAt', now(),
     'updatedAt', now()

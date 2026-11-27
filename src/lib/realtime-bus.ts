@@ -51,7 +51,8 @@ let supaStatus: 'idle' | 'subscribing' | 'subscribed' = 'idle';
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let idleTeardownTimer: ReturnType<typeof setTimeout> | null = null;
 let tabChannel: BroadcastChannel | null = null;
-let lifecycleHooked = false;
+let tabChannelRefCount = 0;
+let cleanupLifecycleHooks: (() => void) | null = null;
 
 export function getRealtimeClientId(): string {
   return CLIENT_ID;
@@ -106,6 +107,31 @@ function clearTimers(): void {
   }
 }
 
+function closeTabChannel(): void {
+  const existing = tabChannel;
+  tabChannel = null;
+  if (existing) {
+    try {
+      existing.onmessage = null;
+      existing.close();
+    } catch {
+      // Ignore already-closed BroadcastChannel errors.
+    }
+  }
+}
+
+function teardownLifecycleHooks(): void {
+  if (cleanupLifecycleHooks) {
+    const cleanup = cleanupLifecycleHooks;
+    cleanupLifecycleHooks = null;
+    try {
+      cleanup();
+    } catch {
+      // Ignore cleanup errors.
+    }
+  }
+}
+
 function scheduleIdleTeardown(): void {
   if (listeners.size > 0 || pendingQueue.length > 0) return;
   if (idleTeardownTimer) clearTimeout(idleTeardownTimer);
@@ -113,6 +139,10 @@ function scheduleIdleTeardown(): void {
     idleTeardownTimer = null;
     if (listeners.size === 0 && pendingQueue.length === 0) {
       teardownSupabaseChannel();
+      if (tabChannelRefCount <= 0) {
+        closeTabChannel();
+      }
+      teardownLifecycleHooks();
     }
   }, IDLE_TEARDOWN_MS);
 }
@@ -171,24 +201,56 @@ function ensureTabChannel(): void {
   }
 }
 
+function postToTabChannel(event: LiveBroadcastEvent): void {
+  if (Platform.OS !== 'web') return;
+  if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return;
+
+  if (tabChannel) {
+    try {
+      tabChannel.postMessage(event);
+    } catch {
+      // Ignore closed/unsupported BroadcastChannel errors.
+    }
+    return;
+  }
+
+  // When emitting with 0 active subscribers, open a one-shot channel and close it immediately so it never leaks.
+  try {
+    const ephemeral = new BroadcastChannel(TAB_CHANNEL_NAME);
+    try {
+      ephemeral.postMessage(event);
+    } finally {
+      ephemeral.close();
+    }
+  } catch {
+    // Ignore unsupported BroadcastChannel environments.
+  }
+}
+
 function ensureLifecycleHooks(): void {
-  if (lifecycleHooked) return;
-  lifecycleHooked = true;
+  if (cleanupLifecycleHooks) return;
 
   if (Platform.OS === 'web') {
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', () => {
+      const onOnline = () => {
         if (listeners.size > 0 && supaStatus === 'idle') {
           ensureSupabaseChannel();
         }
-      });
+      };
+      window.addEventListener('online', onOnline);
+      cleanupLifecycleHooks = () => {
+        window.removeEventListener('online', onOnline);
+      };
     }
   } else {
-    AppState.addEventListener('change', (nextState) => {
+    const sub = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active' && listeners.size > 0 && supaStatus === 'idle') {
         ensureSupabaseChannel();
       }
     });
+    cleanupLifecycleHooks = () => {
+      sub.remove();
+    };
   }
 }
 
@@ -242,14 +304,7 @@ export function emitLiveBroadcast(event: LiveBroadcastPayload): void {
   dispatchToListeners(fullEvent);
 
   // 2. Relay across browser tabs on Web instantaneously.
-  ensureTabChannel();
-  if (tabChannel) {
-    try {
-      tabChannel.postMessage(fullEvent);
-    } catch {
-      // Ignore closed/unsupported BroadcastChannel errors.
-    }
-  }
+  postToTabChannel(fullEvent);
 
   // 3. Broadcast across all devices via Supabase Realtime Broadcast.
   if (!isSupabaseConfigured) return;
@@ -274,14 +329,27 @@ export function emitLiveBroadcast(event: LiveBroadcastPayload): void {
 }
 
 export function subscribeLiveBroadcast(listener: LiveBroadcastListener): () => void {
+  const wasAdded = !listeners.has(listener);
   listeners.add(listener);
+  if (wasAdded) {
+    tabChannelRefCount += 1;
+  }
   ensureTabChannel();
   ensureSupabaseChannel();
 
+  let active = true;
   return () => {
-    listeners.delete(listener);
+    if (!active) return;
+    active = false;
+    if (listeners.delete(listener)) {
+      tabChannelRefCount = Math.max(0, tabChannelRefCount - 1);
+    }
+    if (tabChannelRefCount === 0) {
+      closeTabChannel();
+    }
     if (listeners.size === 0 && pendingQueue.length === 0) {
       clearTimers();
+      teardownLifecycleHooks();
       scheduleIdleTeardown();
     }
   };

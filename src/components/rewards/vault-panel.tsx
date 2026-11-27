@@ -7,7 +7,7 @@
  * - Inspect any locked sticker to jump directly to the Mission required to unlock it!
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMemo, useState } from 'react';

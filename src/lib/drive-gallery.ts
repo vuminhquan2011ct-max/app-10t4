@@ -10,7 +10,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { AppState, Platform } from 'react-native';
 
 import {
@@ -27,10 +27,12 @@ import {
   formatFallbackUploaderName,
   getLocalPreviewUri,
   parseUploaderMetadata,
+  revokeLocalPreviewUri,
   type DriveMediaKind,
   type DriveUploaderRole,
   type UploadedDriveFile,
 } from '@/lib/drive';
+import { reportNonFatal } from '@/lib/logger';
 import {
   emitLiveBroadcast,
   getRealtimeClientId,
@@ -42,6 +44,13 @@ import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 const CACHE_KEY = 'class10t4:drive-gallery:v2';
 const META_MAP_KEY = 'class10t4:drive-file-meta:v1';
 const SCHEMA_MODE_KEY = 'class10t4:drive-gallery-schema:v1';
+
+/** Exact 10 columns of the live `public.class_photos` table (no wildcard `select('*')`). */
+const LEGACY10_SELECT_COLUMNS =
+  'id, uploader_name, caption, drive_file_id, image_url, file_name, mime_type, item_type, drive_url, created_at';
+/** Extended 15-column projection when optional metadata columns exist in `public.class_photos`. */
+const EXTENDED_SELECT_COLUMNS =
+  `${LEGACY10_SELECT_COLUMNS}, uploader_role, uploader_subject, file_size, category, drive_folder_name`;
 
 type ClassPhotosSchemaMode = 'extended' | 'legacy10';
 
@@ -603,20 +612,53 @@ export async function fetchDriveMediaItems(): Promise<{
   source: 'cloud' | 'cache';
   error?: string;
 }> {
-  const [cached, metaMap] = await Promise.all([getCachedDriveMediaItems(), loadLocalMetaMap()]);
+  const [cached, metaMap, schemaMode] = await Promise.all([
+    getCachedDriveMediaItems(),
+    loadLocalMetaMap(),
+    loadSchemaMode(),
+  ]);
 
   if (!isSupabaseConfigured) {
     return { items: cached, source: 'cache' };
   }
 
   try {
-    const { data, error } = await supabase
-      .from('class_photos')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(200);
+    let data: unknown = null;
+    let error: { message: string; code?: string } | null = null;
+
+    if (schemaMode === 'legacy10') {
+      const res = await supabase
+        .from('class_photos')
+        .select(LEGACY10_SELECT_COLUMNS)
+        .order('created_at', { ascending: false })
+        .limit(200);
+      data = res.data;
+      error = res.error;
+    } else {
+      const res = await supabase
+        .from('class_photos')
+        .select(EXTENDED_SELECT_COLUMNS)
+        .order('created_at', { ascending: false })
+        .limit(200);
+      data = res.data;
+      error = res.error;
+
+      if (!error) {
+        void persistSchemaMode('extended');
+      } else if (isSchemaColumnMismatch(error.message, error.code)) {
+        void persistSchemaMode('legacy10');
+        const fallbackRes = await supabase
+          .from('class_photos')
+          .select(LEGACY10_SELECT_COLUMNS)
+          .order('created_at', { ascending: false })
+          .limit(200);
+        data = fallbackRes.data;
+        error = fallbackRes.error;
+      }
+    }
 
     if (error) {
+      reportNonFatal('drive-gallery', error, 'fetchDriveMediaItems');
       return {
         items: cached,
         source: 'cache',
@@ -625,12 +667,6 @@ export async function fetchDriveMediaItems(): Promise<{
     }
 
     const rows = (data as RawSupabaseRow[] | null) ?? [];
-
-    // Auto-detect live DB schema columns on read so uploads NEVER waste a failing POST!
-    if (rows.length > 0) {
-      const hasExtended = Object.prototype.hasOwnProperty.call(rows[0], 'uploader_role');
-      void persistSchemaMode(hasExtended ? 'extended' : 'legacy10');
-    }
 
     const remoteItems = rows
       .map((r) => normalizeRow(r, metaMap))
@@ -648,6 +684,7 @@ export async function fetchDriveMediaItems(): Promise<{
     await saveCachedItems(merged);
     return { items: merged, source: 'cloud' };
   } catch (err) {
+    reportNonFatal('drive-gallery', err, 'fetchDriveMediaItems');
     return {
       items: cached,
       source: 'cache',
@@ -676,7 +713,7 @@ function isCheckConstraintError(message: string, code?: string): boolean {
 
 /**
  * Save uploaded Google Drive file metadata to Supabase `class_photos` in 1 single RTT
- * (using cached schema detection + `.select('*')`), update local cache immediately,
+ * (using cached schema detection + explicit column projection), update local cache immediately,
  * notify all mounted screens, and emit Realtime Broadcast so other devices update in <300ms.
  */
 export async function saveUploadedFilesToGallery(
@@ -802,16 +839,25 @@ export async function saveUploadedFilesToGallery(
   let insertError: { message: string; code?: string } | null = null;
 
   if (schemaMode === 'legacy10') {
-    const res = await supabase.from('class_photos').insert(buildLegacy10Rows(false)).select('*');
+    const res = await supabase
+      .from('class_photos')
+      .insert(buildLegacy10Rows(false))
+      .select(LEGACY10_SELECT_COLUMNS);
     insertedRows = (res.data as RawSupabaseRow[] | null) ?? null;
     insertError = res.error;
     if (insertError && isCheckConstraintError(insertError.message, insertError.code)) {
-      const retry = await supabase.from('class_photos').insert(buildLegacy10Rows(true)).select('*');
+      const retry = await supabase
+        .from('class_photos')
+        .insert(buildLegacy10Rows(true))
+        .select(LEGACY10_SELECT_COLUMNS);
       insertedRows = (retry.data as RawSupabaseRow[] | null) ?? null;
       insertError = retry.error;
     }
   } else {
-    const res = await supabase.from('class_photos').insert(buildExtendedRows()).select('*');
+    const res = await supabase
+      .from('class_photos')
+      .insert(buildExtendedRows())
+      .select(EXTENDED_SELECT_COLUMNS);
     insertedRows = (res.data as RawSupabaseRow[] | null) ?? null;
     insertError = res.error;
 
@@ -822,14 +868,14 @@ export async function saveUploadedFilesToGallery(
       const fallbackRes = await supabase
         .from('class_photos')
         .insert(buildLegacy10Rows(false))
-        .select('*');
+        .select(LEGACY10_SELECT_COLUMNS);
       insertedRows = (fallbackRes.data as RawSupabaseRow[] | null) ?? null;
       insertError = fallbackRes.error;
       if (insertError && isCheckConstraintError(insertError.message, insertError.code)) {
         const retry = await supabase
           .from('class_photos')
           .insert(buildLegacy10Rows(true))
-          .select('*');
+          .select(LEGACY10_SELECT_COLUMNS);
         insertedRows = (retry.data as RawSupabaseRow[] | null) ?? null;
         insertError = retry.error;
       }
@@ -1066,7 +1112,7 @@ export function computeDriveStorageStats(items: DriveMediaItem[]): {
   };
 }
 
-/* ---------- Live React Hook (`useDriveGallery`) ---------- */
+/* ---------- Singleton Ref-Counted Gallery Store & React Hook (`useDriveGallery`) ---------- */
 
 export interface UseDriveGalleryOptions {
   limit?: number;
@@ -1086,200 +1132,239 @@ export interface UseDriveGalleryResult {
   removeItem: (item: DriveMediaItem) => Promise<DeleteDriveMediaResult>;
 }
 
-/**
- * Live gallery state hook with stale-while-revalidate instant cache, optimistic
- * upload cards, in-app pub/sub, Supabase Realtime Broadcast + `postgres_changes`,
- * visibility/focus refresh, and foreground polling.
- */
-export function useDriveGallery(options: UseDriveGalleryOptions = {}): UseDriveGalleryResult {
-  const { limit, pollMs = 5000 } = options;
+type GalleryStoreSnapshot = {
+  baseItems: DriveMediaItem[];
+  optimisticItems: DriveMediaItem[];
+  loading: boolean;
+  refreshing: boolean;
+  error: string;
+};
 
-  const [baseItems, setBaseItems] = useState<DriveMediaItem[]>(() => getMemoryDriveMediaItems());
-  const [optimisticItems, setOptimisticItems] = useState<DriveMediaItem[]>([]);
-  const [loading, setLoading] = useState<boolean>(() => memoryItemsCache === null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState('');
+let gallerySnapshot: GalleryStoreSnapshot = {
+  baseItems: getMemoryDriveMediaItems(),
+  optimisticItems: [],
+  loading: memoryItemsCache === null,
+  refreshing: false,
+  error: '',
+};
 
-  const mountedRef = useRef(true);
-  const inFlightRef = useRef(false);
-  const lastFetchAtRef = useRef(0);
+const storeListeners = new Set<() => void>();
+const consumerPollRequests = new Map<symbol, number>();
 
-  const refresh = useCallback(async (opts?: { silent?: boolean }) => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-    const silent = Boolean(opts?.silent);
-    if (!silent) {
-      setRefreshing(true);
-    }
+let sharedInFlightRefresh = false;
+let sharedLastFetchAt = 0;
+let sharedUnsubLocal: (() => void) | null = null;
+let sharedUnsubBroadcast: (() => void) | null = null;
+let sharedRealtimeChannel: ReturnType<typeof supabase.channel> | null = null;
+let sharedPollTimer: ReturnType<typeof setInterval> | null = null;
+let sharedActivePollMs = 0;
+let sharedCleanupForeground: (() => void) | null = null;
+let sharedBootGeneration = 0;
+
+function setGallerySnapshot(
+  updater: (prev: GalleryStoreSnapshot) => GalleryStoreSnapshot,
+): void {
+  const next = updater(gallerySnapshot);
+  if (next === gallerySnapshot) return;
+  gallerySnapshot = next;
+  for (const listener of Array.from(storeListeners)) {
     try {
-      const result = await fetchDriveMediaItems();
-      lastFetchAtRef.current = Date.now();
-      if (!mountedRef.current) return;
-      setBaseItems(result.items);
-      setError(result.error ?? '');
-      setLoading(false);
-    } finally {
-      inFlightRef.current = false;
-      if (mountedRef.current && !silent) {
-        setRefreshing(false);
-      }
+      listener();
+    } catch {
+      // Never let one failing listener break other subscribers.
     }
-  }, []);
+  }
+}
+
+function getGallerySnapshot(): GalleryStoreSnapshot {
+  return gallerySnapshot;
+}
+
+function subscribeGalleryStore(listener: () => void): () => void {
+  storeListeners.add(listener);
+  return () => {
+    storeListeners.delete(listener);
+  };
+}
+
+function isGalleryForeground(): boolean {
+  if (Platform.OS === 'web') {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return false;
+    }
+    return true;
+  }
+  return AppState.currentState === 'active';
+}
+
+async function refreshSharedGallery(opts?: { silent?: boolean }): Promise<void> {
+  if (sharedInFlightRefresh) return;
+  sharedInFlightRefresh = true;
+  const silent = Boolean(opts?.silent);
+  if (!silent) {
+    setGallerySnapshot((prev) => (prev.refreshing ? prev : { ...prev, refreshing: true }));
+  }
+  try {
+    const result = await fetchDriveMediaItems();
+    sharedLastFetchAt = Date.now();
+    setGallerySnapshot((prev) => ({
+      ...prev,
+      baseItems: result.items,
+      error: result.error ?? '',
+      loading: false,
+      refreshing: silent ? prev.refreshing : false,
+    }));
+  } finally {
+    sharedInFlightRefresh = false;
+    if (!silent) {
+      setGallerySnapshot((prev) => (prev.refreshing ? { ...prev, refreshing: false } : prev));
+    }
+  }
+}
+
+function syncSharedPollTimer(): void {
+  let targetMs = 0;
+  for (const ms of consumerPollRequests.values()) {
+    if (ms > 0 && (targetMs === 0 || ms < targetMs)) {
+      targetMs = ms;
+    }
+  }
+
+  if (targetMs === sharedActivePollMs && (targetMs === 0 ? !sharedPollTimer : Boolean(sharedPollTimer))) {
+    return;
+  }
+
+  if (sharedPollTimer) {
+    clearInterval(sharedPollTimer);
+    sharedPollTimer = null;
+  }
+  sharedActivePollMs = targetMs;
+
+  if (targetMs > 0) {
+    sharedPollTimer = setInterval(() => {
+      if (isGalleryForeground()) {
+        void refreshSharedGallery({ silent: true });
+      }
+    }, targetMs);
+  }
+}
+
+function startSharedGalleryRuntime(): void {
+  const generation = ++sharedBootGeneration;
 
   // Hydrate AsyncStorage cache immediately, then silently fetch latest from cloud.
-  useEffect(() => {
-    mountedRef.current = true;
-    let active = true;
-
-    void (async () => {
-      if (memoryItemsCache === null) {
-        const cached = await getCachedDriveMediaItems();
-        if (!active) return;
-        setBaseItems(cached);
-        if (cached.length > 0) {
-          setLoading(false);
-        }
-      }
-      await refresh({ silent: true });
-    })();
-
-    return () => {
-      active = false;
-      mountedRef.current = false;
-    };
-  }, [refresh]);
-
-  // In-app pub/sub + Cross-device Realtime Broadcast + Supabase postgres_changes
-  useEffect(() => {
-    const unsubLocal = subscribeDriveGallery((nextItems) => {
-      if (!mountedRef.current) return;
-      setBaseItems(nextItems);
-      setLoading(false);
-    });
-
-    const unsubBroadcast = subscribeLiveBroadcast((event: LiveBroadcastEvent) => {
-      if (!mountedRef.current) return;
-      // Ignore self-emitted broadcasts: saveCachedItems already notified all in-process hooks.
-      if (event.senderId === getRealtimeClientId()) return;
-      if (event.type === 'photo-added') {
-        void (async () => {
-          const metaMap = await loadLocalMetaMap();
-          const normalized = normalizeBroadcastItem(event.item, metaMap);
-          if (!normalized || !mountedRef.current || isRecentlyDeletedItem(normalized)) return;
-          const existing = await getCachedDriveMediaItems();
-          const merged = mergeItemLists([normalized], existing);
-          await saveCachedItems(merged);
-        })();
-      } else if (event.type === 'photo-deleted') {
-        void (async () => {
-          const eventId = event.id?.trim() || '';
-          const eventDriveId = event.driveFileId?.trim() || '';
-          if (!eventId && !eventDriveId) return;
-          recordDeletedTargets(eventId, eventDriveId);
-          const existing = await getCachedDriveMediaItems();
-          const next = existing.filter((x) => {
-            if (eventId && (x.id === eventId || x.driveFileId === eventId)) return false;
-            if (eventDriveId && (x.driveFileId === eventDriveId || x.id === eventDriveId)) {
-              return false;
-            }
-            return true;
-          });
-          if (next.length !== existing.length) {
-            await saveCachedItems(next);
-          }
-        })();
-      }
-    });
-
-    let realtimeChannel: ReturnType<typeof supabase.channel> | null = null;
-    if (isSupabaseConfigured) {
-      const channelName = `class-photos-live-${Math.random().toString(36).slice(2, 8)}`;
-      realtimeChannel = supabase
-        .channel(channelName)
-        .on(
-          'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'class_photos' },
-          (payload) => {
-            void (async () => {
-              const row = payload.new as RawSupabaseRow | null;
-              if (!row) return;
-              const metaMap = await loadLocalMetaMap();
-              const item = normalizeRow(row, metaMap);
-              if (isRecentlyDeletedItem(item)) return;
-              const existing = await getCachedDriveMediaItems();
-              const merged = mergeItemLists([item], existing);
-              await saveCachedItems(merged);
-            })();
-          },
-        )
-        .on(
-          'postgres_changes',
-          { event: 'DELETE', schema: 'public', table: 'class_photos' },
-          (payload) => {
-            void (async () => {
-              const oldRow = payload.old as RawSupabaseRow | null;
-              const deletedId = oldRow?.id ? String(oldRow.id) : '';
-              const deletedDriveId = oldRow?.drive_file_id?.trim() || '';
-              if (!deletedId && !deletedDriveId) return;
-              recordDeletedTargets(deletedId, deletedDriveId);
-              const existing = await getCachedDriveMediaItems();
-              const next = existing.filter((x) => {
-                if (deletedId && x.id === deletedId) return false;
-                if (deletedDriveId && x.driveFileId === deletedDriveId) return false;
-                return true;
-              });
-              if (next.length !== existing.length) {
-                await saveCachedItems(next);
-              }
-            })();
-          },
-        )
-        .on(
-          'postgres_changes',
-          { event: 'UPDATE', schema: 'public', table: 'class_photos' },
-          () => {
-            void refresh({ silent: true });
-          },
-        )
-        .subscribe();
+  void (async () => {
+    if (memoryItemsCache === null) {
+      const cached = await getCachedDriveMediaItems();
+      if (sharedBootGeneration !== generation) return;
+      setGallerySnapshot((prev) => ({
+        ...prev,
+        baseItems: cached,
+        loading: cached.length > 0 ? false : prev.loading,
+      }));
     }
+    if (sharedBootGeneration !== generation) return;
+    await refreshSharedGallery({ silent: true });
+  })();
 
-    return () => {
-      unsubLocal();
-      unsubBroadcast();
-      if (realtimeChannel) {
-        void supabase.removeChannel(realtimeChannel);
-      }
-    };
-  }, [refresh]);
+  sharedUnsubLocal = subscribeDriveGallery((nextItems) => {
+    setGallerySnapshot((prev) => ({
+      ...prev,
+      baseItems: nextItems,
+      loading: false,
+    }));
+  });
 
-  // Foreground poll + Web focus/visibilitychange + Native AppState active refresh
-  useEffect(() => {
-    const maybeRefresh = () => {
-      if (Date.now() - lastFetchAtRef.current < 1500) return;
-      void refresh({ silent: true });
-    };
-
-    const isForeground = (): boolean => {
-      if (Platform.OS === 'web') {
-        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-          return false;
+  sharedUnsubBroadcast = subscribeLiveBroadcast((event: LiveBroadcastEvent) => {
+    // Ignore self-emitted broadcasts: saveCachedItems already notified all in-process subscribers.
+    if (event.senderId === getRealtimeClientId()) return;
+    if (event.type === 'photo-added') {
+      void (async () => {
+        const metaMap = await loadLocalMetaMap();
+        const normalized = normalizeBroadcastItem(event.item, metaMap);
+        if (!normalized || isRecentlyDeletedItem(normalized)) return;
+        const existing = await getCachedDriveMediaItems();
+        const merged = mergeItemLists([normalized], existing);
+        await saveCachedItems(merged);
+      })();
+    } else if (event.type === 'photo-deleted') {
+      void (async () => {
+        const eventId = event.id?.trim() || '';
+        const eventDriveId = event.driveFileId?.trim() || '';
+        if (!eventId && !eventDriveId) return;
+        recordDeletedTargets(eventId, eventDriveId);
+        const existing = await getCachedDriveMediaItems();
+        const next = existing.filter((x) => {
+          if (eventId && (x.id === eventId || x.driveFileId === eventId)) return false;
+          if (eventDriveId && (x.driveFileId === eventDriveId || x.id === eventDriveId)) {
+            return false;
+          }
+          return true;
+        });
+        if (next.length !== existing.length) {
+          await saveCachedItems(next);
         }
-        return true;
-      }
-      return AppState.currentState === 'active';
-    };
+      })();
+    }
+  });
 
-    const timer =
-      pollMs > 0
-        ? setInterval(() => {
-            if (isForeground()) {
-              void refresh({ silent: true });
+  if (isSupabaseConfigured && !sharedRealtimeChannel) {
+    sharedRealtimeChannel = supabase
+      .channel('class-photos-live-shared')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'class_photos' },
+        (payload) => {
+          void (async () => {
+            const row = payload.new as RawSupabaseRow | null;
+            if (!row) return;
+            const metaMap = await loadLocalMetaMap();
+            const item = normalizeRow(row, metaMap);
+            if (isRecentlyDeletedItem(item)) return;
+            const existing = await getCachedDriveMediaItems();
+            const merged = mergeItemLists([item], existing);
+            await saveCachedItems(merged);
+          })();
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'class_photos' },
+        (payload) => {
+          void (async () => {
+            const oldRow = payload.old as RawSupabaseRow | null;
+            const deletedId = oldRow?.id ? String(oldRow.id) : '';
+            const deletedDriveId = oldRow?.drive_file_id?.trim() || '';
+            if (!deletedId && !deletedDriveId) return;
+            recordDeletedTargets(deletedId, deletedDriveId);
+            const existing = await getCachedDriveMediaItems();
+            const next = existing.filter((x) => {
+              if (deletedId && x.id === deletedId) return false;
+              if (deletedDriveId && x.driveFileId === deletedDriveId) return false;
+              return true;
+            });
+            if (next.length !== existing.length) {
+              await saveCachedItems(next);
             }
-          }, pollMs)
-        : null;
+          })();
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'class_photos' },
+        () => {
+          void refreshSharedGallery({ silent: true });
+        },
+      )
+      .subscribe();
+  }
 
-    let appStateSub: { remove: () => void } | null = null;
+  const maybeRefresh = () => {
+    if (Date.now() - sharedLastFetchAt < 1500) return;
+    void refreshSharedGallery({ silent: true });
+  };
+
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
     const onWebVisible = () => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
         maybeRefresh();
@@ -1288,95 +1373,176 @@ export function useDriveGallery(options: UseDriveGalleryOptions = {}): UseDriveG
     const onWebFocus = () => {
       maybeRefresh();
     };
-
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      window.addEventListener('focus', onWebFocus);
-      if (typeof document !== 'undefined') {
-        document.addEventListener('visibilitychange', onWebVisible);
-      }
-    } else {
-      appStateSub = AppState.addEventListener('change', (nextState) => {
-        if (nextState === 'active') {
-          maybeRefresh();
-        }
-      });
+    window.addEventListener('focus', onWebFocus);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onWebVisible);
     }
-
-    return () => {
-      if (timer) clearInterval(timer);
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        window.removeEventListener('focus', onWebFocus);
-        if (typeof document !== 'undefined') {
-          document.removeEventListener('visibilitychange', onWebVisible);
-        }
+    sharedCleanupForeground = () => {
+      window.removeEventListener('focus', onWebFocus);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onWebVisible);
       }
-      appStateSub?.remove();
     };
-  }, [pollMs, refresh]);
-
-  const prependOptimistic = useCallback((pendingItems: DriveMediaItem[]) => {
-    if (pendingItems.length === 0) return;
-    setOptimisticItems((prev) => {
-      const incomingIds = new Set(pendingItems.map((i) => i.tempId || i.id));
-      const kept = prev.filter((p) => !incomingIds.has(p.tempId || p.id));
-      return [...pendingItems, ...kept];
+  } else {
+    const appStateSub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        maybeRefresh();
+      }
     });
-    setLoading(false);
-  }, []);
+    sharedCleanupForeground = () => appStateSub.remove();
+  }
+}
 
-  const linkOptimisticDriveId = useCallback((tempId: string, driveFileId: string) => {
-    const cleanId = driveFileId.trim();
-    if (!cleanId) return;
-    setOptimisticItems((prev) =>
-      prev.map((item) =>
-        item.tempId === tempId || item.id === tempId ? { ...item, driveFileId: cleanId } : item,
-      ),
-    );
-  }, []);
+function stopSharedGalleryRuntime(): void {
+  sharedBootGeneration += 1;
 
-  const resolveOptimistic = useCallback((tempId: string, savedItem: DriveMediaItem) => {
-    setOptimisticItems((prev) => prev.filter((p) => p.tempId !== tempId && p.id !== tempId));
-    setBaseItems((prev) => mergeItemLists([savedItem], prev));
-  }, []);
+  if (sharedPollTimer) {
+    clearInterval(sharedPollTimer);
+    sharedPollTimer = null;
+  }
+  sharedActivePollMs = 0;
 
-  const failOptimistic = useCallback((tempId: string) => {
-    setOptimisticItems((prev) => prev.filter((p) => p.tempId !== tempId && p.id !== tempId));
-  }, []);
+  if (sharedUnsubLocal) {
+    sharedUnsubLocal();
+    sharedUnsubLocal = null;
+  }
+  if (sharedUnsubBroadcast) {
+    sharedUnsubBroadcast();
+    sharedUnsubBroadcast = null;
+  }
+  if (sharedCleanupForeground) {
+    sharedCleanupForeground();
+    sharedCleanupForeground = null;
+  }
+  if (sharedRealtimeChannel) {
+    const ch = sharedRealtimeChannel;
+    sharedRealtimeChannel = null;
+    supabase.removeChannel(ch).catch((err) => {
+      reportNonFatal('drive-gallery', err, 'removeChannel');
+    });
+  }
+}
 
-  const removeItem = useCallback(async (item: DriveMediaItem): Promise<DeleteDriveMediaResult> => {
-    setOptimisticItems((prev) =>
-      prev.filter(
-        (x) =>
-          x.id !== item.id &&
-          x.tempId !== item.tempId &&
-          (!item.driveFileId || x.driveFileId !== item.driveFileId),
-      ),
-    );
-    setBaseItems((prev) =>
-      prev.filter((x) => x.id !== item.id && (!item.driveFileId || x.driveFileId !== item.driveFileId)),
-    );
-    return deleteDriveMediaItem(item);
-  }, []);
+function acquireGalleryConsumer(pollMs: number): () => void {
+  const token = Symbol('drive-gallery-consumer');
+  const wasEmpty = consumerPollRequests.size === 0;
+  consumerPollRequests.set(token, pollMs);
+
+  if (wasEmpty) {
+    startSharedGalleryRuntime();
+  }
+  syncSharedPollTimer();
+
+  return () => {
+    consumerPollRequests.delete(token);
+    if (consumerPollRequests.size === 0) {
+      stopSharedGalleryRuntime();
+    } else {
+      syncSharedPollTimer();
+    }
+  };
+}
+
+function prependOptimisticShared(pendingItems: DriveMediaItem[]): void {
+  if (pendingItems.length === 0) return;
+  setGallerySnapshot((prev) => {
+    const incomingIds = new Set(pendingItems.map((i) => i.tempId || i.id));
+    const kept = prev.optimisticItems.filter((p) => !incomingIds.has(p.tempId || p.id));
+    return {
+      ...prev,
+      optimisticItems: [...pendingItems, ...kept],
+      loading: false,
+    };
+  });
+}
+
+function linkOptimisticDriveIdShared(tempId: string, driveFileId: string): void {
+  const cleanId = driveFileId.trim();
+  if (!cleanId) return;
+  setGallerySnapshot((prev) => ({
+    ...prev,
+    optimisticItems: prev.optimisticItems.map((item) =>
+      item.tempId === tempId || item.id === tempId ? { ...item, driveFileId: cleanId } : item,
+    ),
+  }));
+}
+
+function resolveOptimisticShared(tempId: string, savedItem: DriveMediaItem): void {
+  setGallerySnapshot((prev) => ({
+    ...prev,
+    optimisticItems: prev.optimisticItems.filter((p) => p.tempId !== tempId && p.id !== tempId),
+    baseItems: mergeItemLists([savedItem], prev.baseItems),
+  }));
+}
+
+function failOptimisticShared(tempId: string): void {
+  const failed = gallerySnapshot.optimisticItems.find(
+    (p) => p.tempId === tempId || p.id === tempId,
+  );
+  if (failed?.localPreviewUri) {
+    revokeLocalPreviewUri(failed.localPreviewUri);
+  }
+  setGallerySnapshot((prev) => ({
+    ...prev,
+    optimisticItems: prev.optimisticItems.filter((p) => p.tempId !== tempId && p.id !== tempId),
+  }));
+}
+
+async function removeItemShared(item: DriveMediaItem): Promise<DeleteDriveMediaResult> {
+  if (item.localPreviewUri) {
+    revokeLocalPreviewUri(item.localPreviewUri);
+  }
+  setGallerySnapshot((prev) => ({
+    ...prev,
+    optimisticItems: prev.optimisticItems.filter(
+      (x) =>
+        x.id !== item.id &&
+        x.tempId !== item.tempId &&
+        (!item.driveFileId || x.driveFileId !== item.driveFileId),
+    ),
+    baseItems: prev.baseItems.filter(
+      (x) => x.id !== item.id && (!item.driveFileId || x.driveFileId !== item.driveFileId),
+    ),
+  }));
+  return deleteDriveMediaItem(item);
+}
+
+/**
+ * Live gallery state hook backed by ONE ref-counted module singleton store
+ * (`useSyncExternalStore`): mounting across Home, Pro, and Gallery shares a
+ * single Supabase Realtime channel, single Broadcast listener, and single
+ * foreground poll timer that tears down cleanly when ref-count reaches 0.
+ */
+export function useDriveGallery(options: UseDriveGalleryOptions = {}): UseDriveGalleryResult {
+  const { limit, pollMs = 5000 } = options;
+
+  const snapshot = useSyncExternalStore(
+    subscribeGalleryStore,
+    getGallerySnapshot,
+    getGallerySnapshot,
+  );
+
+  useEffect(() => acquireGalleryConsumer(pollMs), [pollMs]);
 
   const items = useMemo(() => {
-    const confirmedDriveIds = new Set(baseItems.map((b) => b.driveFileId).filter(Boolean));
-    const activeOptimistic = optimisticItems.filter(
+    const confirmedDriveIds = new Set(snapshot.baseItems.map((b) => b.driveFileId).filter(Boolean));
+    const activeOptimistic = snapshot.optimisticItems.filter(
       (opt) => !opt.driveFileId || !confirmedDriveIds.has(opt.driveFileId),
     );
-    const combined = [...activeOptimistic, ...baseItems];
+    const combined = [...activeOptimistic, ...snapshot.baseItems];
     return typeof limit === 'number' && limit > 0 ? combined.slice(0, limit) : combined;
-  }, [optimisticItems, baseItems, limit]);
+  }, [snapshot.optimisticItems, snapshot.baseItems, limit]);
 
   return {
     items,
-    loading,
-    refreshing,
-    error,
-    refresh,
-    prependOptimistic,
-    linkOptimisticDriveId,
-    resolveOptimistic,
-    failOptimistic,
-    removeItem,
+    loading: snapshot.loading,
+    refreshing: snapshot.refreshing,
+    error: snapshot.error,
+    refresh: refreshSharedGallery,
+    prependOptimistic: prependOptimisticShared,
+    linkOptimisticDriveId: linkOptimisticDriveIdShared,
+    resolveOptimistic: resolveOptimisticShared,
+    failOptimistic: failOptimisticShared,
+    removeItem: removeItemShared,
   };
 }

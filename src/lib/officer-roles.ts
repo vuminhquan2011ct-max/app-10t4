@@ -6,7 +6,7 @@
  * source of truth without circular imports.
  */
 
-import type { Ionicons } from '@expo/vector-icons';
+import type Ionicons from '@expo/vector-icons/Ionicons';
 
 type OfficerIconName = keyof typeof Ionicons.glyphMap;
 

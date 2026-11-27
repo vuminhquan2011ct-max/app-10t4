@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/page-header';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { ConfirmActionButton } from '@/components/ui/confirm-action-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -123,6 +124,9 @@ export default function FeedbackScreen() {
           />
           <Pressable
             onPress={() => setAnonymous((v) => !v)}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: anonymous }}
+            accessibilityLabel={anonymous ? 'Gửi ẩn danh' : 'Gửi kèm tên của bạn'}
             style={[styles.anonRow, { backgroundColor: theme.backgroundElement }]}>
             <Ionicons
               name={anonymous ? 'glasses' : 'person-circle'}
@@ -250,15 +254,16 @@ export default function FeedbackScreen() {
                           setReplyDraft(item.reply ?? '');
                         }}
                       />
-                      <Button
-                        label={'Xoá'}
-                        size={'sm'}
-                        variant={'danger'}
-                        icon={'trash-outline'}
-                        onPress={async () => {
-                          await removeFeedback(item.id);
-                          showToast('Đã xoá góp ý', 'warning');
+                      <ConfirmActionButton
+                        size="md"
+                        label="Xoá"
+                        onConfirm={() => {
+                          void removeFeedback(item.id)
+                            .then(() => showToast('Đã xoá góp ý', 'warning'))
+                            .catch(() => showToast('Không thể xoá góp ý', 'danger'));
                         }}
+                        accessibilityLabel="Xoá góp ý này"
+                        confirmAccessibilityLabel="Nhấn lại để xoá góp ý này"
                       />
                     </View>
                   )

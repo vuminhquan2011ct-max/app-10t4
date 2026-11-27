@@ -6,7 +6,7 @@
  *  - 3-in-1 Assistant & Tour Guide Drawer Modal
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { usePathname } from 'expo-router';

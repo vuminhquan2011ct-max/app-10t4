@@ -87,6 +87,31 @@ export function buildDriveDownloadUrl(fileId: string): string {
 
 const LOCAL_PREVIEW_CACHE_MAX = 100;
 const localPreviewCache = new Map<string, string>();
+const trackedBlobPreviewUris = new Set<string>();
+
+function isUriStillCached(uri: string): boolean {
+  for (const cached of localPreviewCache.values()) {
+    if (cached === uri) return true;
+  }
+  return false;
+}
+
+/**
+ * Safely revoke a Web `blob:` preview URL created via `URL.createObjectURL(...)`
+ * so uploaded, failed, evicted, or deleted local previews never leak browser memory.
+ */
+export function revokeLocalPreviewUri(uri: string | null | undefined): void {
+  const clean = uri?.trim();
+  if (!clean || !clean.startsWith('blob:')) return;
+  trackedBlobPreviewUris.delete(clean);
+  if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    try {
+      URL.revokeObjectURL(clean);
+    } catch {
+      // Ignore already-revoked or unsupported blob URL errors.
+    }
+  }
+}
 
 /**
  * Cache an uploader's local blob/file preview URI for a Drive file ID so the
@@ -96,14 +121,28 @@ export function cacheLocalPreviewUri(driveFileId: string, uri: string): void {
   const id = driveFileId.trim();
   const cleanUri = uri.trim();
   if (!id || !cleanUri) return;
-  if (localPreviewCache.has(id)) {
+
+  const previousUri = localPreviewCache.get(id);
+  if (previousUri !== undefined) {
     localPreviewCache.delete(id);
   }
   localPreviewCache.set(id, cleanUri);
+  if (cleanUri.startsWith('blob:')) {
+    trackedBlobPreviewUris.add(cleanUri);
+  }
+
+  if (previousUri && previousUri !== cleanUri && !isUriStillCached(previousUri)) {
+    revokeLocalPreviewUri(previousUri);
+  }
+
   while (localPreviewCache.size > LOCAL_PREVIEW_CACHE_MAX) {
     const oldestKey = localPreviewCache.keys().next().value;
     if (oldestKey !== undefined) {
+      const evictedUri = localPreviewCache.get(oldestKey);
       localPreviewCache.delete(oldestKey);
+      if (evictedUri && !isUriStillCached(evictedUri)) {
+        revokeLocalPreviewUri(evictedUri);
+      }
     } else {
       break;
     }
@@ -116,11 +155,28 @@ export function getLocalPreviewUri(driveFileId: string): string | null {
   return localPreviewCache.get(id) ?? null;
 }
 
-/** Remove a deleted Drive file's local preview URI from the in-memory cache. */
+/** Remove a deleted Drive file's local preview URI from cache and revoke its `blob:` URL if unused. */
 export function evictLocalPreviewUri(driveFileId: string): void {
   const id = driveFileId.trim();
   if (!id) return;
+  const removedUri = localPreviewCache.get(id);
   localPreviewCache.delete(id);
+  if (removedUri && !isUriStillCached(removedUri)) {
+    revokeLocalPreviewUri(removedUri);
+  }
+}
+
+/** Revoke all tracked Web `blob:` preview URLs and clear the local preview cache. */
+export function revokeAllLocalPreviewUris(): void {
+  const uris = new Set<string>(trackedBlobPreviewUris);
+  for (const cached of localPreviewCache.values()) {
+    if (cached.startsWith('blob:')) uris.add(cached);
+  }
+  localPreviewCache.clear();
+  trackedBlobPreviewUris.clear();
+  for (const uri of uris) {
+    revokeLocalPreviewUri(uri);
+  }
 }
 
 /** Extract a Google Drive file ID from any common Drive / `lh3` URL or raw ID. */

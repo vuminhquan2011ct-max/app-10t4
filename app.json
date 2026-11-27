@@ -8,9 +8,11 @@
     "scheme": "app10t4",
     "userInterfaceStyle": "automatic",
     "ios": {
+      "bundleIdentifier": "com.fpt10t4.app10t4",
       "icon": "./assets/expo.icon"
     },
     "android": {
+      "package": "com.fpt10t4.app10t4",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -40,7 +42,9 @@
           "photosPermission": "Cho phép Lớp 10T4 truy cập thư viện ảnh để tải ảnh và video lên Google Drive K8T4_app.",
           "cameraPermission": "Cho phép Lớp 10T4 sử dụng máy ảnh để chụp ảnh lớp và bài tập tải lên Google Drive K8T4_app."
         }
-      ]
+      ],
+      "expo-image",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

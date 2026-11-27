@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Pressable, StyleSheet, Text } from 'react-native';
 
 import { Radius, Spacing } from '@/constants/theme';
@@ -11,16 +11,29 @@ type ChipProps = {
   selected?: boolean;
   icon?: IoniconName;
   onPress?: () => void;
+  accessibilityLabel?: string;
 };
 
+const CHIP_HIT_SLOP = { top: 6, bottom: 6, left: 4, right: 4 } as const;
+
 /** Filter / option pill. Highlighted with the accent color when selected. */
-export function Chip({ label, selected = false, icon, onPress }: ChipProps) {
+export function Chip({
+  label,
+  selected = false,
+  icon,
+  onPress,
+  accessibilityLabel,
+}: ChipProps) {
   const theme = useTheme();
-  const color = selected ? '#FFFFFF' : theme.textSecondary;
+  const color = selected ? theme.accentOnFill : theme.textSecondary;
 
   return (
     <Pressable
       onPress={onPress}
+      hitSlop={CHIP_HIT_SLOP}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityState={{ selected }}
       style={({ pressed }) => [
         styles.chip,
         {
@@ -39,6 +52,9 @@ const styles = StyleSheet.create({
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 34,
+    minWidth: 44,
     gap: Spacing.one,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,

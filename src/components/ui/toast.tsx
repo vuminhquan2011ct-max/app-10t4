@@ -3,9 +3,17 @@
  * copying reports, marking attendance) give instant tactile feedback.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
-import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { Platform, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInUp, FadeOutUp } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -40,6 +48,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [toast, setToast] = useState<ToastItem | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, []);
+
   const showToast = useCallback((message: string, tone: ToastTone = 'success') => {
     if (Platform.OS !== 'web') {
       Haptics.notificationAsync(
@@ -51,6 +68,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     if (timerRef.current) clearTimeout(timerRef.current);
     setToast({ id: Date.now(), message, tone });
     timerRef.current = setTimeout(() => {
+      timerRef.current = null;
       setToast(null);
     }, 2600);
   }, []);
@@ -73,6 +91,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           style={[styles.host, { top: Math.max(insets.top + Spacing.two, Spacing.four) }]}>
           <Animated.View
             key={toast.id}
+            accessibilityLiveRegion="polite"
             entering={FadeInUp.springify().damping(18)}
             exiting={FadeOutUp.duration(180)}
             style={[

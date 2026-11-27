@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
@@ -10,6 +10,7 @@ import { CategoryBars } from '@/components/charts/category-bars';
 import { GroupBattle } from '@/components/charts/group-battle';
 import { WeeklyChart } from '@/components/charts/weekly-chart';
 import { useCommandPalette } from '@/components/command-palette';
+import { ExamCountdownStrip } from '@/components/exam-countdown-strip';
 import { LiveRecentPhotosStrip } from '@/components/live-recent-photos-strip';
 import { Podium } from '@/components/podium';
 import { StickerBadge } from '@/components/stickers/sticker-art';
@@ -35,7 +36,7 @@ import { formatDayMonth, relativeDay } from '@/lib/date';
 import { computeClassHealth, getLivePeriodStatus } from '@/lib/intelligence';
 import { getOfficerPositionMeta } from '@/lib/officer-roles';
 import { useAuth } from '@/store/auth-store';
-import { useClassStore } from '@/store/class-store';
+import { useClassStore, useClassSync } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
 
 function softToneOf(color: 'accent' | 'success' | 'warning' | 'danger' | 'purple'): ThemeColor {
@@ -121,6 +122,7 @@ const QUICK_DOCK: {
 export default function DashboardScreen() {
   const auth = useAuth();
   const store = useClassStore();
+  const { syncStatus, pullNow } = useClassSync();
   const {
     classInfo,
     students,
@@ -145,7 +147,6 @@ export default function DashboardScreen() {
     canManageTasksAndEvents,
     canPostAnnouncements,
     currentStudent,
-    syncStatus,
     classStreak,
     groupStats,
     categoryStats,
@@ -164,7 +165,6 @@ export default function DashboardScreen() {
     seatOfStudent,
     kudosOfStudent,
     getStudyParticipationReport,
-    pullNow,
   } = store;
   const theme = useTheme();
   const gradient = useBrandGradient();
@@ -885,6 +885,11 @@ export default function DashboardScreen() {
           ) : null}
         </LinearGradient>
       </FadeIn>
+
+      {/* Upcoming Exam & High-Priority Deadline Countdown Strip (returns null when empty) */}
+      <SectionErrorBoundary compact title={'Lịch kiểm tra sắp tới'}>
+        <ExamCountdownStrip />
+      </SectionErrorBoundary>
 
       {/* Royal Đông Sơn Bronze & Crimson-Gold Treasure, 7-Day Login Reward & Missions Strip */}
       <FadeIn index={2}>

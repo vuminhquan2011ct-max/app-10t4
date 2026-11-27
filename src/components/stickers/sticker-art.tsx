@@ -8,7 +8,7 @@
  * - Mythic (🌌): Prismatic holographic cyber-aurora border + continuous iridescent shimmer
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { memo, useEffect } from 'react';

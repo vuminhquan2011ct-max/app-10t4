@@ -9,7 +9,7 @@
  *     diagonal prism light shimmer sweep, flickering hologram scanlines, and Hologram ID "GVCN Ngô Vũ Hảo".
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useEffect, useMemo, useState } from 'react';

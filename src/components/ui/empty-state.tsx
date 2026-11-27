@@ -1,19 +1,33 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { Button } from '@/components/ui/button';
 import { Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
-type EmptyStateProps = {
+export type EmptyStateProps = {
   icon?: IoniconName;
   title: string;
   message?: string;
+  /** Optional call-to-action button label shown when `onAction` is provided. */
+  actionLabel?: string;
+  /** Optional handler invoked when the CTA button is pressed. */
+  onAction?: () => void;
+  /** Optional icon shown inside the CTA button. */
+  actionIcon?: IoniconName;
 };
 
 /** Friendly placeholder shown when a list has nothing to display. */
-export function EmptyState({ icon = 'sparkles-outline', title, message }: EmptyStateProps) {
+export function EmptyState({
+  icon = 'sparkles-outline',
+  title,
+  message,
+  actionLabel,
+  onAction,
+  actionIcon,
+}: EmptyStateProps) {
   const theme = useTheme();
 
   return (
@@ -26,6 +40,15 @@ export function EmptyState({ icon = 'sparkles-outline', title, message }: EmptyS
       <Text style={[styles.title, { color: theme.text }]}>{title}</Text>
       {message ? (
         <Text style={[styles.message, { color: theme.textSecondary }]}>{message}</Text>
+      ) : null}
+      {actionLabel && onAction ? (
+        <Button
+          label={actionLabel}
+          icon={actionIcon}
+          onPress={onAction}
+          size="sm"
+          style={styles.actionBtn}
+        />
       ) : null}
     </View>
   );
@@ -58,4 +81,5 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 16, fontWeight: '800', textAlign: 'center' },
   message: { fontSize: 14, textAlign: 'center', lineHeight: 20 },
+  actionBtn: { marginTop: Spacing.one },
 });

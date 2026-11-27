@@ -14,8 +14,29 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
 
+import {
+  STUDENT_ACCOUNTS_KEY,
+  TEACHER_ACCOUNTS_KEY,
+  awaitBriefly,
+  createAccountChangeBus,
+  getLatestKnownResetMs,
+  isAccountTombstoned,
+  isBeforeResetEpoch,
+  mergeAuthProviders,
+  normalizeAuthProviders,
+  normalizeEmail,
+  normalizeLoginIdDisplay,
+  normalizeLoginIdKey,
+  parseIsoMs,
+  readRawRecordAuthUserId,
+  readRawRecordEmailKey,
+  readSafePersistedState,
+  resolveMergedIdentityFields,
+  safePostResetNowIso,
+  trackKnownResetMs,
+  validateEmail,
+} from '@/lib/account-core';
 import {
   formatPositionsDisplay,
   normalizeCustomGrants,
@@ -34,12 +55,7 @@ import {
 } from '@/lib/password-crypto';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
-import {
-  CLEAR_STUDENTS_MIGRATION_KEY,
-  STORAGE_KEY,
-  freshState,
-  parseState,
-} from '@/store/persist';
+import { CLEAR_STUDENTS_MIGRATION_KEY, STORAGE_KEY } from '@/store/persist';
 import { buildStudent } from '@/store/reducers';
 import {
   ACCOUNTS_RESET_EPOCH,
@@ -54,9 +70,17 @@ import type { PersistedState } from '@/store/types';
 import type { AuthProviderKind } from '@/types/auth';
 import type { Gender, Student } from '@/types/models';
 
-export const STUDENT_ACCOUNTS_KEY = 'class10t4:student-accounts:v1';
-const TEACHER_ACCOUNTS_STORAGE_KEY = 'class10t4:teacher-accounts:v1';
-const APPLIED_ACCOUNTS_RESET_KEY = 'class10t4:applied-accounts-reset:v1';
+export {
+  STUDENT_ACCOUNTS_KEY,
+  mergeAuthProviders,
+  normalizeAuthProviders,
+  normalizeEmail,
+  normalizeLoginIdDisplay,
+  normalizeLoginIdKey,
+  validateEmail,
+};
+
+const TEACHER_ACCOUNTS_STORAGE_KEY = TEACHER_ACCOUNTS_KEY;
 export const MIN_STUDENT_PASSWORD_LENGTH = 4;
 
 export type StudentAccountRecord = {
@@ -107,56 +131,20 @@ export type StudentAccountChangeEvent =
 
 type StudentAccountListener = (event: StudentAccountChangeEvent) => void;
 
-const studentListeners = new Set<StudentAccountListener>();
-let storageListenerAttached = false;
+const studentBus = createAccountChangeBus<StudentAccountChangeEvent>(
+  [STUDENT_ACCOUNTS_KEY, STORAGE_KEY],
+  { type: 'synced' },
+);
 let lastRemoteSyncAt = 0;
 let inFlightRemoteSync: Promise<StudentAccountRecord[]> | null = null;
 const REMOTE_SYNC_TTL_MS = 4_000;
 
 function emitStudentAccountsChanged(event: StudentAccountChangeEvent): void {
-  for (const listener of studentListeners) {
-    try {
-      listener(event);
-    } catch {
-      // Ignore listener exceptions
-    }
-  }
+  studentBus.emit(event);
 }
 
 export function subscribeStudentAccountsChanged(listener: StudentAccountListener): () => void {
-  studentListeners.add(listener);
-
-  if (
-    !storageListenerAttached &&
-    Platform.OS === 'web' &&
-    typeof window !== 'undefined' &&
-    typeof window.addEventListener === 'function'
-  ) {
-    storageListenerAttached = true;
-    window.addEventListener('storage', (ev) => {
-      if (ev.key === STUDENT_ACCOUNTS_KEY || ev.key === STORAGE_KEY) {
-        emitStudentAccountsChanged({ type: 'synced' });
-      }
-    });
-  }
-
-  return () => {
-    studentListeners.delete(listener);
-  };
-}
-
-async function awaitBriefly<T>(promise: Promise<T>, timeoutMs = 2_500): Promise<T | null> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      promise.catch(() => null),
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return studentBus.subscribe(listener);
 }
 
 /* ---------- Cryptographic Password Hashing (PBKDF2-HMAC-SHA256 + Legacy SHA-256) ---------- */
@@ -178,64 +166,7 @@ export async function verifyStudentPasswordAsync(
   return verifyPasswordHash(password, storedHash);
 }
 
-/* ---------- Email, Provider & Login ID Validation Helpers ---------- */
-
-const VALID_PROVIDERS: readonly AuthProviderKind[] = ['google', 'github', 'email', 'local'];
-
-export function normalizeEmail(raw: string): string {
-  return raw.trim().toLowerCase();
-}
-
-export function validateEmail(raw: string): string | null {
-  const clean = normalizeEmail(raw);
-  if (!clean) return 'Vui lòng nhập địa chỉ Gmail / email của bạn.';
-  if (clean.length > 120) return 'Địa chỉ email quá dài (tối đa 120 ký tự).';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(clean)) {
-    return 'Địa chỉ email chưa đúng định dạng (VD: ten@gmail.com).';
-  }
-  return null;
-}
-
-export function normalizeAuthProviders(raw: unknown): AuthProviderKind[] {
-  if (!Array.isArray(raw)) return [];
-  const out: AuthProviderKind[] = [];
-  for (const item of raw) {
-    if (
-      typeof item === 'string' &&
-      (VALID_PROVIDERS as readonly string[]).includes(item) &&
-      !out.includes(item as AuthProviderKind)
-    ) {
-      out.push(item as AuthProviderKind);
-    }
-  }
-  return out;
-}
-
-export function mergeAuthProviders(
-  ...lists: (AuthProviderKind[] | undefined | null)[]
-): AuthProviderKind[] {
-  const out: AuthProviderKind[] = [];
-  for (const list of lists) {
-    if (!Array.isArray(list)) continue;
-    for (const item of list) {
-      if (
-        (VALID_PROVIDERS as readonly string[]).includes(item) &&
-        !out.includes(item)
-      ) {
-        out.push(item);
-      }
-    }
-  }
-  return out;
-}
-
-export function normalizeLoginIdDisplay(raw: string): string {
-  return raw.trim().replace(/\s+/g, '').toUpperCase();
-}
-
-export function normalizeLoginIdKey(raw: string): string {
-  return normalizeLoginIdDisplay(raw);
-}
+/* ---------- Login ID & Password Strength Validation Helpers ---------- */
 
 export function validateLoginId(raw: string): string | null {
   const clean = normalizeLoginIdDisplay(raw);
@@ -362,16 +293,14 @@ function mergeTwoStudentRecords(
   const winner = remoteWins ? next : prev;
   const other = remoteWins ? prev : next;
 
-  const mergedProviders = mergeAuthProviders(winner.authProviders, other.authProviders);
-  const email = winner.email || other.email || null;
-  const emailKey = winner.emailKey || other.emailKey || (email ? normalizeEmail(email) : null);
-  const authUserId = winner.authUserId || other.authUserId || null;
-  const avatarUrl = winner.avatarUrl || other.avatarUrl || null;
-  const passwordHash = hasStoredPasswordHash(winner.passwordHash)
-    ? winner.passwordHash
-    : hasStoredPasswordHash(other.passwordHash)
-      ? other.passwordHash
-      : '';
+  const {
+    authProviders: mergedProviders,
+    email,
+    emailKey,
+    authUserId,
+    avatarUrl,
+    passwordHash,
+  } = resolveMergedIdentityFields(winner, other);
   const winnerHasPos = winner.positions !== undefined || winner.position !== undefined;
   const otherHasPos = other.positions !== undefined || other.position !== undefined;
   const resolvedPositions =
@@ -422,41 +351,13 @@ function mergeStudentRecords(
   return Array.from(byId.values());
 }
 
-function parseIsoMs(iso?: string | null): number {
-  if (!iso) return 0;
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-let latestKnownResetMs = parseIsoMs(ACCOUNTS_RESET_EPOCH);
-
-function trackKnownResetMs(ms: number): void {
-  if (ms > latestKnownResetMs) {
-    latestKnownResetMs = ms;
-  }
-}
-
-function safePostResetNowIso(): string {
-  return new Date(Math.max(Date.now(), latestKnownResetMs + 1)).toISOString();
-}
-
-function isBeforeResetEpoch(
-  updatedAt: string | undefined,
-  createdAt: string | undefined,
-  resetMs: number,
-): boolean {
-  if (resetMs <= 0) return false;
-  const latestMs = Math.max(parseIsoMs(updatedAt), parseIsoMs(createdAt));
-  return latestMs < resetMs;
-}
-
 async function readLocalStudentAccounts(): Promise<StudentAccountRecord[]> {
   try {
     const raw = await AsyncStorage.getItem(STUDENT_ACCOUNTS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    const effectiveResetMs = Math.max(parseIsoMs(ACCOUNTS_RESET_EPOCH), latestKnownResetMs);
+    const effectiveResetMs = Math.max(parseIsoMs(ACCOUNTS_RESET_EPOCH), getLatestKnownResetMs());
     return parsed
       .map(parseStudentRecord)
       .filter(
@@ -472,25 +373,7 @@ export async function saveStudentAccounts(records: StudentAccountRecord[]): Prom
   await AsyncStorage.setItem(STUDENT_ACCOUNTS_KEY, JSON.stringify(records));
 }
 
-function isTombstoned(
-  tombIso: string | undefined,
-  updatedAt: string,
-  createdAt: string,
-): boolean {
-  if (!tombIso) return false;
-  const tombMs = Date.parse(tombIso);
-  const updMs = Date.parse(updatedAt);
-  const crtMs = Date.parse(createdAt);
-  const latestMs = Math.max(
-    Number.isFinite(updMs) ? updMs : 0,
-    Number.isFinite(crtMs) ? crtMs : 0,
-  );
-  if (Number.isFinite(tombMs) && latestMs > 0) {
-    return tombMs >= latestMs;
-  }
-  const latestIso = updatedAt >= createdAt ? updatedAt : createdAt;
-  return tombIso.localeCompare(latestIso) >= 0;
-}
+const isTombstoned = isAccountTombstoned;
 
 export async function syncStudentAccountsFromRemote(
   force = false,
@@ -513,7 +396,7 @@ export async function syncStudentAccountsFromRemote(
       const effectiveResetMs = Math.max(
         parseIsoMs(ACCOUNTS_RESET_EPOCH),
         parseIsoMs(remote.accountsResetAt),
-        latestKnownResetMs,
+        getLatestKnownResetMs(),
       );
       trackKnownResetMs(effectiveResetMs);
       const parsedRemote = remote.students
@@ -551,67 +434,6 @@ export async function loadStudentAccounts(options?: {
     return readLocalStudentAccounts();
   }
   return syncStudentAccountsFromRemote(Boolean(options?.forceRemote));
-}
-
-async function readSafePersistedState(): Promise<PersistedState> {
-  const [rawState, clearedFlag, appliedResetRaw] = await Promise.all([
-    AsyncStorage.getItem(STORAGE_KEY),
-    AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
-    AsyncStorage.getItem(APPLIED_ACCOUNTS_RESET_KEY),
-  ]);
-  const epochMs = parseIsoMs(ACCOUNTS_RESET_EPOCH);
-  const appliedMs = parseIsoMs(appliedResetRaw);
-  const effectiveResetMs = Math.max(epochMs, appliedMs, latestKnownResetMs);
-  trackKnownResetMs(effectiveResetMs);
-  const effectiveResetIso =
-    effectiveResetMs <= 0
-      ? null
-      : appliedMs === effectiveResetMs && appliedResetRaw
-        ? appliedResetRaw
-        : epochMs === effectiveResetMs && ACCOUNTS_RESET_EPOCH
-          ? ACCOUNTS_RESET_EPOCH
-          : new Date(effectiveResetMs).toISOString();
-
-  if (rawState) {
-    const parsed = parseState(rawState);
-    const parsedResetMs = parseIsoMs(parsed.accountsResetAt);
-    if (!clearedFlag || (effectiveResetMs > 0 && parsedResetMs < effectiveResetMs)) {
-      return {
-        ...parsed,
-        students: [],
-        registeredTeachers: [],
-        entries: [],
-        attendance: {},
-        dutyLogs: {},
-        fundPaid: {},
-        kudos: [],
-        activityLog: [],
-        polls: (parsed.polls ?? []).map((p) => ({ ...p, votes: {} })),
-        seating: { ...parsed.seating, seats: {}, updatedAt: effectiveResetIso ?? '' },
-        currentStudentId: null,
-        accountsResetAt: effectiveResetIso ?? parsed.accountsResetAt ?? null,
-      };
-    }
-    return parsed;
-  }
-  return {
-    ...freshState(),
-    accountsResetAt: effectiveResetIso,
-  };
-}
-
-function readRawRecordEmailKey(item: unknown): string | null {
-  if (!item || typeof item !== 'object') return null;
-  const r = item as Record<string, unknown>;
-  if (typeof r.emailKey === 'string' && r.emailKey.trim()) return normalizeEmail(r.emailKey);
-  if (typeof r.email === 'string' && r.email.trim()) return normalizeEmail(r.email);
-  return null;
-}
-
-function readRawRecordAuthUserId(item: unknown): string | null {
-  if (!item || typeof item !== 'object') return null;
-  const r = item as Record<string, unknown>;
-  return typeof r.authUserId === 'string' && r.authUserId.trim() ? r.authUserId.trim() : null;
 }
 
 /**

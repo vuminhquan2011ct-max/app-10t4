@@ -10,13 +10,14 @@
  *   for custom titles like "Cán sự môn Toán", and explicit custom permission toggles).
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useMemo, useState, type ReactElement } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { Badge } from '@/components/ui/badge';
 import { Radius, Spacing, type ThemeColor } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useTwoTapConfirm } from '@/hooks/use-two-tap-confirm';
 import {
   CUSTOM_OFFICER_GRANTS,
   OFFICER_POSITIONS,
@@ -64,6 +65,7 @@ export function OfficerPositionEditor({
   onRemoveCustomPreset,
 }: OfficerPositionEditorProps): ReactElement {
   const theme = useTheme();
+  const { isArmed, armOrConfirm, reset: resetConfirm } = useTwoTapConfirm(3_500);
   const [draft, setDraft] = useState('');
   const [saveAsPreset, setSaveAsPreset] = useState(true);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -167,6 +169,7 @@ export function OfficerPositionEditor({
 
   const removePosition = (label: string) => {
     if (disabled) return;
+    resetConfirm();
     const key = label.trim().toLowerCase();
     const nextPositions = normalizedPositions.filter((p) => p.trim().toLowerCase() !== key);
     const nextGrants = nextPositions.length === 0 ? [] : normalizedGrants;
@@ -175,6 +178,7 @@ export function OfficerPositionEditor({
 
   const clearAll = () => {
     if (disabled) return;
+    resetConfirm();
     onChange([], []);
   };
 
@@ -225,17 +229,33 @@ export function OfficerPositionEditor({
           {normalizedPositions.length > 0 || normalizedGrants.length > 0 ? (
             <Pressable
               disabled={disabled}
-              onPress={clearAll}
+              onPress={() => armOrConfirm('clear_all', clearAll)}
+              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
               accessibilityRole="button"
-              accessibilityLabel="Hủy hết chức vụ"
+              accessibilityLabel={
+                isArmed('clear_all') ? 'Nhấn lại để hủy hết chức vụ' : 'Hủy hết chức vụ'
+              }
               style={({ pressed }) => [
                 styles.clearAllBtn,
-                { backgroundColor: theme.dangerSoft, borderColor: theme.danger },
+                {
+                  backgroundColor: isArmed('clear_all') ? '#DC2626' : theme.dangerSoft,
+                  borderColor: isArmed('clear_all') ? '#DC2626' : theme.danger,
+                },
                 pressed && styles.pressed,
                 disabled && styles.disabled,
               ]}>
-              <Ionicons name="close-circle-outline" size={12} color={theme.danger} />
-              <Text style={[styles.clearAllText, { color: theme.danger }]}>Hủy hết</Text>
+              <Ionicons
+                name={isArmed('clear_all') ? 'alert-circle' : 'close-circle-outline'}
+                size={12}
+                color={isArmed('clear_all') ? '#FFFFFF' : theme.danger}
+              />
+              <Text
+                style={[
+                  styles.clearAllText,
+                  { color: isArmed('clear_all') ? '#FFFFFF' : theme.danger },
+                ]}>
+                {isArmed('clear_all') ? 'Xác nhận?' : 'Hủy hết'}
+              </Text>
             </Pressable>
           ) : null}
         </View>
@@ -246,6 +266,8 @@ export function OfficerPositionEditor({
               const meta = getOfficerPositionMeta(pos);
               const tone: AccentTone = meta?.color ?? 'purple';
               const softTone = softToneOf(tone);
+              const posConfirmKey = `pos:${pos.trim().toLowerCase()}`;
+              const armedPos = isArmed(posConfirmKey);
               return (
                 <View
                   key={pos}
@@ -261,12 +283,25 @@ export function OfficerPositionEditor({
                   <Text style={[styles.activePillText, { color: theme[tone] }]}>{pos}</Text>
                   <Pressable
                     disabled={disabled}
-                    onPress={() => removePosition(pos)}
-                    hitSlop={8}
+                    onPress={() => armOrConfirm(posConfirmKey, () => removePosition(pos))}
+                    hitSlop={
+                      armedPos
+                        ? { top: 10, bottom: 10, left: 8, right: 8 }
+                        : { top: 13, bottom: 13, left: 13, right: 13 }
+                    }
                     accessibilityRole="button"
-                    accessibilityLabel={`Gỡ chức vụ ${pos}`}
-                    style={({ pressed }) => [styles.removeX, pressed && styles.pressed]}>
-                    <Ionicons name="close" size={13} color={theme[tone]} />
+                    accessibilityLabel={
+                      armedPos ? `Nhấn lại để gỡ chức vụ ${pos}` : `Gỡ chức vụ ${pos}`
+                    }
+                    style={({ pressed }) => [
+                      armedPos ? styles.armedPillBtn : styles.removeX,
+                      pressed && styles.pressed,
+                    ]}>
+                    {armedPos ? (
+                      <Text style={styles.armedPillText}>Xoá?</Text>
+                    ) : (
+                      <Ionicons name="close" size={13} color={theme[tone]} />
+                    )}
                   </Pressable>
                 </View>
               );
@@ -325,6 +360,7 @@ export function OfficerPositionEditor({
           <Pressable
             disabled={disabled || !draft.trim()}
             onPress={handleAddCustom}
+            hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
             accessibilityRole="button"
             accessibilityLabel="Thêm chức vụ tự ghi"
             style={({ pressed }) => [
@@ -339,12 +375,12 @@ export function OfficerPositionEditor({
             <Ionicons
               name="add"
               size={16}
-              color={draft.trim() ? '#FFFFFF' : theme.textMuted}
+              color={draft.trim() ? theme.accentOnFill : theme.textMuted}
             />
             <Text
               style={[
                 styles.addBtnText,
-                { color: draft.trim() ? '#FFFFFF' : theme.textMuted },
+                { color: draft.trim() ? theme.accentOnFill : theme.textMuted },
               ]}>
               Thêm
             </Text>
@@ -355,6 +391,10 @@ export function OfficerPositionEditor({
           <Pressable
             disabled={disabled}
             onPress={() => setSaveAsPreset((v) => !v)}
+            hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: saveAsPreset }}
+            accessibilityLabel="Lưu làm mẫu gợi ý cho cả lớp"
             style={styles.presetToggleRow}>
             <Ionicons
               name={saveAsPreset ? 'checkbox' : 'square-outline'}
@@ -382,7 +422,9 @@ export function OfficerPositionEditor({
                 key={opt.key}
                 disabled={disabled}
                 onPress={() => togglePosition(opt.label)}
+                hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
                 accessibilityRole="button"
+                accessibilityLabel={opt.label}
                 accessibilityState={{ selected: active }}
                 style={({ pressed }) => [
                   styles.choiceChip,
@@ -420,6 +462,8 @@ export function OfficerPositionEditor({
           <View style={styles.pillWrap}>
             {uniqueCustomPresets.map((preset) => {
               const active = selectedKeys.has(preset.trim().toLowerCase());
+              const presetConfirmKey = `preset:${preset.trim().toLowerCase()}`;
+              const armedPreset = isArmed(presetConfirmKey);
               return (
                 <View
                   key={preset}
@@ -433,6 +477,10 @@ export function OfficerPositionEditor({
                   <Pressable
                     disabled={disabled}
                     onPress={() => togglePosition(preset)}
+                    hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={`Chọn mẫu chức vụ ${preset}`}
                     style={styles.customPresetTap}>
                     <Ionicons
                       name={active ? 'checkmark-circle' : 'sparkles-outline'}
@@ -450,16 +498,29 @@ export function OfficerPositionEditor({
                   {onRemoveCustomPreset ? (
                     <Pressable
                       disabled={disabled}
-                      onPress={() => onRemoveCustomPreset(preset)}
-                      hitSlop={6}
+                      onPress={() =>
+                        armOrConfirm(presetConfirmKey, () => onRemoveCustomPreset(preset))
+                      }
+                      hitSlop={{ top: 11, bottom: 11, left: 10, right: 10 }}
                       accessibilityRole="button"
-                      accessibilityLabel={`Xoá mẫu chức vụ ${preset}`}
-                      style={styles.presetDeleteBtn}>
-                      <Ionicons
-                        name="close"
-                        size={12}
-                        color={active ? 'rgba(255,255,255,0.9)' : theme.purple}
-                      />
+                      accessibilityLabel={
+                        armedPreset
+                          ? `Nhấn lại để xoá mẫu chức vụ ${preset}`
+                          : `Xoá mẫu chức vụ ${preset}`
+                      }
+                      style={[
+                        styles.presetDeleteBtn,
+                        armedPreset && styles.presetDeleteArmed,
+                      ]}>
+                      {armedPreset ? (
+                        <Text style={styles.armedPillText}>Xoá?</Text>
+                      ) : (
+                        <Ionicons
+                          name="close"
+                          size={12}
+                          color={active ? 'rgba(255,255,255,0.9)' : theme.purple}
+                        />
+                      )}
                     </Pressable>
                   ) : null}
                 </View>
@@ -478,6 +539,10 @@ export function OfficerPositionEditor({
         <Pressable
           disabled={disabled}
           onPress={() => setAdvancedOpen((v) => !v)}
+          hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: advancedOpen }}
+          accessibilityLabel="Tùy chỉnh quyền hạn riêng nâng cao"
           style={styles.advancedHead}>
           <View style={styles.trayTitleRow}>
             <Ionicons name="key-outline" size={14} color={theme.accent} />
@@ -515,6 +580,7 @@ export function OfficerPositionEditor({
                   disabled={disabled}
                   onPress={() => toggleGrant(grant.key)}
                   accessibilityRole="checkbox"
+                  accessibilityLabel={`${grant.label}: ${grant.description}`}
                   accessibilityState={{ checked: active }}
                   style={({ pressed }) => [
                     styles.grantRow,
@@ -584,6 +650,8 @@ const styles = StyleSheet.create({
   clearAllBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 28,
     gap: 4,
     paddingHorizontal: 9,
     paddingVertical: 4,
@@ -609,6 +677,19 @@ const styles = StyleSheet.create({
     borderRadius: 9,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  armedPillBtn: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: Radius.pill,
+    backgroundColor: '#DC2626',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  armedPillText: {
+    color: '#FFFFFF',
+    fontSize: 10.5,
+    fontWeight: '900',
   },
   capStrip: {
     paddingTop: Spacing.two,
@@ -684,8 +765,14 @@ const styles = StyleSheet.create({
   },
   presetDeleteBtn: {
     paddingRight: 8,
-    paddingLeft: 2,
+    paddingLeft: 4,
     paddingVertical: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  presetDeleteArmed: {
+    backgroundColor: '#DC2626',
+    paddingHorizontal: 8,
   },
   advancedBox: {
     borderRadius: Radius.md,

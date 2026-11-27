@@ -14,8 +14,27 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
 
+import {
+  STUDENT_ACCOUNTS_KEY,
+  TEACHER_ACCOUNTS_KEY,
+  awaitBriefly,
+  createAccountChangeBus,
+  getLatestKnownResetMs,
+  isAccountTombstoned,
+  isBeforeResetEpoch,
+  mergeAuthProviders,
+  normalizeAuthProviders,
+  normalizeEmail,
+  normalizeLoginIdDisplay,
+  normalizeLoginIdKey,
+  parseIsoMs,
+  readSafePersistedState,
+  resolveMergedIdentityFields,
+  safePostResetNowIso,
+  trackKnownResetMs,
+  validateEmail,
+} from '@/lib/account-core';
 import {
   checkLoginRateLimit,
   clearLoginRateLimit,
@@ -24,24 +43,10 @@ import {
   recordLoginFailure,
   verifyPasswordHash,
 } from '@/lib/password-crypto';
-import {
-  STUDENT_ACCOUNTS_KEY,
-  isEmailTaken,
-  mergeAuthProviders,
-  normalizeAuthProviders,
-  normalizeEmail,
-  normalizeLoginIdDisplay,
-  normalizeLoginIdKey,
-  validateEmail,
-} from '@/lib/student-accounts';
+import { isEmailTaken } from '@/lib/student-accounts';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { createId, normalizeName } from '@/lib/utils';
-import {
-  CLEAR_STUDENTS_MIGRATION_KEY,
-  STORAGE_KEY,
-  freshState,
-  parseState,
-} from '@/store/persist';
+import { CLEAR_STUDENTS_MIGRATION_KEY, STORAGE_KEY } from '@/store/persist';
 import {
   ACCOUNTS_RESET_EPOCH,
   fetchAuthRegistryRemote,
@@ -55,7 +60,7 @@ import type { PersistedState } from '@/store/types';
 import type { AuthProviderKind } from '@/types/auth';
 import type { RegisteredTeacherPublic } from '@/types/models';
 
-export { isEmailTaken, normalizeEmail, validateEmail };
+export { TEACHER_ACCOUNTS_KEY, isEmailTaken, normalizeEmail, validateEmail };
 
 export async function hashTeacherPassword(password: string): Promise<string> {
   return hashPasswordV2(password);
@@ -68,8 +73,6 @@ export async function verifyTeacherPasswordHash(
   return verifyPasswordHash(password, storedHash);
 }
 
-export const TEACHER_ACCOUNTS_KEY = 'class10t4:teacher-accounts:v1';
-const APPLIED_ACCOUNTS_RESET_KEY = 'class10t4:applied-accounts-reset:v1';
 export const MIN_TEACHER_PASSWORD_LENGTH = 4;
 
 export type TeacherRole = 'teacher' | 'subject_teacher';
@@ -116,8 +119,10 @@ export type TeacherAccountChangeEvent =
 
 type TeacherAccountListener = (event: TeacherAccountChangeEvent) => void;
 
-const teacherListeners = new Set<TeacherAccountListener>();
-let teacherStorageListenerAttached = false;
+const teacherBus = createAccountChangeBus<TeacherAccountChangeEvent>(
+  [TEACHER_ACCOUNTS_KEY, STORAGE_KEY],
+  { type: 'synced' },
+);
 let lastRemoteTeacherSyncAt = 0;
 let inFlightTeacherSync: Promise<TeacherAccountRecord[]> | null = null;
 const REMOTE_TEACHER_SYNC_TTL_MS = 4_000;
@@ -135,49 +140,11 @@ export function toPublicTeacher(acc: TeacherAccountRecord): RegisteredTeacherPub
 }
 
 function emitTeacherAccountsChanged(event: TeacherAccountChangeEvent): void {
-  for (const listener of teacherListeners) {
-    try {
-      listener(event);
-    } catch {
-      // Ignore listener exceptions
-    }
-  }
+  teacherBus.emit(event);
 }
 
 export function subscribeTeacherAccountsChanged(listener: TeacherAccountListener): () => void {
-  teacherListeners.add(listener);
-
-  if (
-    !teacherStorageListenerAttached &&
-    Platform.OS === 'web' &&
-    typeof window !== 'undefined' &&
-    typeof window.addEventListener === 'function'
-  ) {
-    teacherStorageListenerAttached = true;
-    window.addEventListener('storage', (ev) => {
-      if (ev.key === TEACHER_ACCOUNTS_KEY || ev.key === STORAGE_KEY) {
-        emitTeacherAccountsChanged({ type: 'synced' });
-      }
-    });
-  }
-
-  return () => {
-    teacherListeners.delete(listener);
-  };
-}
-
-async function awaitBriefly<T>(promise: Promise<T>, timeoutMs = 2_500): Promise<T | null> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      promise.catch(() => null),
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return teacherBus.subscribe(listener);
 }
 
 /* ---------- Login ID Validation Helpers ---------- */
@@ -277,16 +244,14 @@ function mergeTwoTeacherRecords(
   const winner = remoteWins ? next : prev;
   const other = remoteWins ? prev : next;
 
-  const mergedProviders = mergeAuthProviders(winner.authProviders, other.authProviders);
-  const email = winner.email || other.email || null;
-  const emailKey = winner.emailKey || other.emailKey || (email ? normalizeEmail(email) : null);
-  const authUserId = winner.authUserId || other.authUserId || null;
-  const avatarUrl = winner.avatarUrl || other.avatarUrl || null;
-  const passwordHash = hasStoredPasswordHash(winner.passwordHash)
-    ? winner.passwordHash
-    : hasStoredPasswordHash(other.passwordHash)
-      ? other.passwordHash
-      : '';
+  const {
+    authProviders: mergedProviders,
+    email,
+    emailKey,
+    authUserId,
+    avatarUrl,
+    passwordHash,
+  } = resolveMergedIdentityFields(winner, other);
 
   return {
     ...winner,
@@ -313,41 +278,13 @@ function mergeTeacherRecords(
   return Array.from(byId.values());
 }
 
-function parseIsoMs(iso?: string | null): number {
-  if (!iso) return 0;
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-let latestKnownResetMs = parseIsoMs(ACCOUNTS_RESET_EPOCH);
-
-function trackKnownResetMs(ms: number): void {
-  if (ms > latestKnownResetMs) {
-    latestKnownResetMs = ms;
-  }
-}
-
-function safePostResetNowIso(): string {
-  return new Date(Math.max(Date.now(), latestKnownResetMs + 1)).toISOString();
-}
-
-function isBeforeResetEpoch(
-  updatedAt: string | undefined,
-  createdAt: string | undefined,
-  resetMs: number,
-): boolean {
-  if (resetMs <= 0) return false;
-  const latestMs = Math.max(parseIsoMs(updatedAt), parseIsoMs(createdAt));
-  return latestMs < resetMs;
-}
-
 async function readLocalTeacherAccounts(): Promise<TeacherAccountRecord[]> {
   try {
     const raw = await AsyncStorage.getItem(TEACHER_ACCOUNTS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    const effectiveResetMs = Math.max(parseIsoMs(ACCOUNTS_RESET_EPOCH), latestKnownResetMs);
+    const effectiveResetMs = Math.max(parseIsoMs(ACCOUNTS_RESET_EPOCH), getLatestKnownResetMs());
     return parsed
       .map(parseTeacherRecord)
       .filter(
@@ -363,25 +300,7 @@ export async function saveTeacherAccounts(records: TeacherAccountRecord[]): Prom
   await AsyncStorage.setItem(TEACHER_ACCOUNTS_KEY, JSON.stringify(records));
 }
 
-function isTombstoned(
-  tombIso: string | undefined,
-  updatedAt: string,
-  createdAt: string,
-): boolean {
-  if (!tombIso) return false;
-  const tombMs = Date.parse(tombIso);
-  const updMs = Date.parse(updatedAt);
-  const crtMs = Date.parse(createdAt);
-  const latestMs = Math.max(
-    Number.isFinite(updMs) ? updMs : 0,
-    Number.isFinite(crtMs) ? crtMs : 0,
-  );
-  if (Number.isFinite(tombMs) && latestMs > 0) {
-    return tombMs >= latestMs;
-  }
-  const latestIso = updatedAt >= createdAt ? updatedAt : createdAt;
-  return tombIso.localeCompare(latestIso) >= 0;
-}
+const isTombstoned = isAccountTombstoned;
 
 export async function syncTeacherAccountsFromRemote(
   force = false,
@@ -404,7 +323,7 @@ export async function syncTeacherAccountsFromRemote(
       const effectiveResetMs = Math.max(
         parseIsoMs(ACCOUNTS_RESET_EPOCH),
         parseIsoMs(remote.accountsResetAt),
-        latestKnownResetMs,
+        getLatestKnownResetMs(),
       );
       trackKnownResetMs(effectiveResetMs);
       const parsedRemote = remote.teachers
@@ -442,53 +361,6 @@ export async function loadTeacherAccounts(options?: {
     return readLocalTeacherAccounts();
   }
   return syncTeacherAccountsFromRemote(Boolean(options?.forceRemote));
-}
-
-async function readSafePersistedState(): Promise<PersistedState> {
-  const [rawState, clearedFlag, appliedResetRaw] = await Promise.all([
-    AsyncStorage.getItem(STORAGE_KEY),
-    AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
-    AsyncStorage.getItem(APPLIED_ACCOUNTS_RESET_KEY),
-  ]);
-  const epochMs = parseIsoMs(ACCOUNTS_RESET_EPOCH);
-  const appliedMs = parseIsoMs(appliedResetRaw);
-  const effectiveResetMs = Math.max(epochMs, appliedMs, latestKnownResetMs);
-  trackKnownResetMs(effectiveResetMs);
-  const effectiveResetIso =
-    effectiveResetMs <= 0
-      ? null
-      : appliedMs === effectiveResetMs && appliedResetRaw
-        ? appliedResetRaw
-        : epochMs === effectiveResetMs && ACCOUNTS_RESET_EPOCH
-          ? ACCOUNTS_RESET_EPOCH
-          : new Date(effectiveResetMs).toISOString();
-
-  if (rawState) {
-    const parsed = parseState(rawState);
-    const parsedResetMs = parseIsoMs(parsed.accountsResetAt);
-    if (!clearedFlag || (effectiveResetMs > 0 && parsedResetMs < effectiveResetMs)) {
-      return {
-        ...parsed,
-        students: [],
-        registeredTeachers: [],
-        entries: [],
-        attendance: {},
-        dutyLogs: {},
-        fundPaid: {},
-        kudos: [],
-        activityLog: [],
-        polls: (parsed.polls ?? []).map((p) => ({ ...p, votes: {} })),
-        seating: { ...parsed.seating, seats: {}, updatedAt: effectiveResetIso ?? '' },
-        currentStudentId: null,
-        accountsResetAt: effectiveResetIso ?? parsed.accountsResetAt ?? null,
-      };
-    }
-    return parsed;
-  }
-  return {
-    ...freshState(),
-    accountsResetAt: effectiveResetIso,
-  };
 }
 
 async function persistTeacherToLocalClassState(

@@ -28,6 +28,7 @@ import {
 } from 'react';
 import { Platform } from 'react-native';
 
+import { reportNonFatal } from '@/lib/logger';
 import { hasStoredPasswordHash, verifyPasswordHash } from '@/lib/password-crypto';
 import { subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import {
@@ -174,7 +175,9 @@ function hasAuthCallbackMarkers(url: string): boolean {
 function clearStalePendingRegistrationMeta(user: User): void {
   const meta = user.user_metadata as Record<string, unknown> | undefined;
   if (meta && meta.pending_registration) {
-    void supabase.auth.updateUser({ data: { pending_registration: null } }).catch(() => {});
+    void supabase.auth
+      .updateUser({ data: { pending_registration: null } })
+      .catch((err) => reportNonFatal('auth-store', err, 'clear-pending-reg-meta'));
   }
 }
 
@@ -488,6 +491,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
   const inFlightResetRef = useRef<Promise<boolean> | null>(null);
   const unlockedRef = useRef(false);
+  const authSubmitMutexRef = useRef(false);
   const activeSessionRef = useRef<{
     accountRole: AccountRole;
     studentId: string | null;
@@ -606,10 +610,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
 
           if (isSupabaseConfigured && !preserveSupabaseSession) {
-            await supabase.auth.signOut().catch(() => {});
+            await supabase.auth
+              .signOut()
+              .catch((err) => reportNonFatal('auth-store', err, 'reset-sign-out'));
           }
 
-          await AsyncStorage.setItem(APPLIED_ACCOUNTS_RESET_KEY, targetResetAt).catch(() => {});
+          await AsyncStorage.setItem(APPLIED_ACCOUNTS_RESET_KEY, targetResetAt).catch((err) =>
+            reportNonFatal('auth-store', err, 'save-reset-epoch'),
+          );
 
           if (!preserveSupabaseSession) {
             passwordRecoveryRef.current = false;
@@ -1192,7 +1200,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setStudentAccountsVersion((v) => v + 1);
             setTeacherAccountsVersion((v) => v + 1);
           })
-          .catch(() => {});
+          .catch((err) => reportNonFatal('auth-store', err, 'boot-refresh-accounts'));
       }
     });
 
@@ -1306,7 +1314,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (isSupabaseConfigured) {
           let timer: ReturnType<typeof setTimeout> | null = null;
           const remoteReg = await Promise.race([
-            fetchAuthRegistryRemote().catch(() => null),
+            fetchAuthRegistryRemote().catch((err) => {
+              reportNonFatal('auth-store', err, 'boot-fetch-auth-registry');
+              return null;
+            }),
             new Promise<null>((resolve) => {
               timer = setTimeout(() => resolve(null), 1_500);
             }),
@@ -1353,7 +1364,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setStudentAccountsVersion((v) => v + 1);
             setTeacherAccountsVersion((v) => v + 1);
           })
-          .catch(() => {});
+          .catch((err) => reportNonFatal('auth-store', err, 'boot-refresh-accounts'));
 
         // 1. Handle initial Web URL or Native deep-link BEFORE dropping loading splash.
         let callbackUser: User | null = null;
@@ -1384,7 +1395,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           );
           const supaUser =
             callbackUser ??
-            (await supabase.auth.getSession().catch(() => null))?.data.session?.user ??
+            (
+              await supabase.auth.getSession().catch((err) => {
+                reportNonFatal('auth-store', err, 'boot-get-session');
+                return null;
+              })
+            )?.data.session?.user ??
             null;
           if (!active) return;
 
@@ -1996,6 +2012,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: msg };
       }
 
+      if (authSubmitMutexRef.current) {
+        return { ok: false, error: 'Đang xử lý yêu cầu trước đó...' };
+      }
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       setAuthCallbackError(null);
@@ -2151,11 +2171,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         setError(teacherRes.error);
         return { ok: false, error: teacherRes.error };
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'sign-in-email-or-id');
         const msg = 'Không thể đăng nhập lúc này. Vui lòng thử lại.';
         setError(msg);
         return { ok: false, error: msg };
       } finally {
+        authSubmitMutexRef.current = false;
         suppressAutoResolveRef.current = false;
         setBusy(false);
       }
@@ -2206,6 +2228,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
 
+      if (authSubmitMutexRef.current) {
+        return { ok: false, error: 'Đang xử lý yêu cầu đăng ký trước đó...' };
+      }
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       setAuthCallbackError(null);
@@ -2382,11 +2408,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setPendingEmailConfirmation(cleanEmail);
         await refreshTeacherAccountCount();
         return { ok: true, needsEmailConfirmation: needsConfirmation || true };
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'register-email-password');
         const msg = 'Không thể đăng ký tài khoản lúc này. Vui lòng thử lại.';
         setError(msg);
         return { ok: false, error: msg };
       } finally {
+        authSubmitMutexRef.current = false;
         suppressAutoResolveRef.current = false;
         setBusy(false);
       }
@@ -2413,6 +2441,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           error: 'Tính năng gửi email đặt lại mật khẩu cần kết nối máy chủ Supabase.',
         };
       }
+      if (authSubmitMutexRef.current) {
+        return { ok: false, error: 'Đang xử lý yêu cầu trước đó...' };
+      }
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -2423,11 +2455,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return { ok: false, error: msg };
         }
         return { ok: true };
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'request-password-reset');
         const msg = 'Không thể gửi email đặt lại mật khẩu. Vui lòng thử lại.';
         setError(msg);
         return { ok: false, error: msg };
       } finally {
+        authSubmitMutexRef.current = false;
         setBusy(false);
       }
     },
@@ -2447,6 +2481,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: 'Chưa cấu hình máy chủ Supabase.' };
       }
 
+      if (authSubmitMutexRef.current) {
+        return { ok: false, error: 'Đang xử lý yêu cầu trước đó...' };
+      }
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       suppressAutoResolveRef.current = true;
@@ -2515,11 +2553,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setPasswordRecoveryPending(false);
         clearWebAuthUrlParams();
         return { ok: true };
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'complete-password-reset');
         const msg = 'Không thể cập nhật mật khẩu mới. Vui lòng thử lại.';
         setError(msg);
         return { ok: false, error: msg };
       } finally {
+        authSubmitMutexRef.current = false;
         suppressAutoResolveRef.current = false;
         setBusy(false);
       }
@@ -2533,12 +2573,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAuthCallbackError(null);
     clearWebAuthUrlParams();
     if (isSupabaseConfigured) {
-      const sess = await supabase.auth.getSession().catch(() => null);
+      const sess = await supabase.auth.getSession().catch((err) => {
+        reportNonFatal('auth-store', err, 'cancel-recovery-get-session');
+        return null;
+      });
       const supaUid = sess?.data.session?.user?.id ?? null;
       if (!unlockedRef.current || (supaUid && supaUid !== activeSessionRef.current.authUserId)) {
         signingOutRef.current = true;
         try {
-          await supabase.auth.signOut().catch(() => {});
+          await supabase.auth
+            .signOut()
+            .catch((err) => reportNonFatal('auth-store', err, 'cancel-recovery-sign-out'));
         } finally {
           signingOutRef.current = false;
         }
@@ -2553,6 +2598,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!isSupabaseConfigured) {
         return { ok: false, error: 'Chưa cấu hình máy chủ Supabase.' };
       }
+      if (authSubmitMutexRef.current) {
+        return { ok: false, error: 'Đang xử lý yêu cầu trước đó...' };
+      }
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -2561,9 +2610,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return { ok: false, error: res.error ?? 'Không thể gửi lại email xác nhận lúc này.' };
         }
         return { ok: true };
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'resend-confirmation-email');
         return { ok: false, error: 'Không thể gửi lại email xác nhận. Vui lòng thử lại.' };
       } finally {
+        authSubmitMutexRef.current = false;
         setBusy(false);
       }
     },
@@ -2734,6 +2785,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       rawDisplayName?: string,
       options?: SignInOptions,
     ): Promise<boolean> => {
+      if (authSubmitMutexRef.current) return false;
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -2775,10 +2828,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         setError('Tài khoản học sinh cần đăng nhập bằng Gmail, Google/GitHub hoặc Số ID.');
         return false;
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'sign-in-password');
         setError('Không thể lưu phiên đăng nhập. Vui lòng thử lại.');
         return false;
       } finally {
+        authSubmitMutexRef.current = false;
         setBusy(false);
       }
     },
@@ -2787,6 +2842,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signInAsStudent = useCallback(
     async (rawLoginId: string, rawPassword: string): Promise<boolean> => {
+      if (authSubmitMutexRef.current) return false;
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -2797,10 +2854,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         await enterMatchedStudent(res.account, { isFreshSignIn: true });
         return true;
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'sign-in-student');
         setError('Không thể đăng nhập lúc này. Vui lòng thử lại.');
         return false;
       } finally {
+        authSubmitMutexRef.current = false;
         setBusy(false);
       }
     },
@@ -2811,6 +2870,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (
       input: RegisterStudentInput,
     ): Promise<{ ok: boolean; duplicateId?: boolean; passwordMatched?: boolean; error?: string }> => {
+      if (authSubmitMutexRef.current) {
+        return { ok: false, error: 'Đang xử lý yêu cầu đăng ký trước đó...' };
+      }
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -2836,11 +2899,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           forceNewAccountWelcome: true,
         });
         return { ok: true };
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'register-student');
         const msg = 'Không thể tạo tài khoản học sinh. Vui lòng thử lại.';
         setError(msg);
         return { ok: false, error: msg };
       } finally {
+        authSubmitMutexRef.current = false;
         setBusy(false);
       }
     },
@@ -2867,6 +2932,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       rawPassword: string,
       expectedRole?: TeacherRole,
     ): Promise<boolean> => {
+      if (authSubmitMutexRef.current) return false;
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -2877,10 +2944,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         await enterMatchedTeacher(res.account, { isFreshSignIn: true });
         return true;
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'sign-in-teacher');
         setError('Không thể đăng nhập tài khoản giáo viên lúc này. Vui lòng thử lại.');
         return false;
       } finally {
+        authSubmitMutexRef.current = false;
         setBusy(false);
       }
     },
@@ -2891,6 +2960,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (
       input: RegisterTeacherInput,
     ): Promise<{ ok: boolean; duplicateId?: boolean; passwordMatched?: boolean; error?: string }> => {
+      if (authSubmitMutexRef.current) {
+        return { ok: false, error: 'Đang xử lý yêu cầu đăng ký trước đó...' };
+      }
+      authSubmitMutexRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -2930,11 +3003,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           forceNewAccountWelcome: true,
         });
         return { ok: true };
-      } catch {
+      } catch (err) {
+        reportNonFatal('auth-store', err, 'register-teacher');
         const msg = 'Không thể tạo tài khoản giáo viên. Vui lòng thử lại.';
         setError(msg);
         return { ok: false, error: msg };
       } finally {
+        authSubmitMutexRef.current = false;
         setBusy(false);
       }
     },
@@ -3085,7 +3160,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         AsyncStorage.removeItem(PASS_AUTH_KEY),
         AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {}),
         AsyncStorage.removeItem(PENDING_OAUTH_LINK_KEY).catch(() => {}),
-        isSupabaseConfigured ? supabase.auth.signOut().catch(() => {}) : Promise.resolve(),
+        isSupabaseConfigured
+          ? supabase.auth
+              .signOut()
+              .catch((err) => reportNonFatal('auth-store', err, 'sign-out-supabase'))
+          : Promise.resolve(),
       ]);
       passwordRecoveryRef.current = false;
       unlockedRef.current = false;
@@ -3155,7 +3234,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       await applyAccountsResetIfNeeded(remoteRes.resetAt);
       return { ok: true };
-    } catch {
+    } catch (err) {
+      reportNonFatal('auth-store', err, 'reset-all-accounts');
       const msg = 'Không thể reset toàn bộ tài khoản lúc này. Vui lòng thử lại.';
       setError(msg);
       return { ok: false, error: msg };
@@ -3263,7 +3343,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           teacherId,
           name: cleanName || undefined,
           subject: cleanSub,
-        }).catch(() => {});
+        }).catch((err) => reportNonFatal('auth-store', err, 'update-subject-teacher'));
         await refreshTeacherAccountCount();
       }
       await persistSession({
@@ -3321,10 +3401,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         if (teacherId) {
-          const res = await updateTeacherAccount({ teacherId, name: clean }).catch(() => ({
-            ok: false,
-            account: undefined,
-          }));
+          const res = await updateTeacherAccount({ teacherId, name: clean }).catch((err) => {
+            reportNonFatal('auth-store', err, 'rename-teacher');
+            return {
+              ok: false,
+              account: undefined,
+            };
+          });
           if (!res.ok) return false;
           const finalName = res.account?.name || clean;
           await refreshTeacherAccountCount();

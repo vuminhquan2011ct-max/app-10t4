@@ -5,7 +5,7 @@
  * classmates with colorful stickers, kind notes, and animated claps.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -18,6 +18,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
+import { ConfirmActionButton } from '@/components/ui/confirm-action-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { Screen } from '@/components/ui/screen';
@@ -170,6 +171,9 @@ export default function KudosScreen() {
                   onPress={() =>
                     router.push({ pathname: '/student/[id]', params: { id: student!.id } } as never)
                   }
+                  hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Xem hồ sơ ${student!.name}, ${count} lời khen`}
                   style={styles.starPill}>
                   <Avatar name={student!.name} size={22} />
                   <Text style={styles.starName} numberOfLines={1}>
@@ -213,6 +217,9 @@ export default function KudosScreen() {
                   <Pressable
                     key={key}
                     onPress={() => setSticker(key)}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={meta.label}
                     style={({ pressed }) => [
                       styles.stickerTile,
                       {
@@ -246,6 +253,9 @@ export default function KudosScreen() {
 
             <Pressable
               onPress={() => setAnonymous((v) => !v)}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: anonymous }}
+              accessibilityLabel={anonymous ? 'Gửi ẩn danh' : 'Hiện tên người gửi'}
               style={[styles.anonRow, { backgroundColor: theme.backgroundElement }]}>
               <Ionicons
                 name={anonymous ? 'glasses' : 'person-circle'}
@@ -320,6 +330,8 @@ export default function KudosScreen() {
                         router.push({ pathname: '/student/[id]', params: { id: recipient.id } } as never);
                       }
                     }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Xem hồ sơ ${recipient?.name ?? 'Thành viên lớp'}`}
                     style={styles.recipientRow}>
                     <Avatar name={recipient?.name ?? '?'} size={42} ring />
                     <View style={styles.flex}>
@@ -349,6 +361,9 @@ export default function KudosScreen() {
                   <View style={styles.footerRight}>
                     <Pressable
                       onPress={() => handleClap(item.id)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Vỗ tay chúc mừng (${item.claps} lượt)`}
                       style={({ pressed }) => [
                         styles.clapBtn,
                         { backgroundColor: clapped ? theme.goldSoft : theme.backgroundElement },
@@ -364,14 +379,14 @@ export default function KudosScreen() {
                       </Text>
                     </Pressable>
                     {canEditClass ? (
-                      <Pressable
-                        onPress={() => {
+                      <ConfirmActionButton
+                        onConfirm={() => {
                           removeKudos(item.id);
                           showToast('Đã xoá lời khen', 'warning');
                         }}
-                        hitSlop={8}>
-                        <Ionicons name="trash-outline" size={15} color={theme.textMuted} />
-                      </Pressable>
+                        accessibilityLabel={`Xoá lời khen gửi ${recipient?.name ?? 'thành viên lớp'}`}
+                        confirmAccessibilityLabel="Nhấn lại để xoá lời khen"
+                      />
                     ) : null}
                   </View>
                 </View>
@@ -469,6 +484,8 @@ const styles = StyleSheet.create({
   clapBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 32,
     gap: 5,
     paddingHorizontal: 12,
     paddingVertical: 6,

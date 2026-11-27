@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
+import { ConfirmActionButton } from '@/components/ui/confirm-action-button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
@@ -251,16 +252,14 @@ export default function ScheduleScreen() {
                 </Text>
               </View>
               {isTeacher ? (
-                <Pressable
-                  onPress={() => {
+                <ConfirmActionButton
+                  onConfirm={() => {
                     removeScheduleSlot(slot.id);
                     showToast('Đã xóa tiết học', 'warning');
                   }}
-                  hitSlop={8}
-                  accessibilityRole="button"
-                  accessibilityLabel="Xóa tiết học">
-                  <Ionicons name="trash-outline" size={16} color={theme.textMuted} />
-                </Pressable>
+                  accessibilityLabel={`Xoá tiết ${slot.period} môn ${slot.subject}`}
+                  confirmAccessibilityLabel={`Nhấn lại để xoá tiết ${slot.period} môn ${slot.subject}`}
+                />
               ) : null}
             </View>
           ))}
@@ -290,6 +289,9 @@ export default function ScheduleScreen() {
             <Pressable
               key={w.day}
               onPress={() => setSelectedDay(w.day)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`Xem lịch ${w.label}`}
               style={[
                 styles.dayBtn,
                 {
@@ -325,6 +327,12 @@ export default function ScheduleScreen() {
       <FadeIn index={1}>
         <Pressable
           onPress={() => cycleDuty(selectedDay)}
+          accessibilityRole="button"
+          accessibilityLabel={
+            canManageDuty
+              ? `Đổi tổ trực nhật ${SCHOOL_WEEKDAYS.find((w) => w.day === selectedDay)?.label ?? ''}, hiện tại ${dutyGroup}`
+              : `Trực nhật ${dutyGroup}`
+          }
           style={[
             styles.dutyBanner,
             { backgroundColor: theme.accentSoft, borderColor: theme.accent },
@@ -384,12 +392,18 @@ export default function ScheduleScreen() {
           <View style={[styles.dateStepper, { backgroundColor: theme.backgroundElement }]}>
             <Pressable
               onPress={() => setDutyDate((d) => shiftIsoDate(d, -1))}
+              hitSlop={8}
               style={[styles.stepMiniBtn, { backgroundColor: theme.card }]}
               accessibilityRole="button"
               accessibilityLabel="Ngày trước">
               <Ionicons name="chevron-back" size={16} color={theme.text} />
             </Pressable>
-            <Pressable onPress={() => setDutyDate(todayIso())} style={styles.dateStepperMid}>
+            <Pressable
+              onPress={() => setDutyDate(todayIso())}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+              accessibilityRole="button"
+              accessibilityLabel="Quay về ngày hôm nay"
+              style={styles.dateStepperMid}>
               <Text style={[styles.dateStepperText, { color: theme.text }]}>
                 {formatDateLong(dutyDate)}
               </Text>
@@ -406,6 +420,7 @@ export default function ScheduleScreen() {
             </Pressable>
             <Pressable
               onPress={() => setDutyDate((d) => shiftIsoDate(d, 1))}
+              hitSlop={8}
               style={[styles.stepMiniBtn, { backgroundColor: theme.card }]}
               accessibilityRole="button"
               accessibilityLabel="Ngày sau">
@@ -608,6 +623,7 @@ export default function ScheduleScreen() {
                         <Pressable
                           disabled={savingDuty}
                           onPress={() => void handleGradeDuty(sid, stuName, 'completed')}
+                          hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
                           accessibilityRole="button"
                           accessibilityLabel={`Đánh dấu ${stuName} hoàn thành trực nhật`}
                           style={({ pressed }) => [
@@ -636,6 +652,7 @@ export default function ScheduleScreen() {
                         <Pressable
                           disabled={savingDuty}
                           onPress={() => void handleGradeDuty(sid, stuName, 'missed')}
+                          hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
                           accessibilityRole="button"
                           accessibilityLabel={`Đánh dấu ${stuName} chưa hoàn thành trực nhật`}
                           style={({ pressed }) => [
@@ -664,6 +681,7 @@ export default function ScheduleScreen() {
                         <Pressable
                           disabled={savingDuty}
                           onPress={() => void handleGradeDuty(sid, stuName, 'pending')}
+                          hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
                           accessibilityRole="button"
                           accessibilityLabel={`Đặt lại ${stuName} về chờ chấm`}
                           style={({ pressed }) => [
@@ -767,6 +785,8 @@ export default function ScheduleScreen() {
             <Pressable
               key={w.day}
               onPress={() => cycleDuty(w.day)}
+              accessibilityRole="button"
+              accessibilityLabel={`${w.label}: ${g}`}
               style={[
                 styles.rosterCell,
                 {
@@ -861,6 +881,7 @@ const styles = StyleSheet.create({
   gradeRow: { flexDirection: 'row', gap: 6 },
   gradeBtn: {
     flex: 1,
+    minHeight: 36,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -871,6 +892,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   gradeResetBtn: {
+    minHeight: 36,
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 8,

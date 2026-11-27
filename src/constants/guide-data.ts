@@ -3,7 +3,7 @@
  * Feature Atlas, and Discovery Quests for the In-App Guide & Assistant.
  */
 
-import type { Ionicons } from '@expo/vector-icons';
+import type Ionicons from '@expo/vector-icons/Ionicons';
 
 import type { MascotMood } from '@/constants/decor-meta';
 import type { ThemeColor } from '@/constants/theme';

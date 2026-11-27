@@ -25,7 +25,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 import { GROUP_PRESETS, STUDY_STAMP_POINTS, roundPoints } from '@/constants/entry-meta';
 import { currentSchoolWeekday, todayIso } from '@/lib/date';
@@ -35,6 +35,7 @@ import {
   type DeleteDriveMediaResult,
   type DeleteDriveMediaTarget,
 } from '@/lib/drive-gallery';
+import { reportNonFatal } from '@/lib/logger';
 import {
   computeOfficerPermissions,
   formatPositionsDisplay,
@@ -99,6 +100,9 @@ import type {
   DutyDayLog,
   DutyRoster,
   Entry,
+  EntryCategory,
+  EntryKind,
+  EntryLevel,
   FeedbackCategory,
   FeedbackItem,
   FundTransaction,
@@ -109,6 +113,7 @@ import type {
   RegisteredTeacherPublic,
   Role,
   ScheduleSlot,
+  SeatingArrangeMode,
   SeatingPlan,
   Student,
   StudentStats,
@@ -118,7 +123,12 @@ import type {
 import { createActions } from './actions';
 import { useAuth } from './auth-store';
 import { CLEAR_STUDENTS_MIGRATION_KEY, STORAGE_KEY, freshState, parseState } from './persist';
-import { buildStudent, mergeStudent } from './reducers';
+import {
+  buildStudent,
+  mergeStudent,
+  sanitizeDriveAttachments,
+  sanitizeResourceUrl,
+} from './reducers';
 import {
   ACCOUNTS_RESET_EPOCH,
   addResourceRemote,
@@ -142,9 +152,12 @@ import {
 import type {
   AnnouncementInput,
   EntryInput,
+  FundTransactionInput,
   KudosInput,
   PersistedState,
+  PollInput,
   ResourceInput,
+  ScheduleSlotInput,
   StudentInput,
   TaskInput,
 } from './types';
@@ -232,9 +245,12 @@ type BaseActions = Omit<
   | 'assignStudentPositionsLocal'
   | 'assignStudentPositionLocal'
   | 'addEntry'
+  | 'quickReward'
   | 'updateEntry'
   | 'removeEntry'
   | 'clearEntryProof'
+  | 'setEntryStatus'
+  | 'approveAllPending'
   | 'setAttendance'
   | 'markAllPresent'
   | 'addAnnouncement'
@@ -245,17 +261,32 @@ type BaseActions = Omit<
   | 'removeAnnouncementReplyLocal'
   | 'removeAnnouncement'
   | 'removeAnnouncementAttachment'
+  | 'addFundTransaction'
+  | 'removeFundTransaction'
+  | 'toggleFundPaid'
+  | 'updateFundCycle'
+  | 'addScheduleSlot'
+  | 'removeScheduleSlot'
+  | 'addPoll'
+  | 'togglePollClosed'
+  | 'removePoll'
   | 'addTask'
   | 'removeTask'
   | 'removeTaskAttachment'
   | 'updateDutyRoster'
   | 'assignDutyForDateLocal'
   | 'markDutyCompletionLocal'
+  | 'togglePinResource'
   | 'removeResource'
-  | 'removePoll'
   | 'removeKudos'
-  | 'removeFundTransaction'
   | 'purgeDriveFileReferences'
+  | 'setSeat'
+  | 'swapSeats'
+  | 'setSeatingSize'
+  | 'autoArrangeSeats'
+  | 'clearSeating'
+  | 'importStateJson'
+  | 'resetDemoData'
   | 'removeStudent'
   | 'clearAll'
   | 'likeAnnouncementLocal'
@@ -275,11 +306,22 @@ export type ExtendedAnnouncementInput = AnnouncementInput;
 
 export type ExtendedTaskInput = TaskInput;
 
-export type ClassStore = BaseActions & {
-  ready: boolean;
+/**
+ * Isolated sync heartbeat context so components that display live sync status
+ * (`SyncStatusBanner`, `Dashboard`, `Settings`, `Pro`) can subscribe without
+ * forcing every `useClassStore()` consumer across all tabs to re-render on each heartbeat.
+ */
+export type ClassSyncState = {
   syncStatus: SyncStatus;
   lastSyncedAt: string | null;
   hasPendingPush: boolean;
+  syncError: string | null;
+  pullNow: () => Promise<void>;
+  refreshFromCloud: () => Promise<void>;
+};
+
+export type ClassStore = BaseActions & {
+  ready: boolean;
   pullNow: () => Promise<void>;
   classInfo: ClassInfo;
   students: Student[];
@@ -416,9 +458,19 @@ export type ClassStore = BaseActions & {
   canDeleteStudyStamp: (entry: Entry) => boolean;
   deleteStudyStamp: (entryId: string) => Promise<boolean>;
   getStudyParticipationReport: (selectedWeekStart?: string | null) => StudyParticipationReport;
+  quickReward: (
+    studentId: string,
+    title: string,
+    points: number,
+    category?: EntryCategory,
+    kind?: EntryKind,
+    level?: EntryLevel,
+  ) => void;
   updateEntry: (id: string, patch: Partial<EntryInput>) => void;
   removeEntry: (id: string) => void;
   clearEntryProof: (entryId: string) => Promise<void>;
+  setEntryStatus: (id: string, status: Entry['status'], reviewNote?: string | null) => void;
+  approveAllPending: () => void;
   setAttendance: (
     date: string,
     studentId: string,
@@ -466,10 +518,25 @@ export type ClassStore = BaseActions & {
     status: DutyCompletionStatus;
     note?: string | null;
   }) => Promise<void>;
+  togglePinResource: (id: string) => void;
   removeResource: (id: string) => void;
+  addPoll: (input: PollInput) => void;
+  togglePollClosed: (pollId: string) => void;
   removePoll: (pollId: string) => void;
   removeKudos: (id: string) => void;
+  addFundTransaction: (input: FundTransactionInput) => void;
   removeFundTransaction: (id: string) => void;
+  toggleFundPaid: (studentId: string) => void;
+  updateFundCycle: (label: string, amount: number) => void;
+  addScheduleSlot: (input: ScheduleSlotInput) => void;
+  removeScheduleSlot: (id: string) => void;
+  setSeat: (seatKey: string, studentId: string | null) => void;
+  swapSeats: (seatA: string, seatB: string) => void;
+  setSeatingSize: (rows: number, cols: number) => void;
+  autoArrangeSeats: (mode: SeatingArrangeMode, orderedStudentIds?: string[]) => void;
+  clearSeating: () => void;
+  importStateJson: (raw: string) => boolean;
+  resetDemoData: () => void;
   deleteUploadedFileEverywhere: (
     target: DeleteDriveMediaTarget,
   ) => Promise<DeleteDriveMediaResult>;
@@ -501,6 +568,7 @@ export type ClassStore = BaseActions & {
 };
 
 const ClassStoreContext = createContext<ClassStore | null>(null);
+const ClassSyncContext = createContext<ClassSyncState | null>(null);
 
 export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const auth = useAuth();
@@ -512,6 +580,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   const hydratedOkRef = useRef(false);
   const lastFlushedSeqRef = useRef(0);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirtyPersistRef = useRef(false);
 
   const commit = useCallback((next: PersistedState) => {
     setState(next);
@@ -577,6 +647,18 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     officerPermissions.isGroupLeader ||
     officerPermissions.customPermissions.includes('record_bonus_group') ||
     inferredOfficerGrants.includes('record_bonus_group');
+  const isTreasurer = useMemo(
+    () => officerPermissions.positionsList.some((pos) => /thủ quỹ|thu quy/i.test(pos)),
+    [officerPermissions.positionsList],
+  );
+  const canManageFund =
+    isTeacher ||
+    canEditClass ||
+    officerPermissions.isClassMonitor ||
+    hasFullCoordination ||
+    isTreasurer;
+  const canManageClassLayout =
+    isTeacher || canEditClass || officerPermissions.isClassMonitor || hasFullCoordination;
 
   const canViewPrivateOf = useCallback(
     (studentId: string) => {
@@ -630,8 +712,14 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     Promise.all([
       AsyncStorage.getItem(STORAGE_KEY),
       AsyncStorage.getItem(CLEAR_STUDENTS_MIGRATION_KEY),
-      loadStudentAccounts({ localOnly: true }).catch(() => []),
-      loadTeacherAccounts({ localOnly: true }).catch(() => []),
+      loadStudentAccounts({ localOnly: true }).catch((err) => {
+        reportNonFatal('class-store', err, 'hydrate-student-accounts');
+        return [];
+      }),
+      loadTeacherAccounts({ localOnly: true }).catch((err) => {
+        reportNonFatal('class-store', err, 'hydrate-teacher-accounts');
+        return [];
+      }),
     ])
       .then(([rawState, clearedFlag, localStudentAccs, localTeacherAccs]) => {
         if (cancelled) return;
@@ -743,7 +831,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         hydratedOkRef.current = true;
         commit(hydrated);
       })
-      .catch(() => {
+      .catch((err) => {
+        reportNonFatal('class-store', err, 'hydrate-class-state');
         // Keep hydratedOkRef.current === false so we NEVER overwrite STORAGE_KEY with empty state.
       })
       .finally(() => {
@@ -754,11 +843,64 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     };
   }, [commit]);
 
-  // Persist shared class database on state updates (only after successful hydration).
+  const flushLocalPersist = useCallback(() => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    if (!hydratedOkRef.current || !dirtyPersistRef.current) return;
+    dirtyPersistRef.current = false;
+    const snapshot = stateRef.current;
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot)).catch((err) => {
+      dirtyPersistRef.current = true;
+      reportNonFatal('class-store', err, 'persist-state');
+    });
+  }, []);
+
+  // Debounced local persistence (250ms) so rapid taps never thrash JSON.stringify / AsyncStorage.
   useEffect(() => {
+    stateRef.current = state;
     if (!ready || !hydratedOkRef.current) return;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state)).catch(() => {});
-  }, [state, ready]);
+    dirtyPersistRef.current = true;
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      flushLocalPersist();
+    }, 250);
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [state, ready, flushLocalPersist]);
+
+  // Immediately flush any pending debounced save on tab unload (Web) or backgrounding (Native).
+  useEffect(() => {
+    if (
+      Platform.OS === 'web' &&
+      typeof window !== 'undefined' &&
+      typeof window.addEventListener === 'function'
+    ) {
+      const onPageHide = () => flushLocalPersist();
+      window.addEventListener('pagehide', onPageHide);
+      return () => {
+        window.removeEventListener('pagehide', onPageHide);
+        flushLocalPersist();
+      };
+    }
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        flushLocalPersist();
+      }
+    });
+    return () => {
+      sub.remove();
+      flushLocalPersist();
+    };
+  }, [flushLocalPersist]);
 
   // Self-heal live student record if currently signed-in student is missing or renamed in auth session.
   useEffect(() => {
@@ -873,7 +1015,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
             const fromStorage = parseState(raw);
             mutate((prev) => mergeClassStates(fromStorage, prev));
           })
-          .catch(() => {});
+          .catch((err) => reportNonFatal('class-store', err, 'sync-student-storage'));
       }
     });
 
@@ -935,7 +1077,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
               return { ...prev, registeredTeachers: Array.from(map.values()) };
             });
           })
-          .catch(() => {});
+          .catch((err) => reportNonFatal('class-store', err, 'sync-teacher-accounts'));
       }
     });
 
@@ -1007,7 +1149,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         setDoneTaskIds(parsedDone && typeof parsedDone === 'object' ? parsedDone : {});
         setSavedResourceIds(parsedSaved && typeof parsedSaved === 'object' ? parsedSaved : {});
       })
-      .catch(() => {
+      .catch((err) => {
+        reportNonFatal('class-store', err, 'hydrate-personal-lists');
         if (cancelled) return;
         setDoneTaskIds({});
         setSavedResourceIds({});
@@ -1021,7 +1164,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     (taskId: string) => {
       setDoneTaskIds((prev) => {
         const next = { ...prev, [taskId]: !prev[taskId] };
-        AsyncStorage.setItem(doneKey, JSON.stringify(next)).catch(() => {});
+        AsyncStorage.setItem(doneKey, JSON.stringify(next)).catch((err) =>
+          reportNonFatal('class-store', err, 'save-done-tasks'),
+        );
         return next;
       });
     },
@@ -1032,7 +1177,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     (resourceId: string) => {
       setSavedResourceIds((prev) => {
         const next = { ...prev, [resourceId]: !prev[resourceId] };
-        AsyncStorage.setItem(savedKey, JSON.stringify(next)).catch(() => {});
+        AsyncStorage.setItem(savedKey, JSON.stringify(next)).catch((err) =>
+          reportNonFatal('class-store', err, 'save-saved-resources'),
+        );
         return next;
       });
     },
@@ -1266,8 +1413,8 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
       const latestStu = stateRef.current.students.find((s) => s.id === id) ?? mergedStu;
       if (isCloudSync && latestStu) {
-        void upsertRegisteredMemberToCloud({ kind: 'student', student: latestStu }).catch(
-          () => {},
+        void upsertRegisteredMemberToCloud({ kind: 'student', student: latestStu }).catch((err) =>
+          reportNonFatal('class-store', err, 'upsert-student-cloud'),
         );
       }
       flushCloud('update-student');
@@ -1586,6 +1733,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           : [];
       actions.addAnnouncement({
         ...input,
+        attachments: sanitizeDriveAttachments(input.attachments),
         authorRole: resolvedAuthorRole,
         authorStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
         authorPosition:
@@ -1619,6 +1767,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       if (!officerPermissions.canManageTasksAndEvents) return;
       actions.addTask({
         ...input,
+        attachments: sanitizeDriveAttachments(input.attachments),
         authorName: input.authorName ?? input.author ?? actorLabel,
         authorPosition:
           input.authorPosition !== undefined
@@ -1685,51 +1834,6 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [actions, flushCloud, isTeacher, officerPermissions],
   );
 
-  const updateEntry = useCallback(
-    (id: string, patch: Partial<EntryInput>) => {
-      const existing = stateRef.current.entries.find((e) => e.id === id);
-      const oldDriveId = extractDriveFileIdFromUrl(existing?.proofUrl);
-      const newDriveId =
-        patch.proofUrl !== undefined ? extractDriveFileIdFromUrl(patch.proofUrl) : oldDriveId;
-      const replacedOldProof =
-        patch.proofUrl !== undefined && Boolean(oldDriveId) && oldDriveId !== newDriveId;
-
-      actions.updateEntry(id, patch);
-      if (replacedOldProof && oldDriveId) {
-        actions.purgeDriveFileReferences(oldDriveId);
-      }
-      flushCloud('update-entry');
-      if (replacedOldProof && oldDriveId) {
-        void deleteDriveFileEverywhere({
-          driveFileId: oldDriveId,
-          fileUrl: existing?.proofUrl ?? null,
-          fileName: existing?.title ?? null,
-        }).catch(() => {});
-      }
-    },
-    [actions, flushCloud],
-  );
-
-  const removeEntry = useCallback(
-    (id: string) => {
-      const target = stateRef.current.entries.find((e) => e.id === id);
-      const driveFileId = extractDriveFileIdFromUrl(target?.proofUrl);
-      actions.removeEntry(id);
-      if (driveFileId) {
-        actions.purgeDriveFileReferences(driveFileId);
-      }
-      flushCloud('remove-entry');
-      if (driveFileId) {
-        void deleteDriveFileEverywhere({
-          driveFileId,
-          fileUrl: target?.proofUrl ?? null,
-          fileName: target?.title ?? null,
-        }).catch(() => {});
-      }
-    },
-    [actions, flushCloud],
-  );
-
   const canDeleteStudyStamp = useCallback(
     (entry: Entry): boolean => {
       if (!entry || entry.kind !== 'study') return false;
@@ -1758,6 +1862,122 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [isTeacher, isSubjectTeacher, officerPermissions, state.students, effectiveStudentId],
   );
 
+  const canModifyEntry = useCallback(
+    (entry: Entry | undefined): boolean => {
+      if (!entry) return false;
+      if (isTeacher || canEditClass || hasFullCoordination) return true;
+      if (entry.kind === 'study' && canDeleteStudyStamp(entry)) return true;
+      if (effectiveStudentId !== null && entry.recordedByStudentId === effectiveStudentId) {
+        return true;
+      }
+      if (
+        effectiveStudentId !== null &&
+        entry.studentId === effectiveStudentId &&
+        entry.status === 'pending'
+      ) {
+        return true;
+      }
+      return false;
+    },
+    [isTeacher, canEditClass, hasFullCoordination, canDeleteStudyStamp, effectiveStudentId],
+  );
+
+  const quickReward = useCallback(
+    (
+      studentId: string,
+      title: string,
+      points: number,
+      category: EntryCategory = 'study',
+      kind: EntryKind = 'activity',
+      level: EntryLevel = 'class',
+    ) => {
+      if (!isTeacher && !canEditClass) {
+        const targetStudent = stateRef.current.students.find((s) => s.id === studentId) ?? null;
+        if (
+          !officerPermissions.canRecordBonus ||
+          !officerPermissions.canRecordBonusForStudent(targetStudent)
+        ) {
+          return;
+        }
+      }
+      actions.quickReward(studentId, title, points, category, kind, level);
+      flushCloud('quick-reward');
+    },
+    [actions, canEditClass, flushCloud, isTeacher, officerPermissions],
+  );
+
+  const setEntryStatus = useCallback(
+    (id: string, status: Entry['status'], reviewNote?: string | null) => {
+      if (!isTeacher && !canEditClass && !hasFullCoordination) return;
+      actions.setEntryStatus(id, status, reviewNote);
+      flushCloud('set-entry-status');
+    },
+    [actions, canEditClass, flushCloud, hasFullCoordination, isTeacher],
+  );
+
+  const approveAllPending = useCallback(() => {
+    if (!isTeacher && !canEditClass && !hasFullCoordination) return;
+    actions.approveAllPending();
+    flushCloud('approve-all-pending');
+  }, [actions, canEditClass, flushCloud, hasFullCoordination, isTeacher]);
+
+  const updateEntry = useCallback(
+    (id: string, patch: Partial<EntryInput>) => {
+      const existing = stateRef.current.entries.find((e) => e.id === id);
+      if (!canModifyEntry(existing)) return;
+      const canApprove = isTeacher || canEditClass || hasFullCoordination;
+      const safePatch: Partial<EntryInput> = canApprove
+        ? patch
+        : {
+            ...patch,
+            status: undefined,
+            reviewNote: undefined,
+          };
+      const oldDriveId = extractDriveFileIdFromUrl(existing?.proofUrl);
+      const newDriveId =
+        safePatch.proofUrl !== undefined
+          ? extractDriveFileIdFromUrl(safePatch.proofUrl)
+          : oldDriveId;
+      const replacedOldProof =
+        safePatch.proofUrl !== undefined && Boolean(oldDriveId) && oldDriveId !== newDriveId;
+
+      actions.updateEntry(id, safePatch);
+      if (replacedOldProof && oldDriveId) {
+        actions.purgeDriveFileReferences(oldDriveId);
+      }
+      flushCloud('update-entry');
+      if (replacedOldProof && oldDriveId) {
+        void deleteDriveFileEverywhere({
+          driveFileId: oldDriveId,
+          fileUrl: existing?.proofUrl ?? null,
+          fileName: existing?.title ?? null,
+        }).catch((err) => reportNonFatal('class-store', err, 'delete-replaced-proof'));
+      }
+    },
+    [actions, canEditClass, canModifyEntry, flushCloud, hasFullCoordination, isTeacher],
+  );
+
+  const removeEntry = useCallback(
+    (id: string) => {
+      const target = stateRef.current.entries.find((e) => e.id === id);
+      if (!canModifyEntry(target)) return;
+      const driveFileId = extractDriveFileIdFromUrl(target?.proofUrl);
+      actions.removeEntry(id);
+      if (driveFileId) {
+        actions.purgeDriveFileReferences(driveFileId);
+      }
+      flushCloud('remove-entry');
+      if (driveFileId) {
+        void deleteDriveFileEverywhere({
+          driveFileId,
+          fileUrl: target?.proofUrl ?? null,
+          fileName: target?.title ?? null,
+        }).catch((err) => reportNonFatal('class-store', err, 'delete-entry-proof'));
+      }
+    },
+    [actions, canModifyEntry, flushCloud],
+  );
+
   const deleteStudyStamp = useCallback(
     async (entryId: string): Promise<boolean> => {
       const entry = stateRef.current.entries.find((e) => e.id === entryId);
@@ -1771,6 +1991,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
   const clearEntryProof = useCallback(
     async (entryId: string) => {
       const target = stateRef.current.entries.find((e) => e.id === entryId);
+      if (!canModifyEntry(target)) return;
       const driveFileId = extractDriveFileIdFromUrl(target?.proofUrl);
       actions.clearEntryProof(entryId, driveFileId);
       if (driveFileId) {
@@ -1782,10 +2003,10 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           driveFileId,
           fileUrl: target?.proofUrl ?? null,
           fileName: target?.title ?? null,
-        }).catch(() => {});
+        }).catch((err) => reportNonFatal('class-store', err, 'clear-entry-proof-drive'));
       }
     },
-    [actions, flushCloud],
+    [actions, canModifyEntry, flushCloud],
   );
 
   const isAnnouncementAuthor = useCallback(
@@ -1864,7 +2085,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       }
       flushCloud('remove-announcement');
       for (const item of driveTargets) {
-        void deleteDriveFileEverywhere(item).catch(() => {});
+        void deleteDriveFileEverywhere(item).catch((err) =>
+          reportNonFatal('class-store', err, 'delete-announcement-drive'),
+        );
       }
     },
     [actions, canSeeAnnouncement, flushCloud, isAnnouncementAuthor, isTeacher, officerPermissions],
@@ -1900,7 +2123,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           driveFileId,
           fileUrl,
           fileName,
-        }).catch(() => {});
+        }).catch((err) => reportNonFatal('class-store', err, 'delete-announcement-att-drive'));
       }
     },
     [actions, canSeeAnnouncement, flushCloud, isAnnouncementAuthor, isTeacher, officerPermissions],
@@ -1908,6 +2131,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const removeTask = useCallback(
     (taskId: string) => {
+      if (!isTeacher && !canEditClass && !officerPermissions.canManageTasksAndEvents) return;
       const target = stateRef.current.tasks.find((t) => t.id === taskId);
       const attachments = target?.attachments ?? [];
       const driveTargets = attachments
@@ -1926,10 +2150,12 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       }
       flushCloud('remove-task');
       for (const item of driveTargets) {
-        void deleteDriveFileEverywhere(item).catch(() => {});
+        void deleteDriveFileEverywhere(item).catch((err) =>
+          reportNonFatal('class-store', err, 'delete-task-drive'),
+        );
       }
     },
-    [actions, flushCloud],
+    [actions, canEditClass, flushCloud, isTeacher, officerPermissions],
   );
 
   const removeTaskAttachment = useCallback(
@@ -1937,6 +2163,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       taskId: string,
       attachment: { id: string; driveFileId?: string; url?: string; name?: string },
     ) => {
+      if (!isTeacher && !canEditClass && !officerPermissions.canManageTasksAndEvents) return;
       const existingTask = stateRef.current.tasks.find((t) => t.id === taskId);
       const existingAtt = existingTask?.attachments?.find((a) => a.id === attachment.id);
       const driveFileId =
@@ -1955,15 +2182,30 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           driveFileId,
           fileUrl,
           fileName,
-        }).catch(() => {});
+        }).catch((err) => reportNonFatal('class-store', err, 'delete-task-att-drive'));
       }
     },
-    [actions, flushCloud],
+    [actions, canEditClass, flushCloud, isTeacher, officerPermissions],
+  );
+
+  const togglePinResource = useCallback(
+    (id: string) => {
+      if (!isTeacher && !canEditClass && !officerPermissions.isClassMonitor) return;
+      actions.togglePinResource(id);
+      flushCloud('toggle-pin-resource');
+    },
+    [actions, canEditClass, flushCloud, isTeacher, officerPermissions],
   );
 
   const removeResource = useCallback(
     (id: string) => {
       const target = stateRef.current.resources.find((r) => r.id === id);
+      const canRemove =
+        isTeacher ||
+        canEditClass ||
+        officerPermissions.isClassMonitor ||
+        (effectiveStudentId !== null && target?.ownerStudentId === effectiveStudentId);
+      if (!canRemove) return;
       const driveFileId = extractDriveFileIdFromUrl(target?.url);
       actions.removeResource(id);
       if (driveFileId) {
@@ -1975,35 +2217,166 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           driveFileId,
           fileUrl: target?.url ?? null,
           fileName: target?.title ?? null,
-        }).catch(() => {});
+        }).catch((err) => reportNonFatal('class-store', err, 'delete-resource-drive'));
       }
     },
-    [actions, flushCloud],
+    [actions, canEditClass, effectiveStudentId, flushCloud, isTeacher, officerPermissions],
+  );
+
+  const addPoll = useCallback(
+    (input: PollInput) => {
+      if (!canManageClassLayout && !officerPermissions.canManageTasksAndEvents) return;
+      actions.addPoll(input);
+      flushCloud('add-poll');
+    },
+    [actions, canManageClassLayout, flushCloud, officerPermissions],
+  );
+
+  const togglePollClosed = useCallback(
+    (pollId: string) => {
+      if (!canManageClassLayout && !officerPermissions.canManageTasksAndEvents) return;
+      actions.togglePollClosed(pollId);
+      flushCloud('toggle-poll-closed');
+    },
+    [actions, canManageClassLayout, flushCloud, officerPermissions],
   );
 
   const removePoll = useCallback(
     (pollId: string) => {
+      if (!canManageClassLayout && !officerPermissions.canManageTasksAndEvents) return;
       actions.removePoll(pollId);
       flushCloud('remove-poll');
     },
-    [actions, flushCloud],
+    [actions, canManageClassLayout, flushCloud, officerPermissions],
   );
 
   const removeKudos = useCallback(
     (id: string) => {
+      const target = stateRef.current.kudos.find((k) => k.id === id);
+      const canRemove =
+        isTeacher ||
+        officerPermissions.isClassMonitor ||
+        (effectiveStudentId !== null &&
+          (target?.authorStudentId === effectiveStudentId ||
+            target?.toStudentId === effectiveStudentId));
+      if (!canRemove) return;
       actions.removeKudos(id);
       flushCloud('remove-kudos');
     },
-    [actions, flushCloud],
+    [actions, effectiveStudentId, flushCloud, isTeacher, officerPermissions],
+  );
+
+  const addFundTransaction = useCallback(
+    (input: FundTransactionInput) => {
+      if (!canManageFund) return;
+      actions.addFundTransaction(input);
+      flushCloud('add-fund-transaction');
+    },
+    [actions, canManageFund, flushCloud],
   );
 
   const removeFundTransaction = useCallback(
     (id: string) => {
+      if (!canManageFund) return;
       actions.removeFundTransaction(id);
       flushCloud('remove-fund-transaction');
     },
-    [actions, flushCloud],
+    [actions, canManageFund, flushCloud],
   );
+
+  const toggleFundPaid = useCallback(
+    (studentId: string) => {
+      if (!canManageFund) return;
+      actions.toggleFundPaid(studentId);
+      flushCloud('toggle-fund-paid');
+    },
+    [actions, canManageFund, flushCloud],
+  );
+
+  const updateFundCycle = useCallback(
+    (label: string, amount: number) => {
+      if (!canManageFund) return;
+      actions.updateFundCycle(label, amount);
+      flushCloud('update-fund-cycle');
+    },
+    [actions, canManageFund, flushCloud],
+  );
+
+  const addScheduleSlot = useCallback(
+    (input: ScheduleSlotInput) => {
+      if (!canManageClassLayout && !isSubjectTeacher) return;
+      actions.addScheduleSlot(input);
+      flushCloud('add-schedule-slot');
+    },
+    [actions, canManageClassLayout, flushCloud, isSubjectTeacher],
+  );
+
+  const removeScheduleSlot = useCallback(
+    (id: string) => {
+      if (!canManageClassLayout && !isSubjectTeacher) return;
+      actions.removeScheduleSlot(id);
+      flushCloud('remove-schedule-slot');
+    },
+    [actions, canManageClassLayout, flushCloud, isSubjectTeacher],
+  );
+
+  const setSeat = useCallback(
+    (seatKey: string, studentId: string | null) => {
+      if (!canManageClassLayout) return;
+      actions.setSeat(seatKey, studentId);
+      flushCloud('set-seat');
+    },
+    [actions, canManageClassLayout, flushCloud],
+  );
+
+  const swapSeats = useCallback(
+    (seatA: string, seatB: string) => {
+      if (!canManageClassLayout) return;
+      actions.swapSeats(seatA, seatB);
+      flushCloud('swap-seats');
+    },
+    [actions, canManageClassLayout, flushCloud],
+  );
+
+  const setSeatingSize = useCallback(
+    (rows: number, cols: number) => {
+      if (!canManageClassLayout) return;
+      actions.setSeatingSize(rows, cols);
+      flushCloud('set-seating-size');
+    },
+    [actions, canManageClassLayout, flushCloud],
+  );
+
+  const autoArrangeSeats = useCallback(
+    (mode: SeatingArrangeMode, orderedStudentIds?: string[]) => {
+      if (!canManageClassLayout) return;
+      actions.autoArrangeSeats(mode, orderedStudentIds);
+      flushCloud('auto-arrange-seats');
+    },
+    [actions, canManageClassLayout, flushCloud],
+  );
+
+  const clearSeating = useCallback(() => {
+    if (!canManageClassLayout) return;
+    actions.clearSeating();
+    flushCloud('clear-seating');
+  }, [actions, canManageClassLayout, flushCloud]);
+
+  const importStateJson = useCallback(
+    (raw: string): boolean => {
+      if (!isTeacher) return false;
+      const ok = actions.importStateJson(raw);
+      if (ok) flushCloud('import-state-json');
+      return ok;
+    },
+    [actions, flushCloud, isTeacher],
+  );
+
+  const resetDemoData = useCallback(() => {
+    if (!isTeacher) return;
+    actions.resetDemoData();
+    flushCloud('reset-demo-data');
+  }, [actions, flushCloud, isTeacher]);
 
   const deleteUploadedFileEverywhere = useCallback(
     async (target: DeleteDriveMediaTarget): Promise<DeleteDriveMediaResult> => {
@@ -2020,6 +2393,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const removeStudent = useCallback(
     (id: string) => {
+      if (!isTeacher) return;
       const now = new Date().toISOString();
       const studentProofTargets = stateRef.current.entries
         .filter((e) => e.studentId === id)
@@ -2044,22 +2418,29 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       }));
       removeStudentAccount(id)
         .then(() => auth.refreshStudentAccountCount())
-        .catch(() => {});
+        .catch((err) => reportNonFatal('class-store', err, 'remove-student-account'));
       if (isCloudSync) {
-        void removeRegisteredMemberFromCloud('student', id).catch(() => {});
+        void removeRegisteredMemberFromCloud('student', id).catch((err) =>
+          reportNonFatal('class-store', err, 'remove-student-cloud'),
+        );
       }
       flushCloud('remove-student');
       for (const item of studentProofTargets) {
-        void deleteDriveFileEverywhere(item).catch(() => {});
+        void deleteDriveFileEverywhere(item).catch((err) =>
+          reportNonFatal('class-store', err, 'delete-student-proof-drive'),
+        );
       }
       if (isCloudOAuth && isTeacher) {
-        deleteStudentPrivateRemote(id).catch(() => {});
+        deleteStudentPrivateRemote(id).catch((err) =>
+          reportNonFatal('class-store', err, 'delete-student-private-remote'),
+        );
       }
     },
     [actions, auth, flushCloud, isCloudOAuth, isCloudSync, isTeacher, mutate],
   );
 
   const clearAll = useCallback(() => {
+    if (!isTeacher) return;
     const now = new Date().toISOString();
     const existingIds = stateRef.current.students.map((s) => s.id);
     const existingEntryIds = stateRef.current.entries.map((e) => e.id);
@@ -2099,31 +2480,39 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     }
     clearAllStudentAccounts(existingIds)
       .then(() => auth.refreshStudentAccountCount())
-      .catch(() => {});
+      .catch((err) => reportNonFatal('class-store', err, 'clear-student-accounts'));
     flushCloud('clear-all');
     for (const item of clearedProofTargets) {
-      void deleteDriveFileEverywhere(item).catch(() => {});
+      void deleteDriveFileEverywhere(item).catch((err) =>
+        reportNonFatal('class-store', err, 'clear-all-proof-drive'),
+      );
     }
-  }, [actions, auth, flushCloud, mutate]);
+  }, [actions, auth, flushCloud, isTeacher, mutate]);
 
   const saveStudentPrivate = useCallback(
     async (studentId: string, data: StudentPrivateData) => {
+      const canSave =
+        isTeacher ||
+        canManagePrivate ||
+        (effectiveStudentId !== null && effectiveStudentId === studentId);
+      if (!canSave) return;
       actions.patchStudentPrivateLocal(studentId, data);
       if (isCloudOAuth) {
         await upsertStudentPrivateRemote(studentId, data);
       }
     },
-    [actions, isCloudOAuth],
+    [actions, canManagePrivate, effectiveStudentId, isCloudOAuth, isTeacher],
   );
 
   const saveStudentNote = useCallback(
     async (studentId: string, note: string | null) => {
+      if (!isTeacher && !canManagePrivate) return;
       actions.patchStudentNoteLocal(studentId, note);
       if (isCloudOAuth) {
         await upsertStudentNoteRemote(studentId, note);
       }
     },
-    [actions, isCloudOAuth],
+    [actions, canManagePrivate, isCloudOAuth, isTeacher],
   );
 
   const likeAnnouncement = useCallback(
@@ -2131,7 +2520,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       actions.likeAnnouncementLocal(id);
       flushCloud('like-announcement');
       if (isCloudOAuth) {
-        await likeAnnouncementRemote(id).catch(() => {});
+        await likeAnnouncementRemote(id).catch((err) =>
+          reportNonFatal('class-store', err, 'like-announcement-remote'),
+        );
       }
     },
     [actions, flushCloud, isCloudOAuth],
@@ -2287,6 +2678,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const replyFeedback = useCallback(
     async (id: string, reply: string | null, resolved: boolean) => {
+      if (!isTeacher) return;
       actions.replyFeedbackLocal(id, reply, resolved);
       flushCloud('reply-feedback');
       if (isCloudOAuth && isTeacher) {
@@ -2298,13 +2690,15 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const removeFeedback = useCallback(
     async (id: string) => {
+      const target = stateRef.current.feedback.find((f) => f.id === id);
+      if (!isTeacher && target?.authorId !== feedbackAuthorKey) return;
       actions.removeFeedbackLocal(id);
       flushCloud('remove-feedback');
       if (isCloudOAuth && isTeacher) {
         await deleteFeedbackRemote(id);
       }
     },
-    [actions, flushCloud, isCloudOAuth, isTeacher],
+    [actions, feedbackAuthorKey, flushCloud, isCloudOAuth, isTeacher],
   );
 
   const sendKudos = useCallback(
@@ -2318,7 +2712,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       });
       flushCloud('send-kudos');
       if (isCloudOAuth && !canEditClass) {
-        await sendKudosRemote(created).catch(() => {});
+        await sendKudosRemote(created).catch((err) =>
+          reportNonFatal('class-store', err, 'send-kudos-remote'),
+        );
       }
     },
     [actions, canViewAll, effectiveStudentId, actorLabel, flushCloud, isCloudOAuth, canEditClass],
@@ -2329,7 +2725,9 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       actions.clapKudosLocal(id);
       flushCloud('clap-kudos');
       if (isCloudOAuth && !canEditClass) {
-        await clapKudosRemote(id).catch(() => {});
+        await clapKudosRemote(id).catch((err) =>
+          reportNonFatal('class-store', err, 'clap-kudos-remote'),
+        );
       }
     },
     [actions, flushCloud, isCloudOAuth, canEditClass],
@@ -2337,14 +2735,22 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const addResource = useCallback(
     async (input: ResourceInput) => {
+      const safeUrl = sanitizeResourceUrl(input.url);
+      if (!safeUrl) {
+        reportNonFatal('class-store', new Error('Unsafe resource URL blocked'), 'add-resource');
+        return;
+      }
       const created = actions.addResourceLocal({
         ...input,
+        url: safeUrl,
         author: input.author?.trim() || actorLabel,
         ownerStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
       });
       flushCloud('add-resource');
       if (isCloudOAuth && !canEditClass) {
-        await addResourceRemote(created).catch(() => {});
+        await addResourceRemote(created).catch((err) =>
+          reportNonFatal('class-store', err, 'add-resource-remote'),
+        );
       }
     },
     [
@@ -2808,6 +3214,18 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
 
   const effectiveLegacyRole: Role = canEditClass ? 'teacher' : 'student';
 
+  const syncValue = useMemo<ClassSyncState>(
+    () => ({
+      syncStatus,
+      lastSyncedAt,
+      hasPendingPush,
+      syncError: syncStatus === 'offline' ? 'Mất kết nối máy chủ đồng bộ' : null,
+      pullNow,
+      refreshFromCloud: pullNow,
+    }),
+    [syncStatus, lastSyncedAt, hasPendingPush, pullNow],
+  );
+
   const value = useMemo<ClassStore>(
     () => ({
       setRole: actions.setRole,
@@ -2820,12 +3238,12 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       addStudent,
       bulkAddStudents,
       updateStudent,
-      quickReward: actions.quickReward,
+      quickReward,
       updateEntry,
       removeEntry,
       clearEntryProof,
-      setEntryStatus: actions.setEntryStatus,
-      approveAllPending: actions.approveAllPending,
+      setEntryStatus,
+      approveAllPending,
       setAttendance,
       markAllPresent,
       addAnnouncement,
@@ -2836,34 +3254,34 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       togglePinAnnouncement,
       removeAnnouncement,
       removeAnnouncementAttachment,
-      addFundTransaction: actions.addFundTransaction,
+      addFundTransaction,
       removeFundTransaction,
-      toggleFundPaid: actions.toggleFundPaid,
-      updateFundCycle: actions.updateFundCycle,
-      addScheduleSlot: actions.addScheduleSlot,
-      removeScheduleSlot: actions.removeScheduleSlot,
+      toggleFundPaid,
+      updateFundCycle,
+      addScheduleSlot,
+      removeScheduleSlot,
       updateDutyRoster,
       assignStudentPositions,
       assignStudentPosition,
       assignDutyForDate,
       markDutyCompletion,
-      addPoll: actions.addPoll,
-      togglePollClosed: actions.togglePollClosed,
+      addPoll,
+      togglePollClosed,
       removePoll,
       addTask,
       removeTask,
       removeTaskAttachment,
       removeKudos,
-      togglePinResource: actions.togglePinResource,
+      togglePinResource,
       removeResource,
       deleteUploadedFileEverywhere,
-      setSeat: actions.setSeat,
-      swapSeats: actions.swapSeats,
-      setSeatingSize: actions.setSeatingSize,
-      autoArrangeSeats: actions.autoArrangeSeats,
-      clearSeating: actions.clearSeating,
-      importStateJson: actions.importStateJson,
-      resetDemoData: actions.resetDemoData,
+      setSeat,
+      swapSeats,
+      setSeatingSize,
+      autoArrangeSeats,
+      clearSeating,
+      importStateJson,
+      resetDemoData,
       clearAll,
       checkLoginIdTaken,
       suggestNextStudentCode,
@@ -2884,9 +3302,6 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       clapKudos,
       addResource,
       ready,
-      syncStatus,
-      lastSyncedAt,
-      hasPendingPush,
       pullNow,
       classInfo,
       students: visibleStudents,
@@ -3008,13 +3423,31 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       addTask,
       removeTask,
       removeTaskAttachment,
+      quickReward,
+      setEntryStatus,
+      approveAllPending,
       updateEntry,
       removeEntry,
       clearEntryProof,
+      togglePinResource,
       removeResource,
+      addPoll,
+      togglePollClosed,
       removePoll,
       removeKudos,
+      addFundTransaction,
       removeFundTransaction,
+      toggleFundPaid,
+      updateFundCycle,
+      addScheduleSlot,
+      removeScheduleSlot,
+      setSeat,
+      swapSeats,
+      setSeatingSize,
+      autoArrangeSeats,
+      clearSeating,
+      importStateJson,
+      resetDemoData,
       deleteUploadedFileEverywhere,
       clearAll,
       checkLoginIdTaken,
@@ -3036,9 +3469,6 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       clapKudos,
       addResource,
       ready,
-      syncStatus,
-      lastSyncedAt,
-      hasPendingPush,
       pullNow,
       classInfo,
       visibleStudents,
@@ -3110,7 +3540,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <ClassStoreContext.Provider value={value}>{children}</ClassStoreContext.Provider>;
+  return (
+    <ClassSyncContext.Provider value={syncValue}>
+      <ClassStoreContext.Provider value={value}>{children}</ClassStoreContext.Provider>
+    </ClassSyncContext.Provider>
+  );
 }
 
 export function useClassStore(): ClassStore {
@@ -3119,4 +3553,12 @@ export function useClassStore(): ClassStore {
     throw new Error('useClassStore must be used inside <ClassStoreProvider>');
   }
   return store;
+}
+
+export function useClassSync(): ClassSyncState {
+  const sync = useContext(ClassSyncContext);
+  if (!sync) {
+    throw new Error('useClassSync must be used inside <ClassStoreProvider>');
+  }
+  return sync;
 }

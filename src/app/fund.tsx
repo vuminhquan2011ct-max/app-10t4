@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -8,6 +8,7 @@ import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
+import { ConfirmActionButton } from '@/components/ui/confirm-action-button';
 import { DatePickerField } from '@/components/ui/date-picker-field';
 import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
@@ -173,6 +174,10 @@ export default function FundScreen() {
             <Pressable
               key={item.key}
               onPress={() => setTab(item.key)}
+              hitSlop={{ top: 4, bottom: 4, left: 2, right: 2 }}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={item.label}
               style={[styles.segBtn, active && { backgroundColor: theme.accentSoft }]}>
               <Ionicons
                 name={item.icon}
@@ -295,14 +300,14 @@ export default function FundScreen() {
                         {(isIncome ? '+' : '-') + formatVnd(tx.amount)}
                       </Text>
                       {role === 'teacher' ? (
-                        <Pressable
-                          onPress={() => {
+                        <ConfirmActionButton
+                          onConfirm={() => {
                             removeFundTransaction(tx.id);
                             showToast('Đã xóa giao dịch', 'warning');
                           }}
-                          hitSlop={8}>
-                          <Ionicons name="trash-outline" size={14} color={theme.textMuted} />
-                        </Pressable>
+                          accessibilityLabel={`Xoá giao dịch ${tx.title}`}
+                          confirmAccessibilityLabel={`Nhấn lại để xoá giao dịch ${tx.title}`}
+                        />
                       ) : null}
                     </View>
                   </Card>
@@ -462,6 +467,7 @@ const styles = StyleSheet.create({
   },
   segBtn: {
     flex: 1,
+    minHeight: 40,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',

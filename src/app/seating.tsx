@@ -3,17 +3,19 @@
  *
  * Features:
  * - Visual chalkboard & teacher podium header + realistic classroom aisle split
- * - 3 visual lenses: Group colors | Competition Points | Live Today's Attendance
+ * - 4 visual lenses: Group colors | Competition Points | Live Today's Attendance | Classroom Quick-Log (`Ghi nhanh`)
+ * - Classroom Interactive Mode (`Ghi nhanh`): tap any desk for 1-tap `+1 Stamp (+0,25đ)` (RBAC-gated & double-tap locked),
+ *   today's attendance toggle, and conduct shortcut
  * - 1-tap swap seats or assign unassigned students (teachers & editors)
  * - 3 smart auto-arrange modes: By Group | Fair Random Shuffle | Peer Mentoring
  * - 1-tap export seating map for Zalo
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { PageHeader } from '@/components/page-header';
@@ -25,14 +27,31 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { Screen } from '@/components/ui/screen';
 import { useToast } from '@/components/ui/toast';
+import {
+  STUDY_STAMP_POINTS,
+  STUDY_SUBJECT_PRESETS,
+  formatPoints,
+} from '@/constants/entry-meta';
 import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
-import { ATTENDANCE_STATUSES } from '@/constants/utilities-meta';
+import { ATTENDANCE_STATUSES, ATTENDANCE_STATUS_LIST } from '@/constants/utilities-meta';
 import { useTheme } from '@/hooks/use-theme';
 import { todayIso } from '@/lib/date';
 import { buildSeatingReport, shareOrCopyText } from '@/lib/export';
 import { useClassStore } from '@/store/class-store';
+import type { AttendanceStatus } from '@/types/models';
 
-type LensMode = 'group' | 'points' | 'attendance';
+type LensMode = 'group' | 'points' | 'attendance' | 'quick';
+
+const LENS_OPTIONS: readonly {
+  key: LensMode;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+}[] = [
+  { key: 'group', label: 'Theo Tổ', icon: 'people-outline' },
+  { key: 'points', label: 'Điểm thi đua', icon: 'trophy-outline' },
+  { key: 'attendance', label: 'Chuyên cần', icon: 'checkbox-outline' },
+  { key: 'quick', label: 'Ghi nhanh', icon: 'flash-outline' },
+];
 
 const GROUP_COLORS: Record<string, ThemeColor> = {
   'Tổ 1': 'accent',
@@ -55,8 +74,15 @@ export default function SeatingScreen() {
     seating,
     canViewAll,
     canEditClass,
+    canRecordStudyForStudent,
+    canRecordViolationForStudent,
+    inferredStudySubjects,
+    subjectName,
     statsOfStudent,
     attendanceOfDate,
+    getStudyParticipationReport,
+    quickLogStudyParticipation,
+    setAttendance,
     setSeat,
     swapSeats,
     setSeatingSize,
@@ -68,9 +94,45 @@ export default function SeatingScreen() {
 
   const [lens, setLens] = useState<LensMode>('group');
   const [selectedSeat, setSelectedSeat] = useState<string | null>(null);
+  const [quickSeatKey, setQuickSeatKey] = useState<string | null>(null);
+  const [subjectDraft, setSubjectDraft] = useState<string | null>(null);
+  const [stamping, setStamping] = useState(false);
+
+  const stampLockRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const defaultSubject = subjectName?.trim() || inferredStudySubjects[0] || STUDY_SUBJECT_PRESETS[0];
+  const activeSubject = subjectDraft ?? defaultSubject;
+
+  const subjectChoices = useMemo(() => {
+    const set = new Set<string>();
+    if (subjectName?.trim()) set.add(subjectName.trim());
+    for (const s of inferredStudySubjects) {
+      if (s.trim()) set.add(s.trim());
+    }
+    for (const s of STUDY_SUBJECT_PRESETS) set.add(s);
+    return Array.from(set);
+  }, [subjectName, inferredStudySubjects]);
 
   const studentMap = useMemo(() => new Map(students.map((s) => [s.id, s])), [students]);
-  const todayAtt = attendanceOfDate(todayIso());
+  const today = todayIso();
+  const todayAtt = attendanceOfDate(today);
+
+  const studyReport = useMemo(
+    () => getStudyParticipationReport(),
+    [getStudyParticipationReport],
+  );
+  const studyByStudentId = useMemo(
+    () => new Map(studyReport.studentRows.map((row) => [row.studentId, row])),
+    [studyReport.studentRows],
+  );
 
   const seatedIds = useMemo(() => new Set(Object.values(seating.seats)), [seating.seats]);
   const unassigned = useMemo(
@@ -82,9 +144,23 @@ export default function SeatingScreen() {
   );
 
   const selectedStudent = selectedSeat ? studentMap.get(seating.seats[selectedSeat] ?? '') : undefined;
+  const quickStudent =
+    lens === 'quick' && quickSeatKey ? studentMap.get(seating.seats[quickSeatKey] ?? '') : undefined;
 
   const handleSeatPress = (seatKey: string) => {
     const occupantId = seating.seats[seatKey];
+
+    if (lens === 'quick') {
+      if (!occupantId) {
+        if (canEditClass) {
+          showToast('Ghế trống — chuyển sang chế độ "Theo Tổ" để xếp học sinh vào chỗ này', 'info');
+        }
+        return;
+      }
+      if (Platform.OS !== 'web') Haptics.selectionAsync().catch(() => {});
+      setQuickSeatKey((cur) => (cur === seatKey ? null : seatKey));
+      return;
+    }
 
     if (!canEditClass) {
       if (occupantId) {
@@ -108,6 +184,44 @@ export default function SeatingScreen() {
     swapSeats(selectedSeat, seatKey);
     setSelectedSeat(null);
     showToast('Đã đổi vị trí chỗ ngồi!');
+  };
+
+  const handleQuickStamp = async () => {
+    if (!quickStudent || stampLockRef.current) return;
+    if (!canRecordStudyForStudent(quickStudent)) {
+      showToast('Bạn không có quyền cộng Stamp cho học sinh này', 'warning');
+      return;
+    }
+    stampLockRef.current = true;
+    setStamping(true);
+    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    try {
+      await quickLogStudyParticipation({
+        studentId: quickStudent.id,
+        subject: activeSubject,
+        speechCount: 1,
+        points: STUDY_STAMP_POINTS,
+        date: today,
+      });
+      showToast(
+        `Đã cộng +1 Stamp (+${formatPoints(STUDY_STAMP_POINTS)}đ) môn ${activeSubject} cho ${quickStudent.name}! ⚡`,
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : 'Không thể ghi nhận Stamp phát biểu lúc này',
+        'danger',
+      );
+    } finally {
+      stampLockRef.current = false;
+      if (mountedRef.current) setStamping(false);
+    }
+  };
+
+  const handleQuickAttendance = (status: AttendanceStatus) => {
+    if (!quickStudent || !canEditClass) return;
+    if (Platform.OS !== 'web') Haptics.selectionAsync().catch(() => {});
+    setAttendance(today, quickStudent.id, status);
+    showToast(`Đã chấm ${ATTENDANCE_STATUSES[status].label.toLowerCase()} cho ${quickStudent.name}`);
   };
 
   const handleAssignToSelected = (studentId: string) => {
@@ -138,6 +252,11 @@ export default function SeatingScreen() {
   };
 
   const aisleAfterCol = Math.floor(seating.cols / 2) - 1;
+  const quickStudyRow = quickStudent ? studyByStudentId.get(quickStudent.id) : undefined;
+  const quickAttStatus = quickStudent ? todayAtt?.records[quickStudent.id]?.status : undefined;
+  const quickAttMeta = quickAttStatus ? ATTENDANCE_STATUSES[quickAttStatus] : null;
+  const canStampQuickStudent = quickStudent ? canRecordStudyForStudent(quickStudent) : false;
+  const canWarnQuickStudent = quickStudent ? canRecordViolationForStudent(quickStudent) : false;
 
   return (
     <Screen withTabBar={false}>
@@ -153,38 +272,48 @@ export default function SeatingScreen() {
         onRightPress={canViewAll ? handleExport : undefined}
       />
 
-      {/* Lens Switcher */}
+      {/* Lens Switcher (4 modes including Classroom Interactive Quick-Log) */}
       <FadeIn index={0}>
-        <View style={[styles.segment, { backgroundColor: theme.card, borderColor: theme.border }]}>
-          {(
-            [
-              { key: 'group', label: 'Theo Tổ', icon: 'people-outline' },
-              { key: 'points', label: 'Điểm thi đua', icon: 'trophy-outline' },
-              { key: 'attendance', label: 'Chuyên cần', icon: 'checkbox-outline' },
-            ] as const
-          ).map((item) => {
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={[
+            styles.segmentScroll,
+            { backgroundColor: theme.card, borderColor: theme.border },
+          ]}>
+          {LENS_OPTIONS.map((item) => {
             const active = lens === item.key;
+            const activeBg = item.key === 'quick' ? theme.successSoft : theme.accentSoft;
+            const activeFg = item.key === 'quick' ? theme.success : theme.accentText;
             return (
               <Pressable
                 key={item.key}
-                onPress={() => setLens(item.key)}
-                style={[styles.segBtn, active && { backgroundColor: theme.accentSoft }]}>
+                onPress={() => {
+                  setLens(item.key);
+                  setSelectedSeat(null);
+                  setQuickSeatKey(null);
+                }}
+                hitSlop={{ top: 4, bottom: 4, left: 2, right: 2 }}
+                accessibilityRole="button"
+                accessibilityLabel={`Chế độ hiển thị ${item.label}`}
+                accessibilityState={{ selected: active }}
+                style={[styles.segBtn, active && { backgroundColor: activeBg }]}>
                 <Ionicons
                   name={item.icon}
                   size={14}
-                  color={active ? theme.accentText : theme.textMuted}
+                  color={active ? activeFg : theme.textMuted}
                 />
-                <Text style={[styles.segText, { color: active ? theme.accentText : theme.textMuted }]}>
+                <Text style={[styles.segText, { color: active ? activeFg : theme.textMuted }]}>
                   {item.label}
                 </Text>
               </Pressable>
             );
           })}
-        </View>
+        </ScrollView>
       </FadeIn>
 
-      {/* Teacher Smart Auto-Arrange Controls */}
-      {canEditClass ? (
+      {/* Teacher Smart Auto-Arrange Controls (hidden during Classroom Quick-Log so the map stays front & center) */}
+      {canEditClass && lens !== 'quick' ? (
         <FadeIn index={1}>
           <Card style={styles.controlsCard}>
             <View style={styles.controlsTop}>
@@ -192,21 +321,32 @@ export default function SeatingScreen() {
               <View style={styles.dimControls}>
                 <Pressable
                   onPress={() => setSeatingSize(seating.rows - 1, seating.cols)}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel="Giảm số hàng ghế"
                   style={[styles.dimBtn, { backgroundColor: theme.backgroundElement }]}>
-                  <Ionicons name="remove" size={14} color={theme.text} />
+                  <Ionicons name="remove" size={16} color={theme.text} />
                 </Pressable>
                 <Text style={[styles.dimText, { color: theme.textSecondary }]}>
                   {`${seating.rows}×${seating.cols}`}
                 </Text>
                 <Pressable
                   onPress={() => setSeatingSize(seating.rows + 1, seating.cols)}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel="Tăng số hàng ghế"
                   style={[styles.dimBtn, { backgroundColor: theme.backgroundElement }]}>
-                  <Ionicons name="add" size={14} color={theme.text} />
+                  <Ionicons name="add" size={16} color={theme.text} />
                 </Pressable>
                 <Pressable
                   onPress={() => setSeatingSize(seating.rows, seating.cols === 4 ? 6 : 4)}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    seating.cols === 4 ? 'Chuyển sơ đồ sang 6 cột' : 'Chuyển sơ đồ sang 4 cột'
+                  }
                   style={[styles.dimPill, { backgroundColor: theme.accentSoft }]}>
-                  <Text style={{ color: theme.accentText, fontSize: 11, fontWeight: '800' }}>
+                  <Text style={{ color: theme.accentText, fontSize: 11.5, fontWeight: '800' }}>
                     {seating.cols === 4 ? '6 cột' : '4 cột'}
                   </Text>
                 </Pressable>
@@ -268,8 +408,8 @@ export default function SeatingScreen() {
         </FadeIn>
       ) : null}
 
-      {/* Active Seat Selection Banner */}
-      {selectedSeat && canEditClass ? (
+      {/* Active Seat Selection Banner (Arrange modes) */}
+      {selectedSeat && canEditClass && lens !== 'quick' ? (
         <FadeIn index={0}>
           <Card style={[styles.selectBanner, { borderColor: theme.accent, borderWidth: 1.5 }]}>
             <View style={styles.flex}>
@@ -296,6 +436,206 @@ export default function SeatingScreen() {
             <Button label={'Huỷ'} size={'sm'} variant={'ghost'} onPress={() => setSelectedSeat(null)} />
           </Card>
         </FadeIn>
+      ) : null}
+
+      {/* Classroom Interactive Quick-Action Bar (`Ghi nhanh` mode) */}
+      {lens === 'quick' ? (
+        quickStudent ? (
+          <Card style={[styles.quickBar, { borderColor: theme.success, borderWidth: 1.5 }]}>
+            <View style={styles.quickBarHead}>
+              <Avatar name={quickStudent.name} size={42} ring />
+              <View style={styles.flex}>
+                <View style={styles.quickTitleRow}>
+                  <Text style={[styles.quickStudentName, { color: theme.text }]} numberOfLines={1}>
+                    {quickStudent.name}
+                  </Text>
+                  <Badge
+                    label={quickStudent.group || `Lớp ${classInfo.name}`}
+                    color={'accentText'}
+                    soft={'accentSoft'}
+                  />
+                </View>
+                <Text style={{ color: theme.textSecondary, fontSize: 11.5, fontWeight: '600' }}>
+                  {`Tuần: ${quickStudyRow?.weeklySpeeches ?? 0} stamp · HK I: ${quickStudyRow?.hk1Speeches ?? 0} stamp (+${formatPoints(quickStudyRow?.hk1Points ?? 0)}đ)`}
+                  {quickAttMeta ? ` · ${quickAttMeta.label}` : ''}
+                </Text>
+              </View>
+              <Pressable
+                onPress={() =>
+                  router.push({ pathname: '/student/[id]', params: { id: quickStudent.id } } as never)
+                }
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel={`Mở hồ sơ chi tiết của ${quickStudent.name}`}
+                style={[styles.quickIconBtn, { backgroundColor: theme.accentSoft }]}>
+                <Ionicons name="person-outline" size={16} color={theme.accentText} />
+              </Pressable>
+              <Pressable
+                onPress={() => setQuickSeatKey(null)}
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel="Đóng thanh ghi nhanh"
+                style={[styles.quickIconBtn, { backgroundColor: theme.backgroundElement }]}>
+                <Ionicons name="close" size={16} color={theme.textSecondary} />
+              </Pressable>
+            </View>
+
+            {/* +1 Stamp (+0,25đ) — strictly gated by `canRecordStudyForStudent` */}
+            {canStampQuickStudent ? (
+              <View style={styles.quickSection}>
+                <View style={styles.quickSectionHead}>
+                  <Ionicons name="book-outline" size={13} color={theme.success} />
+                  <Text style={[styles.quickSectionLabel, { color: theme.textMuted }]}>
+                    MÔN HỌC GHI STAMP (+0,25Đ / PHÁT BIỂU)
+                  </Text>
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.subjectRow}>
+                  {subjectChoices.map((subj) => {
+                    const selected = activeSubject === subj;
+                    return (
+                      <Pressable
+                        key={subj}
+                        onPress={() => setSubjectDraft(subj)}
+                        hitSlop={{ top: 4, bottom: 4, left: 2, right: 2 }}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Chọn môn ${subj}`}
+                        accessibilityState={{ selected }}
+                        style={[
+                          styles.subjectChip,
+                          {
+                            backgroundColor: selected ? theme.success : theme.backgroundElement,
+                            borderColor: selected ? theme.success : theme.border,
+                          },
+                        ]}>
+                        <Text
+                          style={[
+                            styles.subjectChipText,
+                            { color: selected ? '#FFFFFF' : theme.textSecondary },
+                          ]}>
+                          {subj}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+
+                <View style={styles.quickActionRow}>
+                  <Button
+                    label={
+                      stamping
+                        ? 'Đang ghi Stamp...'
+                        : `+1 Stamp (+${formatPoints(STUDY_STAMP_POINTS)}đ) · ${activeSubject}`
+                    }
+                    icon={'flash'}
+                    size={'sm'}
+                    disabled={stamping}
+                    style={styles.flex}
+                    onPress={() => void handleQuickStamp()}
+                  />
+                  {canWarnQuickStudent ? (
+                    <Button
+                      label={'Vi phạm'}
+                      icon={'alert-circle-outline'}
+                      variant={'danger'}
+                      size={'sm'}
+                      onPress={() =>
+                        router.push({
+                          pathname: '/entry-form',
+                          params: { studentId: quickStudent.id, mode: 'violation' },
+                        } as never)
+                      }
+                    />
+                  ) : null}
+                </View>
+              </View>
+            ) : (
+              <View
+                style={[
+                  styles.readonlyBanner,
+                  { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+                ]}>
+                <Ionicons name="lock-closed-outline" size={14} color={theme.textMuted} />
+                <Text style={{ color: theme.textSecondary, fontSize: 12, flex: 1 }}>
+                  {canWarnQuickStudent
+                    ? 'Tài khoản của bạn không có quyền cộng Stamp cho học sinh này, nhưng vẫn có thể ghi nhắc nhở kỷ luật.'
+                    : 'Chế độ xem nhanh · Chỉ GVCN, GV Bộ môn & Ban cán sự đúng phạm vi Tổ mới được cộng Stamp.'}
+                </Text>
+                {canWarnQuickStudent ? (
+                  <Button
+                    label={'Vi phạm'}
+                    icon={'alert-circle-outline'}
+                    variant={'danger'}
+                    size={'sm'}
+                    onPress={() =>
+                      router.push({
+                        pathname: '/entry-form',
+                        params: { studentId: quickStudent.id, mode: 'violation' },
+                      } as never)
+                    }
+                  />
+                ) : null}
+              </View>
+            )}
+
+            {/* Quick Today Attendance Toggle — strictly gated by `canEditClass` */}
+            {canEditClass ? (
+              <View style={styles.quickSection}>
+                <View style={styles.quickSectionHead}>
+                  <Ionicons name="checkbox-outline" size={13} color={theme.accent} />
+                  <Text style={[styles.quickSectionLabel, { color: theme.textMuted }]}>
+                    ĐIỂM DANH NHANH HÔM NAY
+                  </Text>
+                </View>
+                <View style={styles.attQuickRow}>
+                  {ATTENDANCE_STATUS_LIST.map((st) => {
+                    const meta = ATTENDANCE_STATUSES[st];
+                    const active = quickAttStatus === st;
+                    return (
+                      <Pressable
+                        key={st}
+                        onPress={() => handleQuickAttendance(st)}
+                        hitSlop={{ top: 4, bottom: 4, left: 2, right: 2 }}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Chấm ${meta.label} cho ${quickStudent.name}`}
+                        accessibilityState={{ selected: active }}
+                        style={[
+                          styles.attQuickBtn,
+                          {
+                            backgroundColor: active ? theme[meta.color] : theme[meta.soft],
+                            borderColor: theme[meta.color],
+                          },
+                        ]}>
+                        <Ionicons
+                          name={meta.icon}
+                          size={13}
+                          color={active ? '#FFFFFF' : theme[meta.color]}
+                        />
+                        <Text
+                          style={[
+                            styles.attQuickText,
+                            { color: active ? '#FFFFFF' : theme[meta.color] },
+                          ]}>
+                          {meta.short}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
+          </Card>
+        ) : (
+          <Card style={[styles.quickHintCard, { borderColor: theme.success }]}>
+            <Ionicons name="flash" size={16} color={theme.success} />
+            <Text style={{ color: theme.textSecondary, fontSize: 12.5, flex: 1, fontWeight: '600' }}>
+              Chế độ Ghi nhanh trong lớp: Chạm trực tiếp vào bàn của bất kỳ học sinh nào để cộng +1
+              Stamp (+0,25đ) hoặc chấm chuyên cần tức thì!
+            </Text>
+          </Card>
+        )
       ) : null}
 
       {/* Chalkboard & Podium */}
@@ -326,12 +666,22 @@ export default function SeatingScreen() {
                   const key = `${r}-${c}`;
                   const sid = seating.seats[key];
                   const student = sid ? studentMap.get(sid) : undefined;
-                  const isSelected = selectedSeat === key;
+                  const isSelected = lens === 'quick' ? quickSeatKey === key : selectedSeat === key;
                   const groupColor: ThemeColor =
                     (student?.group && GROUP_COLORS[student.group.trim()]) || 'accent';
                   const pts = student ? statsOfStudent(student.id).points : 0;
                   const attRec = student ? todayAtt?.records[student.id]?.status : undefined;
                   const attMeta = attRec ? ATTENDANCE_STATUSES[attRec] : null;
+                  const stuStudy = student ? studyByStudentId.get(student.id) : undefined;
+                  const weeklyStamps = stuStudy?.weeklySpeeches ?? 0;
+                  const hk1Stamps = stuStudy?.hk1Speeches ?? 0;
+                  const deskBorderColor = isSelected
+                    ? lens === 'quick'
+                      ? theme.success
+                      : theme.accent
+                    : student
+                      ? theme.border
+                      : 'transparent';
 
                   return (
                     <View
@@ -347,15 +697,22 @@ export default function SeatingScreen() {
                             router.push({ pathname: '/student/[id]', params: { id: student.id } } as never);
                           }
                         }}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          student
+                            ? `Ghế hàng ${r + 1} cột ${c + 1}: ${student.name}${
+                                lens === 'quick'
+                                  ? `, ${weeklyStamps} stamp tuần, ${hk1Stamps} stamp học kỳ 1`
+                                  : ''
+                              }`
+                            : `Ghế trống hàng ${r + 1} cột ${c + 1}`
+                        }
+                        accessibilityState={{ selected: isSelected }}
                         style={({ pressed }) => [
                           styles.desk,
                           {
                             backgroundColor: student ? theme.card : theme.backgroundElement,
-                            borderColor: isSelected
-                              ? theme.accent
-                              : student
-                                ? theme.border
-                                : 'transparent',
+                            borderColor: deskBorderColor,
                             borderWidth: isSelected ? 2 : StyleSheet.hairlineWidth,
                           },
                           student && Shadow.card,
@@ -365,7 +722,45 @@ export default function SeatingScreen() {
                           <>
                             <View style={styles.deskTop}>
                               <Avatar name={student.name} size={30} />
-                              {lens === 'attendance' && attMeta ? (
+                              {lens === 'quick' ? (
+                                <View style={styles.quickBadgeCluster}>
+                                  {attMeta ? (
+                                    <View
+                                      style={[
+                                        styles.lensDotSmall,
+                                        { backgroundColor: theme[attMeta.color] },
+                                      ]}
+                                    />
+                                  ) : null}
+                                  <View
+                                    style={[
+                                      styles.ptsMini,
+                                      {
+                                        backgroundColor:
+                                          weeklyStamps > 0 || hk1Stamps > 0
+                                            ? theme.successSoft
+                                            : theme.backgroundElement,
+                                      },
+                                    ]}>
+                                    <Text
+                                      style={[
+                                        styles.ptsMiniText,
+                                        {
+                                          color:
+                                            weeklyStamps > 0 || hk1Stamps > 0
+                                              ? theme.success
+                                              : theme.textMuted,
+                                        },
+                                      ]}>
+                                      {weeklyStamps > 0
+                                        ? `${weeklyStamps}⚡`
+                                        : hk1Stamps > 0
+                                          ? `${hk1Stamps}★`
+                                          : '0⚡'}
+                                    </Text>
+                                  </View>
+                                </View>
+                              ) : lens === 'attendance' && attMeta ? (
                                 <View
                                   style={[
                                     styles.lensDot,
@@ -375,7 +770,7 @@ export default function SeatingScreen() {
                               ) : lens === 'points' ? (
                                 <View style={[styles.ptsMini, { backgroundColor: theme.accentSoft }]}>
                                   <Text style={[styles.ptsMiniText, { color: theme.accentText }]}>
-                                    {pts}đ
+                                    {formatPoints(pts)}đ
                                   </Text>
                                 </View>
                               ) : (
@@ -395,9 +790,13 @@ export default function SeatingScreen() {
                             <Text
                               style={[styles.deskMeta, { color: theme.textMuted }]}
                               numberOfLines={1}>
-                              {lens === 'attendance'
-                                ? (attMeta?.short ?? 'Chưa chấm')
-                                : (student.group ?? `H${r + 1}·G${c + 1}`)}
+                              {lens === 'quick'
+                                ? hk1Stamps > 0
+                                  ? `HK1: +${formatPoints(stuStudy?.hk1Points ?? 0)}đ`
+                                  : (attMeta?.short ?? 'Chạm ghi')
+                                : lens === 'attendance'
+                                  ? (attMeta?.short ?? 'Chưa chấm')
+                                  : (student.group ?? `H${r + 1}·G${c + 1}`)}
                             </Text>
                           </>
                         ) : (
@@ -440,6 +839,13 @@ export default function SeatingScreen() {
                     if (canEditClass) handleAssignToSelected(s.id);
                     else router.push({ pathname: '/student/[id]', params: { id: s.id } } as never);
                   }}
+                  hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    canEditClass
+                      ? `Xếp chỗ cho học sinh ${s.name}`
+                      : `Xem hồ sơ học sinh ${s.name}`
+                  }
                   style={({ pressed }) => [
                     styles.poolChip,
                     { backgroundColor: theme.backgroundElement, borderColor: theme.border },
@@ -455,9 +861,11 @@ export default function SeatingScreen() {
       ) : null}
 
       <Text style={[styles.tip, { color: theme.textMuted }]}>
-        {canEditClass
-          ? 'Mẹo: Chạm 2 ghế bất kỳ để hoán đổi chỗ · Nhấn giữ ghế để mở nhanh hồ sơ học sinh.'
-          : 'Chạm vào ghế của bất kỳ bạn nào để xem hồ sơ thi đua.'}
+        {lens === 'quick'
+          ? 'Chế độ Ghi nhanh: Chạm vào từng bàn để cộng +1 Stamp (+0,25đ) hoặc chấm chuyên cần · Nhấn giữ để mở hồ sơ.'
+          : canEditClass
+            ? 'Mẹo: Chạm 2 ghế bất kỳ để hoán đổi chỗ · Nhấn giữ ghế để mở nhanh hồ sơ học sinh.'
+            : 'Chạm vào ghế của bất kỳ bạn nào để xem hồ sơ thi đua.'}
       </Text>
     </Screen>
   );
@@ -465,7 +873,8 @@ export default function SeatingScreen() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  segment: {
+  segmentScroll: {
+    flexGrow: 1,
     flexDirection: 'row',
     padding: 5,
     borderRadius: Radius.pill,
@@ -474,10 +883,13 @@ const styles = StyleSheet.create({
   },
   segBtn: {
     flex: 1,
+    minHeight: 40,
+    minWidth: 84,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 5,
+    paddingHorizontal: 10,
     paddingVertical: 9,
     borderRadius: Radius.pill,
   },
@@ -486,12 +898,113 @@ const styles = StyleSheet.create({
   controlsTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   ctrlLabel: { fontSize: 14, fontWeight: '800' },
   dimControls: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  dimBtn: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  dimBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   dimText: { fontSize: 12, fontWeight: '800', minWidth: 34, textAlign: 'center' },
-  dimPill: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: Radius.pill },
+  dimPill: {
+    minHeight: 36,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: Radius.pill,
+    justifyContent: 'center',
+  },
   arrangeRow: { gap: Spacing.two, paddingRight: Spacing.two },
   selectBanner: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   selectTitle: { fontSize: 14, fontWeight: '800' },
+  quickHintCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    borderWidth: 1,
+  },
+  quickBar: {
+    gap: Spacing.two + 4,
+  },
+  quickBarHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  quickTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  quickStudentName: {
+    fontSize: 15,
+    fontWeight: '900',
+    flexShrink: 1,
+  },
+  quickIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickSection: {
+    gap: 6,
+  },
+  quickSectionHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  quickSectionLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
+  subjectRow: {
+    gap: 6,
+    paddingRight: Spacing.two,
+  },
+  subjectChip: {
+    minHeight: 36,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: Radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    justifyContent: 'center',
+  },
+  subjectChipText: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  quickActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginTop: 2,
+  },
+  readonlyBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    padding: 10,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  attQuickRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  attQuickBtn: {
+    flex: 1,
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 7,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  attQuickText: {
+    fontSize: 11.5,
+    fontWeight: '800',
+  },
   board: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -513,8 +1026,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 4,
   },
-  deskTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  deskTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 2 },
+  quickBadgeCluster: { flexDirection: 'row', alignItems: 'center', gap: 3 },
   lensDot: { width: 9, height: 9, borderRadius: 4.5 },
+  lensDotSmall: { width: 7, height: 7, borderRadius: 3.5 },
   ptsMini: { paddingHorizontal: 5, paddingVertical: 2, borderRadius: Radius.pill },
   ptsMiniText: { fontSize: 9, fontWeight: '900' },
   deskName: { fontSize: 11, fontWeight: '800', lineHeight: 14 },
@@ -524,12 +1039,13 @@ const styles = StyleSheet.create({
   unassignedCard: { gap: Spacing.two + 2 },
   poolWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   poolChip: {
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingLeft: 4,
-    paddingRight: 10,
-    paddingVertical: 4,
+    paddingLeft: 6,
+    paddingRight: 12,
+    paddingVertical: 6,
     borderRadius: Radius.pill,
     borderWidth: StyleSheet.hairlineWidth,
   },

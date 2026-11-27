@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -33,12 +33,18 @@ export function ModalHeader({
       <Pressable
         onPress={onClose ?? (() => router.back())}
         hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel="Đóng"
+        accessibilityHint="Quay lại màn hình trước"
         style={[styles.iconButton, { backgroundColor: theme.backgroundElement }]}>
         <Ionicons name="close" size={18} color={theme.text} />
       </Pressable>
 
       <View style={styles.titles}>
-        <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
+        <Text
+          accessibilityRole="header"
+          style={[styles.title, { color: theme.text }]}
+          numberOfLines={1}>
           {title}
         </Text>
         {subtitle ? (
@@ -49,7 +55,12 @@ export function ModalHeader({
       </View>
 
       {actionLabel && onAction ? (
-        <Pressable onPress={onAction} hitSlop={8} style={styles.action}>
+        <Pressable
+          onPress={onAction}
+          hitSlop={{ top: 8, bottom: 8, left: 10, right: 10 }}
+          accessibilityRole="button"
+          accessibilityLabel={actionLabel}
+          style={styles.action}>
           <Text style={[styles.actionText, { color: danger ? theme.danger : theme.accentText }]}>
             {actionLabel}
           </Text>
@@ -80,6 +91,6 @@ const styles = StyleSheet.create({
   titles: { flex: 1, alignItems: 'center' },
   title: { fontSize: 16, fontWeight: '800' },
   subtitle: { fontSize: 11 },
-  action: { minWidth: 56, alignItems: 'flex-end' },
+  action: { minWidth: 56, minHeight: 36, justifyContent: 'center', alignItems: 'flex-end' },
   actionText: { fontSize: 15, fontWeight: '700' },
 });

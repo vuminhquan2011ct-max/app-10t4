@@ -9,7 +9,7 @@
  *  - Natural Vietnamese Q&A copilot with diacritic-tolerant matching
  */
 
-import type { Ionicons } from '@expo/vector-icons';
+import type Ionicons from '@expo/vector-icons/Ionicons';
 
 import { formatPoints } from '@/constants/entry-meta';
 import type { ThemeColor } from '@/constants/theme';

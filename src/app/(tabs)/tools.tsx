@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo } from 'react';
@@ -169,7 +169,7 @@ export default function ToolsScreen() {
     {
       title: 'Học tập & Phát biểu Môn',
       desc: 'Ghi nhận 1 chạm phát biểu theo từng môn, thống kê Tuần & Cộng dồn cuối Học kỳ I',
-      kpi: `Tuần: ${studyReport.weekly.totalSpeeches} · HK I: ${studyReport.semester1.totalSpeeches} lượt`,
+      kpi: `Tuần: ${studyReport.weekly.totalSpeeches} · HK I: ${studyReport.semester1.totalSpeeches} stamps`,
       icon: 'book',
       color: 'success',
       soft: 'successSoft',

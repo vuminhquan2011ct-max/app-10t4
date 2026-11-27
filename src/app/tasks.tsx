@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
+import { ConfirmActionButton } from '@/components/ui/confirm-action-button';
 import { DatePickerField } from '@/components/ui/date-picker-field';
 import {
   DriveAttachmentList,
@@ -413,6 +414,7 @@ export default function TasksScreen() {
             <DriveAttachmentList
               attachments={attachments}
               editable
+              confirmBeforeRemove
               onRemove={handleRemoveDraftAttachment}
             />
             <Button
@@ -501,7 +503,9 @@ export default function TasksScreen() {
                         done ? 'info' : 'success',
                       );
                     }}
-                    accessibilityRole="button"
+                    hitSlop={10}
+                    accessibilityRole="checkbox"
+                    accessibilityState={{ checked: done }}
                     accessibilityLabel={done ? 'Bỏ đánh dấu hoàn thành' : 'Đánh dấu hoàn thành'}
                     style={[
                       styles.checkbox,
@@ -555,16 +559,14 @@ export default function TasksScreen() {
                   </View>
 
                   {deletable ? (
-                    <Pressable
-                      onPress={() => {
+                    <ConfirmActionButton
+                      onConfirm={() => {
                         removeTask(task.id);
                         showToast('Đã xoá nhiệm vụ & tệp đính kèm khỏi App, Drive & Excel', 'warning');
                       }}
-                      hitSlop={8}
-                      accessibilityRole="button"
-                      accessibilityLabel="Xoá nhiệm vụ">
-                      <Ionicons name="trash-outline" size={16} color={theme.textMuted} />
-                    </Pressable>
+                      accessibilityLabel={`Xoá nhiệm vụ ${task.title}`}
+                      confirmAccessibilityLabel={`Nhấn lại để xoá nhiệm vụ ${task.title}`}
+                    />
                   ) : null}
                 </View>
 
@@ -630,6 +632,9 @@ export default function TasksScreen() {
                             },
                           } as never)
                         }
+                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Đăng ${task.title} lên bản tin lớp`}
                         style={({ pressed }) => [
                           styles.broadcastBtn,
                           { backgroundColor: theme.accentSoft, borderColor: theme.accent },

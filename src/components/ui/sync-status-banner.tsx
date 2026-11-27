@@ -4,17 +4,17 @@
  * when healthy/synced so it adds zero visual noise).
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Radius, Shadow, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { useClassStore } from '@/store/class-store';
+import { useClassSync } from '@/store/class-store';
 
 export function SyncStatusBanner() {
-  const { syncStatus, hasPendingPush, pullNow } = useClassStore();
+  const { syncStatus, hasPendingPush, pullNow } = useClassSync();
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const [retrying, setRetrying] = useState(false);

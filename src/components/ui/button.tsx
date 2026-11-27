@@ -1,4 +1,4 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
 
@@ -15,7 +15,12 @@ type ButtonProps = {
   disabled?: boolean;
   size?: 'md' | 'sm';
   style?: StyleProp<ViewStyle>;
+  accessibilityLabel?: string;
+  accessibilityHint?: string;
 };
+
+const SMALL_HIT_SLOP = { top: 6, bottom: 6, left: 6, right: 6 } as const;
+const MEDIUM_HIT_SLOP = { top: 2, bottom: 2, left: 2, right: 2 } as const;
 
 /** Pill-shaped action button; the primary variant uses the brand gradient with an inner highlight border. */
 export function Button({
@@ -26,6 +31,8 @@ export function Button({
   disabled = false,
   size = 'md',
   style,
+  accessibilityLabel,
+  accessibilityHint,
 }: ButtonProps) {
   const theme = useTheme();
   const gradient = useBrandGradient();
@@ -43,6 +50,11 @@ export function Button({
     <Pressable
       onPress={onPress}
       disabled={disabled}
+      hitSlop={size === 'sm' ? SMALL_HIT_SLOP : MEDIUM_HIT_SLOP}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityHint={accessibilityHint}
+      accessibilityState={{ disabled }}
       style={({ pressed }) => [
         styles.button,
         size === 'sm' ? styles.small : styles.medium,

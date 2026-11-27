@@ -1,17 +1,21 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Linking,
+  Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -32,7 +36,7 @@ import {
   ENTRY_STATUSES,
   formatSignedPoints,
 } from '@/constants/entry-meta';
-import { Radius, Shadow, Spacing } from '@/constants/theme';
+import { MaxContentWidth, Radius, Shadow, Spacing, TabBarSpace } from '@/constants/theme';
 import { useBrandGradient, useTheme } from '@/hooks/use-theme';
 import { formatDate } from '@/lib/date';
 import {
@@ -125,6 +129,12 @@ const KIND_FILTERS: { value: KindFilter; label: string; icon: keyof typeof Ionic
   { value: 'duty', label: '🧹 Trực nhật', icon: 'leaf-outline' },
 ];
 
+const FEED_PAGE_SIZE = 30;
+
+function ListItemGap() {
+  return <View style={styles.itemGap} />;
+}
+
 export default function FeedScreen() {
   const {
     entries,
@@ -149,7 +159,9 @@ export default function FeedScreen() {
   } = useClassStore();
   const theme = useTheme();
   const gradient = useBrandGradient();
+  const insets = useSafeAreaInsets();
   const { showToast } = useToast();
+  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
@@ -160,6 +172,15 @@ export default function FeedScreen() {
   const [deletingStampEntryId, setDeletingStampEntryId] = useState<string | null>(null);
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stampConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await pullNow();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [pullNow]);
 
   const rosterById = useMemo(
     () => new Map(classRosterPublic.map((s) => [s.id, s])),
@@ -318,6 +339,12 @@ export default function FeedScreen() {
         ? 'study'
         : undefined;
 
+  const filterKey = `${query}|${filter}|${kindFilter}|${catFilter}`;
+  const [pageState, setPageState] = useState({ key: filterKey, limit: FEED_PAGE_SIZE });
+  const visibleLimit = pageState.key === filterKey ? pageState.limit : FEED_PAGE_SIZE;
+  const pagedEntries = sorted.slice(0, visibleLimit);
+  const remainingCount = Math.max(0, sorted.length - pagedEntries.length);
+
   const primaryCtaLabel =
     primaryCtaMode === 'violation'
       ? 'Ghi học sinh vi phạm'
@@ -331,8 +358,8 @@ export default function FeedScreen() {
             ? 'Ghi điểm / Vi phạm'
             : 'Ghi thành tích mới';
 
-  return (
-    <Screen onRefresh={pullNow}>
+  const listHeader = (
+    <View style={styles.listHeader}>
       <FadeIn index={0}>
         <SectionHeader
           large
@@ -372,7 +399,11 @@ export default function FeedScreen() {
                     : 'NHẬT KÝ CÁ NHÂN'}
               </Text>
             </View>
-            <Text style={styles.bannerCountHint}>{`Hiển thị ${sorted.length} mục`}</Text>
+            <Text style={styles.bannerCountHint}>
+              {remainingCount > 0
+                ? `Hiển thị ${pagedEntries.length}/${sorted.length} mục`
+                : `Hiển thị ${sorted.length} mục`}
+            </Text>
           </View>
 
           <View style={styles.kpiRow}>
@@ -562,402 +593,475 @@ export default function FeedScreen() {
           </View>
         </Card>
       </FadeIn>
+    </View>
+  );
 
-      {sorted.length === 0 ? (
-        <EmptyState
-          title={'Chưa có mục phù hợp'}
-          message={'Thử bỏ bộ lọc hoặc bấm nút thêm mới ở trên để ghi nhận nhé.'}
+  const listEmpty = (
+    <EmptyState
+      title={'Chưa có mục phù hợp'}
+      message={'Thử bỏ bộ lọc hoặc bấm nút thêm mới ở trên để ghi nhận nhé.'}
+    />
+  );
+
+  const listFooter =
+    remainingCount > 0 ? (
+      <View style={styles.loadMoreWrap}>
+        <Text style={[styles.loadMoreHint, { color: theme.textMuted }]}>
+          {`Đang hiển thị ${pagedEntries.length} / ${sorted.length} mục`}
+        </Text>
+        <Button
+          label={`Tải thêm ${Math.min(FEED_PAGE_SIZE, remainingCount)} mục (còn ${remainingCount})`}
+          variant={'soft'}
+          icon={'chevron-down-circle-outline'}
+          onPress={() =>
+            setPageState({ key: filterKey, limit: visibleLimit + FEED_PAGE_SIZE })
+          }
         />
-      ) : (
-        sorted.map((entry, i) => {
-          const status = ENTRY_STATUSES[entry.status];
-          const isViolation = entry.kind === 'violation' || entry.points < 0;
-          const isStudy = entry.kind === 'study';
-          const isAcademic = entry.category === 'academic';
-          const isDuty = entry.source === 'duty_diligence';
-          const kind = ENTRY_KINDS[entry.kind] ?? ENTRY_KINDS.achievement;
-          const accentColor = isViolation ? 'danger' : isStudy ? 'success' : kind.color;
-          const accentSoft = isViolation ? 'dangerSoft' : isStudy ? 'successSoft' : kind.soft;
-          const speechCount = isStudy ? Math.max(1, Math.round(entry.speechCount ?? 1)) : 0;
-          const category = ENTRY_CATEGORIES[entry.category] ?? ENTRY_CATEGORIES.other;
-          const student = getStudent(entry.studentId);
-          const pubStudent = rosterById.get(entry.studentId);
-          const studentName = student?.name ?? pubStudent?.name ?? 'Học sinh';
-          const studentGroup = student?.group ?? pubStudent?.group ?? null;
-          const canDeleteStamp = isStudy && canDeleteStudyStamp(entry);
-          const canOpenForm =
-            canEditClass ||
-            canDeleteStamp ||
-            (entry.status === 'pending' && entry.studentId === currentStudentId);
-          const canOpenStudent = canViewAll || entry.studentId === currentStudentId;
-          const attributionText =
-            entry.recordedByPosition && entry.recordedByName
-              ? `Ghi bởi ${entry.recordedByPosition}: ${entry.recordedByName}`
-              : entry.recordedByPosition || entry.recordedByName
-                ? `Ghi bởi ${entry.recordedByPosition || entry.recordedByName}`
-                : null;
+      </View>
+    ) : undefined;
 
-          return (
-            <FadeIn key={entry.id} index={Math.min(i + 3, 10)}>
-              <Card
+  const renderEntryItem = ({ item: entry }: { item: Entry }) => {
+    const status = ENTRY_STATUSES[entry.status];
+    const isViolation = entry.kind === 'violation' || entry.points < 0;
+    const isStudy = entry.kind === 'study';
+    const isAcademic = entry.category === 'academic';
+    const isDuty = entry.source === 'duty_diligence';
+    const kind = ENTRY_KINDS[entry.kind] ?? ENTRY_KINDS.achievement;
+    const accentColor = isViolation ? 'danger' : isStudy ? 'success' : kind.color;
+    const accentSoft = isViolation ? 'dangerSoft' : isStudy ? 'successSoft' : kind.soft;
+    const speechCount = isStudy ? Math.max(1, Math.round(entry.speechCount ?? 1)) : 0;
+    const category = ENTRY_CATEGORIES[entry.category] ?? ENTRY_CATEGORIES.other;
+    const student = getStudent(entry.studentId);
+    const pubStudent = rosterById.get(entry.studentId);
+    const studentName = student?.name ?? pubStudent?.name ?? 'Học sinh';
+    const studentGroup = student?.group ?? pubStudent?.group ?? null;
+    const canDeleteStamp = isStudy && canDeleteStudyStamp(entry);
+    const canOpenForm =
+      canEditClass ||
+      canDeleteStamp ||
+      (entry.status === 'pending' && entry.studentId === currentStudentId);
+    const canOpenStudent = canViewAll || entry.studentId === currentStudentId;
+    const attributionText =
+      entry.recordedByPosition && entry.recordedByName
+        ? `Ghi bởi ${entry.recordedByPosition}: ${entry.recordedByName}`
+        : entry.recordedByPosition || entry.recordedByName
+          ? `Ghi bởi ${entry.recordedByPosition || entry.recordedByName}`
+          : null;
+
+    return (
+      <Card
+        style={[
+          styles.card,
+          entry.status === 'pending' && {
+            borderColor: theme.warning,
+            borderWidth: 1,
+          },
+          isViolation &&
+            entry.status !== 'pending' && {
+              borderColor: theme.danger,
+              borderWidth: 1,
+            },
+          isStudy &&
+            entry.status !== 'pending' && {
+              borderColor: theme.success,
+              borderWidth: 1,
+            },
+        ]}
+        onPress={
+          canOpenForm
+            ? () =>
+                router.push({ pathname: '/entry-form', params: { id: entry.id } } as never)
+            : canOpenStudent
+              ? () =>
+                  router.push({
+                    pathname: '/student/[id]',
+                    params: { id: entry.studentId },
+                  } as never)
+              : undefined
+        }>
+        {/* Left Accent Timeline Stripe */}
+        <View
+          style={[
+            styles.timelineStripe,
+            { backgroundColor: theme[accentColor] },
+          ]}
+        />
+
+        {/* Top Meta Header: Student Avatar + Name + Date */}
+        <View style={styles.metaTopRow}>
+          <View style={styles.studentPill}>
+            <Avatar name={studentName} size={24} />
+            <Text style={[styles.studentNameText, { color: theme.text }]} numberOfLines={1}>
+              {studentName}
+            </Text>
+            {studentGroup ? (
+              <Text style={[styles.studentGroupText, { color: theme.textMuted }]}>
+                {`· ${studentGroup}`}
+              </Text>
+            ) : null}
+          </View>
+          <View style={[styles.dateChip, { backgroundColor: theme.backgroundElement }]}>
+            <Ionicons name="calendar-outline" size={11} color={theme.textSecondary} />
+            <Text style={[styles.dateText, { color: theme.textSecondary }]}>
+              {formatDate(entry.date)}
+            </Text>
+          </View>
+        </View>
+
+        {/* Main Entry Row: Kind Squircle Icon + Title + Points Pill */}
+        <View style={styles.head}>
+          <View
+            style={[
+              styles.iconBox,
+              {
+                backgroundColor: theme[accentSoft],
+                borderColor: theme[accentColor],
+              },
+            ]}>
+            <Ionicons
+              name={isViolation ? 'alert-circle' : isStudy ? 'book' : kind.icon}
+              size={21}
+              color={theme[accentColor]}
+            />
+          </View>
+          <View style={styles.headBody}>
+            <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
+              {entry.title}
+            </Text>
+            <Text style={[styles.kindLabelText, { color: theme[accentColor] }]}>
+              {isViolation
+                ? 'Vi phạm / Nhắc nhở'
+                : isStudy
+                  ? entry.subject
+                    ? `${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`} · Môn ${entry.subject}`
+                    : `Học tập · ${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`}`
+                  : kind.label}
+            </Text>
+          </View>
+          {entry.points !== 0 ? (
+            <View
+              style={[
+                styles.points,
+                {
+                  backgroundColor: theme[accentSoft],
+                  borderColor: theme[accentColor],
+                },
+              ]}>
+              <Ionicons
+                name={entry.points < 0 ? 'alert-circle' : isStudy ? 'book' : 'sparkles'}
+                size={11}
+                color={theme[accentColor]}
+              />
+              <Text style={[styles.pointsValue, { color: theme[accentColor] }]}>
+                {formatSignedPoints(entry.points)}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+
+        {entry.description ? (
+          <Text style={[styles.desc, { color: theme.textSecondary }]} numberOfLines={2}>
+            {entry.description}
+          </Text>
+        ) : null}
+
+        {entry.proofUrl && isGoogleDriveUrl(entry.proofUrl) ? (
+          <FeedProofPreview
+            proofUrl={entry.proofUrl}
+            onPress={() => openProof(entry.proofUrl!)}
+          />
+        ) : null}
+
+        {/* Badges Row */}
+        <View style={styles.badges}>
+          {isStudy ? (
+            <Badge
+              label={`${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`} · ${entry.subject || 'Học tập'}`}
+              color={'success'}
+              soft={'successSoft'}
+              icon={'book'}
+            />
+          ) : null}
+          {isAcademic ? (
+            <Badge
+              label={'Thành tích Học thuật'}
+              color={'gold'}
+              soft={'goldSoft'}
+              icon={'school'}
+            />
+          ) : null}
+          {isViolation ? (
+            <Badge
+              label={'Vi phạm'}
+              color={'danger'}
+              soft={'dangerSoft'}
+              icon={'alert-circle'}
+            />
+          ) : null}
+          {isDuty ? (
+            <Badge
+              label={'Trực nhật · Chuyên cần'}
+              color={entry.points < 0 ? 'danger' : 'success'}
+              soft={entry.points < 0 ? 'dangerSoft' : 'successSoft'}
+              icon={'leaf'}
+            />
+          ) : null}
+          {attributionText ? (
+            <Badge
+              label={attributionText}
+              color={'purple'}
+              soft={'purpleSoft'}
+              icon={'shield-checkmark-outline'}
+            />
+          ) : null}
+          <Badge
+            label={status.label}
+            color={status.color}
+            soft={status.soft}
+            icon={status.icon}
+          />
+          {!isStudy && !isAcademic ? (
+            <Badge
+              label={category.label}
+              color={'purple'}
+              soft={'purpleSoft'}
+              icon={category.icon}
+            />
+          ) : null}
+          <Badge
+            label={ENTRY_LEVELS[entry.level].label}
+            color={'accentText'}
+            soft={'accentSoft'}
+          />
+          {entry.proofUrl ? (
+            <>
+              <Pressable
+                onPress={(e) => {
+                  e.stopPropagation?.();
+                  openProof(entry.proofUrl!);
+                }}
                 style={[
-                  styles.card,
-                  entry.status === 'pending' && {
-                    borderColor: theme.warning,
-                    borderWidth: 1,
+                  styles.proofChip,
+                  {
+                    backgroundColor: theme.accentSoft,
+                    borderColor: theme.accent,
                   },
-                  isViolation &&
-                    entry.status !== 'pending' && {
-                      borderColor: theme.danger,
-                      borderWidth: 1,
-                    },
-                  isStudy &&
-                    entry.status !== 'pending' && {
-                      borderColor: theme.success,
-                      borderWidth: 1,
-                    },
-                ]}
-                onPress={
-                  canOpenForm
-                    ? () =>
-                        router.push({ pathname: '/entry-form', params: { id: entry.id } } as never)
-                    : canOpenStudent
-                      ? () =>
-                          router.push({
-                            pathname: '/student/[id]',
-                            params: { id: entry.studentId },
-                          } as never)
-                      : undefined
-                }>
-                {/* Left Accent Timeline Stripe */}
-                <View
-                  style={[
-                    styles.timelineStripe,
-                    { backgroundColor: theme[accentColor] },
-                  ]}
+                ]}>
+                <Ionicons
+                  name={isGoogleDriveUrl(entry.proofUrl) ? 'cloud-done-outline' : 'link'}
+                  size={12}
+                  color={theme.accentText}
                 />
+                <Text style={[styles.proofText, { color: theme.accentText }]}>
+                  {isGoogleDriveUrl(entry.proofUrl) ? 'Minh chứng Drive' : 'Minh chứng'}
+                </Text>
+              </Pressable>
 
-                {/* Top Meta Header: Student Avatar + Name + Date */}
-                <View style={styles.metaTopRow}>
-                  <View style={styles.studentPill}>
-                    <Avatar name={studentName} size={24} />
-                    <Text style={[styles.studentNameText, { color: theme.text }]} numberOfLines={1}>
-                      {studentName}
-                    </Text>
-                    {studentGroup ? (
-                      <Text style={[styles.studentGroupText, { color: theme.textMuted }]}>
-                        {`· ${studentGroup}`}
-                      </Text>
-                    ) : null}
-                  </View>
-                  <View style={[styles.dateChip, { backgroundColor: theme.backgroundElement }]}>
-                    <Ionicons name="calendar-outline" size={11} color={theme.textSecondary} />
-                    <Text style={[styles.dateText, { color: theme.textSecondary }]}>
-                      {formatDate(entry.date)}
-                    </Text>
-                  </View>
-                </View>
-
-                {/* Main Entry Row: Kind Squircle Icon + Title + Points Pill */}
-                <View style={styles.head}>
-                  <View
-                    style={[
-                      styles.iconBox,
-                      {
-                        backgroundColor: theme[accentSoft],
-                        borderColor: theme[accentColor],
-                      },
-                    ]}>
+              {canEditClass ||
+              (Boolean(currentStudentId) &&
+                entry.studentId === currentStudentId &&
+                entry.status === 'pending') ? (
+                <Pressable
+                  disabled={deletingProofEntryId === entry.id}
+                  onPress={(e) => {
+                    e.stopPropagation?.();
+                    void handleRemoveEntryProof(entry.id);
+                  }}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    confirmProofEntryId === entry.id
+                      ? 'Xác nhận xoá tệp minh chứng'
+                      : 'Xoá tệp minh chứng'
+                  }
+                  style={[
+                    styles.proofChip,
+                    {
+                      backgroundColor:
+                        confirmProofEntryId === entry.id ? theme.danger : theme.dangerSoft,
+                      borderColor: theme.danger,
+                    },
+                  ]}>
+                  {deletingProofEntryId === entry.id ? (
+                    <ActivityIndicator size="small" color={theme.danger} />
+                  ) : (
                     <Ionicons
-                      name={isViolation ? 'alert-circle' : isStudy ? 'book' : kind.icon}
-                      size={21}
-                      color={theme[accentColor]}
+                      name={confirmProofEntryId === entry.id ? 'trash' : 'trash-outline'}
+                      size={12}
+                      color={confirmProofEntryId === entry.id ? '#FFFFFF' : theme.danger}
                     />
-                  </View>
-                  <View style={styles.headBody}>
-                    <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
-                      {entry.title}
-                    </Text>
-                    <Text style={[styles.kindLabelText, { color: theme[accentColor] }]}>
-                      {isViolation
-                        ? 'Vi phạm / Nhắc nhở'
-                        : isStudy
-                          ? entry.subject
-                            ? `${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`} · Môn ${entry.subject}`
-                            : `Học tập · ${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`}`
-                          : kind.label}
-                    </Text>
-                  </View>
-                  {entry.points !== 0 ? (
-                    <View
-                      style={[
-                        styles.points,
-                        {
-                          backgroundColor: theme[accentSoft],
-                          borderColor: theme[accentColor],
-                        },
-                      ]}>
-                      <Ionicons
-                        name={entry.points < 0 ? 'alert-circle' : isStudy ? 'book' : 'sparkles'}
-                        size={11}
-                        color={theme[accentColor]}
-                      />
-                      <Text style={[styles.pointsValue, { color: theme[accentColor] }]}>
-                        {formatSignedPoints(entry.points)}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-
-                {entry.description ? (
-                  <Text style={[styles.desc, { color: theme.textSecondary }]} numberOfLines={2}>
-                    {entry.description}
+                  )}
+                  <Text
+                    style={[
+                      styles.proofText,
+                      { color: confirmProofEntryId === entry.id ? '#FFFFFF' : theme.danger },
+                    ]}>
+                    {deletingProofEntryId === entry.id
+                      ? 'Đang xoá...'
+                      : confirmProofEntryId === entry.id
+                        ? 'Xác nhận xoá?'
+                        : 'Xoá tệp'}
                   </Text>
-                ) : null}
+                </Pressable>
+              ) : null}
+            </>
+          ) : null}
+          {canDeleteStamp ? (
+            <Pressable
+              disabled={deletingStampEntryId === entry.id}
+              onPress={(e) => {
+                e.stopPropagation?.();
+                void handleDeleteStudyStamp(entry);
+              }}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel={
+                confirmStampEntryId === entry.id
+                  ? 'Xác nhận xoá stamp phát biểu'
+                  : 'Xoá stamp phát biểu'
+              }
+              style={[
+                styles.proofChip,
+                {
+                  backgroundColor:
+                    confirmStampEntryId === entry.id ? theme.danger : theme.dangerSoft,
+                  borderColor: theme.danger,
+                },
+              ]}>
+              {deletingStampEntryId === entry.id ? (
+                <ActivityIndicator size="small" color={theme.danger} />
+              ) : (
+                <Ionicons
+                  name={confirmStampEntryId === entry.id ? 'trash' : 'trash-outline'}
+                  size={12}
+                  color={confirmStampEntryId === entry.id ? '#FFFFFF' : theme.danger}
+                />
+              )}
+              <Text
+                style={[
+                  styles.proofText,
+                  { color: confirmStampEntryId === entry.id ? '#FFFFFF' : theme.danger },
+                ]}>
+                {deletingStampEntryId === entry.id
+                  ? 'Đang xoá...'
+                  : confirmStampEntryId === entry.id
+                    ? 'Xác nhận xoá?'
+                    : 'Xoá stamp'}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
 
-                {entry.proofUrl && isGoogleDriveUrl(entry.proofUrl) ? (
-                  <FeedProofPreview
-                    proofUrl={entry.proofUrl}
-                    onPress={() => openProof(entry.proofUrl!)}
-                  />
-                ) : null}
+        {entry.reviewNote ? (
+          <View
+            style={[
+              styles.noteBox,
+              {
+                backgroundColor: theme.backgroundElement,
+                borderColor: theme.border,
+              },
+            ]}>
+            <Ionicons
+              name="chatbubble-ellipses"
+              size={14}
+              color={theme.accent}
+            />
+            <Text style={[styles.noteText, { color: theme.textSecondary }]}>
+              {'Nhận xét GVCN: ' + entry.reviewNote}
+            </Text>
+          </View>
+        ) : null}
 
-                {/* Badges Row */}
-                <View style={styles.badges}>
-                  {isStudy ? (
-                    <Badge
-                      label={`${speechCount === 1 ? '1 stamp' : `${speechCount} stamps`} · ${entry.subject || 'Học tập'}`}
-                      color={'success'}
-                      soft={'successSoft'}
-                      icon={'book'}
-                    />
-                  ) : null}
-                  {isAcademic ? (
-                    <Badge
-                      label={'Thành tích Học thuật'}
-                      color={'gold'}
-                      soft={'goldSoft'}
-                      icon={'school'}
-                    />
-                  ) : null}
-                  {isViolation ? (
-                    <Badge
-                      label={'Vi phạm'}
-                      color={'danger'}
-                      soft={'dangerSoft'}
-                      icon={'alert-circle'}
-                    />
-                  ) : null}
-                  {isDuty ? (
-                    <Badge
-                      label={'Trực nhật · Chuyên cần'}
-                      color={entry.points < 0 ? 'danger' : 'success'}
-                      soft={entry.points < 0 ? 'dangerSoft' : 'successSoft'}
-                      icon={'leaf'}
-                    />
-                  ) : null}
-                  {attributionText ? (
-                    <Badge
-                      label={attributionText}
-                      color={'purple'}
-                      soft={'purpleSoft'}
-                      icon={'shield-checkmark-outline'}
-                    />
-                  ) : null}
-                  <Badge
-                    label={status.label}
-                    color={status.color}
-                    soft={status.soft}
-                    icon={status.icon}
-                  />
-                  {!isStudy && !isAcademic ? (
-                    <Badge
-                      label={category.label}
-                      color={'purple'}
-                      soft={'purpleSoft'}
-                      icon={category.icon}
-                    />
-                  ) : null}
-                  <Badge
-                    label={ENTRY_LEVELS[entry.level].label}
-                    color={'accentText'}
-                    soft={'accentSoft'}
-                  />
-                  {entry.proofUrl ? (
-                    <>
-                      <Pressable
-                        onPress={(e) => {
-                          e.stopPropagation?.();
-                          openProof(entry.proofUrl!);
-                        }}
-                        style={[
-                          styles.proofChip,
-                          {
-                            backgroundColor: theme.accentSoft,
-                            borderColor: theme.accent,
-                          },
-                        ]}>
-                        <Ionicons
-                          name={isGoogleDriveUrl(entry.proofUrl) ? 'cloud-done-outline' : 'link'}
-                          size={12}
-                          color={theme.accentText}
-                        />
-                        <Text style={[styles.proofText, { color: theme.accentText }]}>
-                          {isGoogleDriveUrl(entry.proofUrl) ? 'Minh chứng Drive' : 'Minh chứng'}
-                        </Text>
-                      </Pressable>
+        {/* Smooth Teacher Approval Controls */}
+        {role === 'teacher' && entry.status === 'pending' ? (
+          <View style={[styles.actions, { borderColor: theme.border }]}>
+            <Button
+              label={'Duyệt ngay'}
+              size={'sm'}
+              icon={'checkmark-circle'}
+              style={styles.flex}
+              onPress={() => {
+                setEntryStatus(entry.id, 'approved');
+                showToast('Đã duyệt thành tích!');
+              }}
+            />
+            <Button
+              label={'Từ chối'}
+              size={'sm'}
+              variant={'danger'}
+              icon={'close-circle'}
+              style={styles.flex}
+              onPress={() => {
+                setEntryStatus(entry.id, 'rejected');
+                showToast('Đã từ chối mục này', 'warning');
+              }}
+            />
+          </View>
+        ) : null}
+      </Card>
+    );
+  };
 
-                      {canEditClass ||
-                      (Boolean(currentStudentId) &&
-                        entry.studentId === currentStudentId &&
-                        entry.status === 'pending') ? (
-                        <Pressable
-                          disabled={deletingProofEntryId === entry.id}
-                          onPress={(e) => {
-                            e.stopPropagation?.();
-                            void handleRemoveEntryProof(entry.id);
-                          }}
-                          hitSlop={6}
-                          accessibilityRole="button"
-                          accessibilityLabel={
-                            confirmProofEntryId === entry.id
-                              ? 'Xác nhận xoá tệp minh chứng'
-                              : 'Xoá tệp minh chứng'
-                          }
-                          style={[
-                            styles.proofChip,
-                            {
-                              backgroundColor:
-                                confirmProofEntryId === entry.id ? theme.danger : theme.dangerSoft,
-                              borderColor: theme.danger,
-                            },
-                          ]}>
-                          {deletingProofEntryId === entry.id ? (
-                            <ActivityIndicator size="small" color={theme.danger} />
-                          ) : (
-                            <Ionicons
-                              name={confirmProofEntryId === entry.id ? 'trash' : 'trash-outline'}
-                              size={12}
-                              color={confirmProofEntryId === entry.id ? '#FFFFFF' : theme.danger}
-                            />
-                          )}
-                          <Text
-                            style={[
-                              styles.proofText,
-                              { color: confirmProofEntryId === entry.id ? '#FFFFFF' : theme.danger },
-                            ]}>
-                            {deletingProofEntryId === entry.id
-                              ? 'Đang xoá...'
-                              : confirmProofEntryId === entry.id
-                                ? 'Xác nhận xoá?'
-                                : 'Xoá tệp'}
-                          </Text>
-                        </Pressable>
-                      ) : null}
-                    </>
-                  ) : null}
-                  {canDeleteStamp ? (
-                    <Pressable
-                      disabled={deletingStampEntryId === entry.id}
-                      onPress={(e) => {
-                        e.stopPropagation?.();
-                        void handleDeleteStudyStamp(entry);
-                      }}
-                      hitSlop={6}
-                      accessibilityRole="button"
-                      accessibilityLabel={
-                        confirmStampEntryId === entry.id
-                          ? 'Xác nhận xoá stamp phát biểu'
-                          : 'Xoá stamp phát biểu'
-                      }
-                      style={[
-                        styles.proofChip,
-                        {
-                          backgroundColor:
-                            confirmStampEntryId === entry.id ? theme.danger : theme.dangerSoft,
-                          borderColor: theme.danger,
-                        },
-                      ]}>
-                      {deletingStampEntryId === entry.id ? (
-                        <ActivityIndicator size="small" color={theme.danger} />
-                      ) : (
-                        <Ionicons
-                          name={confirmStampEntryId === entry.id ? 'trash' : 'trash-outline'}
-                          size={12}
-                          color={confirmStampEntryId === entry.id ? '#FFFFFF' : theme.danger}
-                        />
-                      )}
-                      <Text
-                        style={[
-                          styles.proofText,
-                          { color: confirmStampEntryId === entry.id ? '#FFFFFF' : theme.danger },
-                        ]}>
-                        {deletingStampEntryId === entry.id
-                          ? 'Đang xoá...'
-                          : confirmStampEntryId === entry.id
-                            ? 'Xác nhận xoá?'
-                            : 'Xoá stamp'}
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-
-                {entry.reviewNote ? (
-                  <View
-                    style={[
-                      styles.noteBox,
-                      {
-                        backgroundColor: theme.backgroundElement,
-                        borderColor: theme.border,
-                      },
-                    ]}>
-                    <Ionicons
-                      name="chatbubble-ellipses"
-                      size={14}
-                      color={theme.accent}
-                    />
-                    <Text style={[styles.noteText, { color: theme.textSecondary }]}>
-                      {'Nhận xét GVCN: ' + entry.reviewNote}
-                    </Text>
-                  </View>
-                ) : null}
-
-                {/* Smooth Teacher Approval Controls */}
-                {role === 'teacher' && entry.status === 'pending' ? (
-                  <View style={[styles.actions, { borderColor: theme.border }]}>
-                    <Button
-                      label={'Duyệt ngay'}
-                      size={'sm'}
-                      icon={'checkmark-circle'}
-                      style={styles.flex}
-                      onPress={() => {
-                        setEntryStatus(entry.id, 'approved');
-                        showToast('Đã duyệt thành tích!');
-                      }}
-                    />
-                    <Button
-                      label={'Từ chối'}
-                      size={'sm'}
-                      variant={'danger'}
-                      icon={'close-circle'}
-                      style={styles.flex}
-                      onPress={() => {
-                        setEntryStatus(entry.id, 'rejected');
-                        showToast('Đã từ chối mục này', 'warning');
-                      }}
-                    />
-                  </View>
-                ) : null}
-              </Card>
-            </FadeIn>
-          );
-        })
-      )}
+  return (
+    <Screen scrollable={false}>
+      <FlatList
+        data={pagedEntries}
+        keyExtractor={(item) => item.id}
+        renderItem={renderEntryItem}
+        ListHeaderComponent={listHeader}
+        ListEmptyComponent={listEmpty}
+        ListFooterComponent={listFooter}
+        ItemSeparatorComponent={ListItemGap}
+        extraData={`${confirmProofEntryId ?? ''}|${deletingProofEntryId ?? ''}|${confirmStampEntryId ?? ''}|${deletingStampEntryId ?? ''}`}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={theme.accent}
+            colors={[theme.accent]}
+          />
+        }
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+        windowSize={5}
+        initialNumToRender={12}
+        maxToRenderPerBatch={10}
+        removeClippedSubviews={Platform.OS !== 'web'}
+        style={styles.list}
+        contentContainerStyle={[
+          styles.listContent,
+          {
+            paddingTop: insets.top + Spacing.three,
+            paddingBottom: TabBarSpace,
+          },
+        ]}
+      />
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
+  list: { flex: 1, width: '100%' },
+  listContent: {
+    width: '100%',
+    maxWidth: MaxContentWidth + Spacing.three * 2,
+    alignSelf: 'center',
+    paddingHorizontal: Spacing.three,
+  },
+  listHeader: {
+    gap: Spacing.three,
+    marginBottom: Spacing.three,
+  },
+  itemGap: { height: Spacing.three },
+  loadMoreWrap: {
+    marginTop: Spacing.three,
+    gap: Spacing.two,
+    alignItems: 'center',
+  },
+  loadMoreHint: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
   kpiBanner: {
     padding: Spacing.four,
     borderRadius: Radius.xl,

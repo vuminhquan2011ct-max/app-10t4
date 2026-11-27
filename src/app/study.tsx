@@ -8,7 +8,7 @@
  *    with 1-tap Excel (.csv) export and Zalo text report sharing.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -54,6 +54,8 @@ type HistoryScope = 'subject' | 'date' | 'all';
 
 const MEDAL_COLORS = ['gold', 'silver', 'bronze'] as const;
 const MEDAL_SOFTS = ['goldSoft', 'silverSoft', 'bronzeSoft'] as const;
+const HISTORY_PAGE_SIZE = 20;
+const WEEKLY_PAGE_SIZE = 25;
 
 export default function StudyParticipationScreen() {
   const params = useLocalSearchParams<{
@@ -105,10 +107,14 @@ export default function StudyParticipationScreen() {
   const [studentQuery, setStudentQuery] = useState<string>('');
   const [selectedPresetTitle, setSelectedPresetTitle] = useState<string>('');
   const [historyScope, setHistoryScope] = useState<HistoryScope>('subject');
+  const [historyLimit, setHistoryLimit] = useState<number>(HISTORY_PAGE_SIZE);
+  const [weeklyLimit, setWeeklyLimit] = useState<number>(WEEKLY_PAGE_SIZE);
   const [loggingStudentId, setLoggingStudentId] = useState<string | null>(null);
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [deletingEntryId, setDeletingEntryId] = useState<string | null>(null);
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inFlightStampIdsRef = useRef<Set<string>>(new Set());
+  const inFlightDeleteRef = useRef(false);
   const [selectedWeekStart, setSelectedWeekStart] = useState<string | null>(null);
 
   // GVCN custom HK1 date window editor
@@ -194,32 +200,37 @@ export default function StudyParticipationScreen() {
     return map;
   }, [allStudyStamps, effectiveSubject, canDeleteStudyStamp]);
 
-  // Tab 1 stamp history filtered by selected scope
-  const historyStamps = useMemo(() => {
+  // Tab 1 stamp history filtered by selected scope (paginated cleanly)
+  const filteredHistoryStamps = useMemo(() => {
     const targetSubKey = effectiveSubject.trim().toLowerCase();
-    return allStudyStamps
-      .filter((e) => {
-        if (historyScope === 'subject') {
-          return (e.subject?.trim() || '').toLowerCase() === targetSubKey;
-        }
-        if (historyScope === 'date') {
-          return e.date === recordDate;
-        }
-        return true;
-      })
-      .slice(0, 30);
+    return allStudyStamps.filter((e) => {
+      if (historyScope === 'subject') {
+        return (e.subject?.trim() || '').toLowerCase() === targetSubKey;
+      }
+      if (historyScope === 'date') {
+        return e.date === recordDate;
+      }
+      return true;
+    });
   }, [allStudyStamps, historyScope, effectiveSubject, recordDate]);
 
-  // Tab 2 weekly stamps (within selectedWeekStart .. selectedWeekEnd)
-  const weeklyStamps = useMemo(
+  const historyStamps = useMemo(
+    () => filteredHistoryStamps.slice(0, historyLimit),
+    [filteredHistoryStamps, historyLimit],
+  );
+
+  // Tab 2 weekly stamps (within selectedWeekStart .. selectedWeekEnd, paginated cleanly)
+  const allWeeklyStamps = useMemo(
     () =>
-      allStudyStamps
-        .filter(
-          (e) =>
-            e.date >= report.selectedWeekStart && e.date <= report.selectedWeekEnd,
-        )
-        .slice(0, 40),
+      allStudyStamps.filter(
+        (e) => e.date >= report.selectedWeekStart && e.date <= report.selectedWeekEnd,
+      ),
     [allStudyStamps, report.selectedWeekStart, report.selectedWeekEnd],
+  );
+
+  const weeklyStamps = useMemo(
+    () => allWeeklyStamps.slice(0, weeklyLimit),
+    [allWeeklyStamps, weeklyLimit],
   );
 
   const weeklySortedRows = useMemo(
@@ -252,7 +263,8 @@ export default function StudyParticipationScreen() {
       showToast('Hãy chọn hoặc nhập tên môn học trước khi ghi stamp!', 'warning');
       return;
     }
-    if (loggingStudentId || deletingEntryId) return;
+    if (inFlightStampIdsRef.current.has(student.id) || inFlightDeleteRef.current) return;
+    inFlightStampIdsRef.current.add(student.id);
     setLoggingStudentId(student.id);
     try {
       const resolvedTitle =
@@ -276,12 +288,13 @@ export default function StudyParticipationScreen() {
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Không thể ghi nhận stamp', 'danger');
     } finally {
-      setLoggingStudentId(null);
+      inFlightStampIdsRef.current.delete(student.id);
+      setLoggingStudentId((prev) => (prev === student.id ? null : prev));
     }
   };
 
   const handleDeleteStamp = async (entry: Entry, confirmKey: string, studentName: string) => {
-    if (deletingEntryId || loggingStudentId) return;
+    if (inFlightDeleteRef.current || inFlightStampIdsRef.current.size > 0) return;
     if (confirmDeleteKey !== confirmKey) {
       if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
       setConfirmDeleteKey(confirmKey);
@@ -299,6 +312,7 @@ export default function StudyParticipationScreen() {
       clearTimeout(confirmTimerRef.current);
       confirmTimerRef.current = null;
     }
+    inFlightDeleteRef.current = true;
     setConfirmDeleteKey(null);
     setDeletingEntryId(entry.id);
     try {
@@ -317,6 +331,7 @@ export default function StudyParticipationScreen() {
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Không thể xoá stamp', 'danger');
     } finally {
+      inFlightDeleteRef.current = false;
       setDeletingEntryId(null);
     }
   };
@@ -904,17 +919,26 @@ export default function StudyParticipationScreen() {
               <Chip
                 label={`Môn ${effectiveSubject}`}
                 selected={historyScope === 'subject'}
-                onPress={() => setHistoryScope('subject')}
+                onPress={() => {
+                  setHistoryScope('subject');
+                  setHistoryLimit(HISTORY_PAGE_SIZE);
+                }}
               />
               <Chip
                 label={`Ngày ${formatDate(recordDate)}`}
                 selected={historyScope === 'date'}
-                onPress={() => setHistoryScope('date')}
+                onPress={() => {
+                  setHistoryScope('date');
+                  setHistoryLimit(HISTORY_PAGE_SIZE);
+                }}
               />
               <Chip
                 label={'Tất cả gần đây'}
                 selected={historyScope === 'all'}
-                onPress={() => setHistoryScope('all')}
+                onPress={() => {
+                  setHistoryScope('all');
+                  setHistoryLimit(HISTORY_PAGE_SIZE);
+                }}
               />
             </ScrollView>
 
@@ -925,6 +949,15 @@ export default function StudyParticipationScreen() {
             ) : (
               <View style={styles.stampLogList}>
                 {historyStamps.map((entry) => renderStampRow(entry, 'hist'))}
+                {filteredHistoryStamps.length > historyStamps.length ? (
+                  <Button
+                    label={`Xem thêm (${historyStamps.length}/${filteredHistoryStamps.length} stamp)`}
+                    variant={'soft'}
+                    size={'sm'}
+                    icon={'chevron-down-outline'}
+                    onPress={() => setHistoryLimit((n) => n + HISTORY_PAGE_SIZE)}
+                  />
+                ) : null}
               </View>
             )}
           </Card>
@@ -951,7 +984,10 @@ export default function StudyParticipationScreen() {
                     label={`${w.label} · ${w.speeches} stamps`}
                     icon={'calendar-outline'}
                     selected={report.selectedWeekStart === w.weekStart}
-                    onPress={() => setSelectedWeekStart(w.weekStart)}
+                    onPress={() => {
+                      setSelectedWeekStart(w.weekStart);
+                      setWeeklyLimit(WEEKLY_PAGE_SIZE);
+                    }}
                   />
                 ))}
               </ScrollView>
@@ -1204,11 +1240,20 @@ export default function StudyParticipationScreen() {
             <>
               <SectionHeader
                 title={'Các stamp trong tuần (Xoá nếu ghi nhầm)'}
-                subtitle={`${weeklyStamps.length} stamp · ${report.selectedWeekLabel}`}
+                subtitle={`${allWeeklyStamps.length} stamp · ${report.selectedWeekLabel}`}
               />
               <Card style={styles.sectionCard}>
                 <View style={styles.stampLogList}>
                   {weeklyStamps.map((entry) => renderStampRow(entry, 'wk'))}
+                  {allWeeklyStamps.length > weeklyStamps.length ? (
+                    <Button
+                      label={`Xem thêm (${weeklyStamps.length}/${allWeeklyStamps.length} stamp)`}
+                      variant={'soft'}
+                      size={'sm'}
+                      icon={'chevron-down-outline'}
+                      onPress={() => setWeeklyLimit((n) => n + WEEKLY_PAGE_SIZE)}
+                    />
+                  ) : null}
                 </View>
               </Card>
             </>

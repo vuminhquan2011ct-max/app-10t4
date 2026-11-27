@@ -1,8 +1,8 @@
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { MascotAvatar } from '@/components/assistant/mascot-avatar';
@@ -34,9 +34,10 @@ import {
   uploadTextToDrive,
 } from '@/lib/drive';
 import { buildClassSummaryReport, exportJsonBackup, shareOrCopyText } from '@/lib/export';
+import { clearNonFatalLogs, getNonFatalLogs, subscribeNonFatalLogs } from '@/lib/logger';
 import { MIN_STUDENT_PASSWORD_LENGTH } from '@/lib/student-accounts';
 import { useAuth, type AccountRole } from '@/store/auth-store';
-import { useClassStore } from '@/store/class-store';
+import { useClassStore, useClassSync } from '@/store/class-store';
 import { useDecor } from '@/store/decor-store';
 
 type Ionicon = keyof typeof Ionicons.glyphMap;
@@ -70,13 +71,17 @@ export default function SettingsScreen() {
     ranking,
     fundSummary,
     classStreak,
-    syncStatus,
-    lastSyncedAt,
-    pullNow,
     exportStateJson,
     importStateJson,
     resetDemoData,
   } = useClassStore();
+  const { syncStatus, lastSyncedAt, pullNow } = useClassSync();
+  const nonFatalLogs = useSyncExternalStore(
+    subscribeNonFatalLogs,
+    getNonFatalLogs,
+    getNonFatalLogs,
+  );
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const theme = useTheme();
   const gradient = useBrandGradient();
   const { mode, setMode, accentKey, setAccentKey } = useThemePreference();
@@ -1378,7 +1383,98 @@ export default function SettingsScreen() {
         </FadeIn>
       ) : null}
 
+      {/* Collapsible Sync & Non-Fatal Diagnostics Log */}
       <FadeIn index={7}>
+        <Card style={styles.card}>
+          <Pressable
+            onPress={() => setShowDiagnostics((v) => !v)}
+            accessibilityRole="button"
+            accessibilityLabel="Mở rộng hoặc thu gọn nhật ký đồng bộ và lỗi gần đây"
+            style={({ pressed }) => [styles.diagHeader, pressed && styles.pressed]}>
+            <View
+              style={[
+                styles.cardIcon,
+                { backgroundColor: nonFatalLogs.length > 0 ? theme.warningSoft : theme.accentSoft },
+              ]}>
+              <Ionicons
+                name={nonFatalLogs.length > 0 ? 'warning-outline' : 'pulse-outline'}
+                size={18}
+                color={nonFatalLogs.length > 0 ? theme.warning : theme.accent}
+              />
+            </View>
+            <View style={styles.flex}>
+              <Text style={[styles.label, { color: theme.text }]}>
+                Nhật ký đồng bộ / lỗi gần đây
+              </Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 12 }}>
+                {nonFatalLogs.length > 0
+                  ? `${nonFatalLogs.length} sự kiện kỹ thuật gần nhất (lưu cục bộ trên máy)`
+                  : 'Hệ thống đang hoạt động ổn định · Chưa có cảnh báo nào'}
+              </Text>
+            </View>
+            <Badge
+              label={nonFatalLogs.length > 0 ? String(nonFatalLogs.length) : 'Ổn định'}
+              color={nonFatalLogs.length > 0 ? 'warning' : 'success'}
+              soft={nonFatalLogs.length > 0 ? 'warningSoft' : 'successSoft'}
+            />
+            <Ionicons
+              name={showDiagnostics ? 'chevron-up' : 'chevron-down'}
+              size={18}
+              color={theme.textMuted}
+            />
+          </Pressable>
+
+          {showDiagnostics ? (
+            <View style={styles.diagBody}>
+              {nonFatalLogs.length === 0 ? (
+                <Text style={{ color: theme.textMuted, fontSize: 12.5 }}>
+                  Chưa ghi nhận lỗi nền hoặc cảnh báo đồng bộ nào trong phiên làm việc này.
+                </Text>
+              ) : (
+                <>
+                  <View style={styles.diagList}>
+                    {nonFatalLogs.slice(0, 15).map((item) => {
+                      const timeLabel = item.timestamp.slice(11, 19);
+                      return (
+                        <View
+                          key={item.id}
+                          style={[
+                            styles.diagRow,
+                            {
+                              backgroundColor: theme.backgroundElement,
+                              borderColor: theme.border,
+                            },
+                          ]}>
+                          <Text style={[styles.diagMeta, { color: theme.accent }]}>
+                            {`${timeLabel} · ${item.scope}${item.detail ? ` (${item.detail})` : ''}`}
+                          </Text>
+                          <Text
+                            style={[styles.diagMsg, { color: theme.textSecondary }]}
+                            numberOfLines={2}>
+                            {item.message}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                  <Button
+                    label={'Xoá nhật ký'}
+                    variant={'ghost'}
+                    size={'sm'}
+                    icon={'trash-outline'}
+                    onPress={() => {
+                      clearNonFatalLogs();
+                      showToast('Đã xoá nhật ký chẩn đoán cục bộ', 'info');
+                    }}
+                  />
+                </>
+              )}
+            </View>
+          ) : null}
+        </Card>
+      </FadeIn>
+
+      <FadeIn index={8}>
         <Text style={[styles.footer, { color: theme.textMuted }]}>
           {'Quản lý lớp ' + classInfo.name + ' · ' + classInfo.school + ' · ' + classInfo.year}
         </Text>
@@ -1503,6 +1599,18 @@ const styles = StyleSheet.create({
   },
   pickText: { fontSize: 13, fontWeight: '700', flexShrink: 1 },
   backupActions: { flexDirection: 'row', gap: Spacing.two },
+  diagHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
+  diagBody: { gap: Spacing.two },
+  diagList: { gap: 6 },
+  diagRow: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: 2,
+  },
+  diagMeta: { fontSize: 11, fontWeight: '800' },
+  diagMsg: { fontSize: 12, lineHeight: 16 },
   divider: { height: StyleSheet.hairlineWidth },
   footer: { textAlign: 'center', fontSize: 12, marginTop: Spacing.two },
   pressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },

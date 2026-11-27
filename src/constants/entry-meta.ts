@@ -5,7 +5,7 @@
  * drift apart.
  */
 
-import type { Ionicons } from '@expo/vector-icons';
+import type Ionicons from '@expo/vector-icons/Ionicons';
 
 import type { EntryCategory, EntryKind, EntryLevel, EntryStatus, Gender } from '@/types/models';
 

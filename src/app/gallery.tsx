@@ -8,21 +8,24 @@
  *   and sub-second cross-device updates via Supabase Realtime Broadcast + `postgres_changes`.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Linking,
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { PageHeader } from '@/components/page-header';
 import { Avatar } from '@/components/ui/avatar';
@@ -40,9 +43,10 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { FadeIn } from '@/components/ui/fade-in';
 import { OptionPicker } from '@/components/ui/option-picker';
 import { Screen } from '@/components/ui/screen';
+import { SkeletonCard } from '@/components/ui/skeleton';
 import { TextField } from '@/components/ui/text-field';
 import { useToast } from '@/components/ui/toast';
-import { Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
+import { MaxContentWidth, Radius, Shadow, Spacing, type ThemeColor } from '@/constants/theme';
 import { useBrandGradient, useIsDark, useTheme } from '@/hooks/use-theme';
 import {
   DRIVE_CONFIG,
@@ -96,6 +100,12 @@ function roleBadgeStyle(role: DriveUploaderRole): {
   return { color: 'accentText', soft: 'accentSoft', icon: 'school' };
 }
 
+const GALLERY_PAGE_SIZE = 24;
+
+function ListItemGap() {
+  return <View style={styles.itemGap} />;
+}
+
 export default function GalleryScreen() {
   const auth = useAuth();
   const {
@@ -111,7 +121,9 @@ export default function GalleryScreen() {
   const theme = useTheme();
   const isDark = useIsDark();
   const gradient = useBrandGradient();
+  const insets = useSafeAreaInsets();
   const { showToast } = useToast();
+  const [refreshing, setRefreshing] = useState(false);
 
   const {
     items,
@@ -190,7 +202,12 @@ export default function GalleryScreen() {
 
   const handlePullRefresh = useCallback(async () => {
     setActionError('');
-    await refresh();
+    setRefreshing(true);
+    try {
+      await refresh();
+    } finally {
+      setRefreshing(false);
+    }
   }, [refresh]);
 
   const stats = useMemo(() => computeDriveStorageStats(items), [items]);
@@ -453,10 +470,18 @@ export default function GalleryScreen() {
     Linking.openURL(url).catch(() => showToast('Không thể mở liên kết tệp', 'warning'));
   };
 
+  const filterKey = `${query}|${roleFilter}|${typeFilter}`;
+  const [pageState, setPageState] = useState({ key: filterKey, limit: GALLERY_PAGE_SIZE });
+  const visibleLimit = pageState.key === filterKey ? pageState.limit : GALLERY_PAGE_SIZE;
+  const pagedItems = filteredItems.slice(0, visibleLimit);
+  const remainingCount = Math.max(0, filteredItems.length - pagedItems.length);
+  const isInitialLoading = loading && items.length === 0;
+  const listData = isInitialLoading ? [] : pagedItems;
+
   const myRoleBadge = roleBadgeStyle(memberRole);
 
-  return (
-    <Screen withTabBar={false} onRefresh={handlePullRefresh}>
+  const listHeader = (
+    <View style={styles.listHeader}>
       <PageHeader
         title={`Kho Ảnh & File ${classInfo.name}`}
         subtitle={`Chuyển thẳng dữ liệu sang Google Drive · ${DRIVE_CONFIG.folderName}`}
@@ -771,244 +796,298 @@ export default function GalleryScreen() {
           </ScrollView>
         </Card>
       </FadeIn>
+    </View>
+  );
 
-      {/* Feed List — instant cached render, ZERO full-screen spinner during uploads */}
-      {loading && items.length === 0 ? (
-        <View style={styles.loadingWrap}>
-          <ActivityIndicator size="large" color={theme.accent} />
-          <Text style={{ color: theme.textSecondary, fontSize: 13, fontWeight: '700' }}>
-            {`Đang tải kho dữ liệu Google Drive ${DRIVE_CONFIG.folderName}...`}
-          </Text>
-        </View>
-      ) : filteredItems.length === 0 ? (
-        <EmptyState
-          icon={'cloud-upload-outline'}
-          title={'Chưa có ảnh hoặc tệp phù hợp'}
-          message={`Cả Học sinh và Thầy/Cô đều có thể tải ảnh, đề cương, bài tập hoặc video lên thư mục Google Drive "${DRIVE_CONFIG.folderName}" ở khung phía trên!`}
+  const listEmpty = isInitialLoading ? (
+    <View style={styles.skeletonList}>
+      <Text style={[styles.skeletonHint, { color: theme.textSecondary }]}>
+        {`Đang tải kho dữ liệu Google Drive ${DRIVE_CONFIG.folderName}...`}
+      </Text>
+      <SkeletonCard lines={3} showAvatar />
+      <SkeletonCard lines={2} showAvatar />
+      <SkeletonCard lines={3} showAvatar />
+    </View>
+  ) : (
+    <EmptyState
+      icon={'cloud-upload-outline'}
+      title={'Chưa có ảnh hoặc tệp phù hợp'}
+      message={`Cả Học sinh và Thầy/Cô đều có thể tải ảnh, đề cương, bài tập hoặc video lên thư mục Google Drive "${DRIVE_CONFIG.folderName}" ở khung phía trên!`}
+    />
+  );
+
+  const listFooter =
+    !isInitialLoading && remainingCount > 0 ? (
+      <View style={styles.loadMoreWrap}>
+        <Text style={[styles.loadMoreHint, { color: theme.textMuted }]}>
+          {`Đang hiển thị ${pagedItems.length} / ${filteredItems.length} mục`}
+        </Text>
+        <Button
+          label={`Tải thêm ${Math.min(GALLERY_PAGE_SIZE, remainingCount)} mục (còn ${remainingCount})`}
+          variant={'soft'}
+          icon={'chevron-down-circle-outline'}
+          onPress={() =>
+            setPageState({ key: filterKey, limit: visibleLimit + GALLERY_PAGE_SIZE })
+          }
         />
-      ) : (
-        filteredItems.map((item, idx) => {
-          const isPhoto = item.itemType === 'photo';
-          const roleMeta = roleBadgeStyle(item.uploaderRole);
-          const catMeta = DRIVE_MEDIA_CATEGORIES[item.category] ?? DRIVE_MEDIA_CATEGORIES.other;
-          const fileVisual = getFileVisualMeta(item.fileName, item.mimeType);
-          const fileSoftKey = `${fileVisual.tone}Soft` as
-            | 'accentSoft'
-            | 'dangerSoft'
-            | 'successSoft'
-            | 'warningSoft'
-            | 'purpleSoft';
-          const deletable = canDeleteItem(item);
+      </View>
+    ) : undefined;
 
-          return (
-            <FadeIn key={item.id} index={Math.min(idx + 2, 8)}>
-              <Card
+  const renderMediaItem = ({ item }: { item: DriveMediaItem }) => {
+    const isPhoto = item.itemType === 'photo';
+    const roleMeta = roleBadgeStyle(item.uploaderRole);
+    const catMeta = DRIVE_MEDIA_CATEGORIES[item.category] ?? DRIVE_MEDIA_CATEGORIES.other;
+    const fileVisual = getFileVisualMeta(item.fileName, item.mimeType);
+    const fileSoftKey = `${fileVisual.tone}Soft` as
+      | 'accentSoft'
+      | 'dangerSoft'
+      | 'successSoft'
+      | 'warningSoft'
+      | 'purpleSoft';
+    const deletable = canDeleteItem(item);
+
+    return (
+      <Card
+        style={[
+          styles.itemCard,
+          item.pending && { borderColor: theme.accent, borderWidth: 1.2 },
+        ]}>
+        {/* Header: Avatar + Uploader + Role Badge + Timestamp */}
+        <View style={styles.itemHead}>
+          <Avatar name={item.uploaderName} size={36} />
+          <View style={styles.flex}>
+            <View style={styles.uploaderRow}>
+              <Text style={[styles.uploaderName, { color: theme.text }]} numberOfLines={1}>
+                {item.uploaderName}
+              </Text>
+              <Badge
+                label={formatUploaderRoleLabel(item.uploaderRole, item.uploaderSubject)}
+                color={roleMeta.color}
+                soft={roleMeta.soft}
+                icon={roleMeta.icon}
+              />
+            </View>
+            <Text style={{ color: theme.textMuted, fontSize: 11.5, fontWeight: '600' }}>
+              {item.pending
+                ? `Đang đồng bộ nhanh lên Google Drive ${item.folderName}...`
+                : [
+                    new Date(item.createdAt).toLocaleString('vi-VN', {
+                      day: '2-digit',
+                      month: '2-digit',
+                      year: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    }),
+                    item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : null,
+                    `Drive ${item.folderName}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+            </Text>
+          </View>
+        </View>
+
+        {/* Category + Status Badges */}
+        <View style={styles.metaBadges}>
+          <Badge
+            label={catMeta.label}
+            color={catMeta.color}
+            soft={catMeta.soft}
+            icon={catMeta.icon}
+          />
+          {item.sizeBytes > 0 ? (
+            <Badge
+              label={formatBytes(item.sizeBytes)}
+              color={'textSecondary'}
+              soft={'backgroundElement'}
+              icon={'server-outline'}
+            />
+          ) : null}
+          {item.pending ? (
+            <Badge
+              label={'Đang tải lên...'}
+              color={'accentText'}
+              soft={'accentSoft'}
+              icon={'cloud-upload-outline'}
+            />
+          ) : item.localOnly ? (
+            <Badge
+              label={'Lưu cục bộ'}
+              color={'warning'}
+              soft={'warningSoft'}
+              icon={'phone-portrait-outline'}
+            />
+          ) : null}
+        </View>
+
+        {item.caption ? (
+          <Text style={[styles.caption, { color: theme.text }]}>{item.caption}</Text>
+        ) : null}
+
+        {/* Media Body */}
+        {isPhoto ? (
+          <Pressable
+            disabled={Boolean(item.pending)}
+            onPress={() => setPreviewItem(item)}
+            style={({ pressed }) => [
+              styles.photoFrame,
+              { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+              pressed && styles.pressed,
+            ]}>
+            <DriveImage
+              driveFileId={item.driveFileId}
+              primaryUri={item.imageUrl}
+              localUri={item.localPreviewUri}
+              width={800}
+              contentFit="cover"
+              style={styles.photo}
+            />
+            {item.pending ? (
+              <View style={styles.pendingBanner}>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                <Text style={styles.photoOverlayText} numberOfLines={1}>
+                  {`Đang đồng bộ "${item.fileName}"...`}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.photoOverlay}>
+                <Ionicons name="expand-outline" size={13} color="#FFFFFF" />
+                <Text style={styles.photoOverlayText} numberOfLines={1}>
+                  {item.fileName}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+        ) : (
+          <View
+            style={[
+              styles.docBox,
+              { backgroundColor: theme.backgroundElement, borderColor: theme.border },
+            ]}>
+            <View style={[styles.docIcon, { backgroundColor: theme[fileSoftKey] }]}>
+              {item.pending ? (
+                <ActivityIndicator size="small" color={theme[fileVisual.tone]} />
+              ) : (
+                <Ionicons name={fileVisual.icon} size={22} color={theme[fileVisual.tone]} />
+              )}
+            </View>
+            <View style={styles.flex}>
+              <Text style={[styles.docName, { color: theme.text }]} numberOfLines={2}>
+                {item.fileName}
+              </Text>
+              <Text style={{ color: theme.textMuted, fontSize: 11.5, fontWeight: '600' }}>
+                {item.pending
+                  ? `Đang chuyển lên Google Drive ${DRIVE_CONFIG.folderName}...`
+                  : [
+                      fileVisual.badge,
+                      item.sizeBytes > 0
+                        ? formatBytes(item.sizeBytes)
+                        : 'Lưu trên Google Drive',
+                    ].join(' · ')}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Footer Actions */}
+        {!item.pending ? (
+          <View style={[styles.itemFooter, { borderColor: theme.border }]}>
+            <Pressable
+              onPress={() => openLink(item.driveUrl)}
+              style={[styles.footerPill, { backgroundColor: theme.accentSoft }]}>
+              <Ionicons name="open-outline" size={14} color={theme.accentText} />
+              <Text style={[styles.footerPillText, { color: theme.accentText }]}>
+                Mở trên Drive
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => openLink(item.downloadUrl)}
+              style={[styles.footerPill, { backgroundColor: theme.successSoft }]}>
+              <Ionicons name="download-outline" size={14} color={theme.success} />
+              <Text style={[styles.footerPillText, { color: theme.success }]}>Tải về</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={async () => {
+                const res = await shareOrCopyText(item.driveUrl, item.fileName);
+                showToast(
+                  res === 'copied' ? 'Đã sao chép link Google Drive!' : 'Đã mở chia sẻ link!',
+                );
+              }}
+              style={[styles.footerIconBtn, { backgroundColor: theme.backgroundElement }]}>
+              <Ionicons name="copy-outline" size={15} color={theme.textSecondary} />
+            </Pressable>
+
+            {deletable ? (
+              <Pressable
+                disabled={deletingId === item.id}
+                onPress={() => void handleDelete(item)}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  confirmDeleteId === item.id
+                    ? `Xác nhận xoá ${item.fileName}`
+                    : `Xoá ${item.fileName}`
+                }
                 style={[
-                  styles.itemCard,
-                  item.pending && { borderColor: theme.accent, borderWidth: 1.2 },
+                  styles.footerIconBtn,
+                  {
+                    backgroundColor:
+                      confirmDeleteId === item.id ? theme.danger : theme.dangerSoft,
+                  },
                 ]}>
-                {/* Header: Avatar + Uploader + Role Badge + Timestamp */}
-                <View style={styles.itemHead}>
-                  <Avatar name={item.uploaderName} size={36} />
-                  <View style={styles.flex}>
-                    <View style={styles.uploaderRow}>
-                      <Text style={[styles.uploaderName, { color: theme.text }]} numberOfLines={1}>
-                        {item.uploaderName}
-                      </Text>
-                      <Badge
-                        label={formatUploaderRoleLabel(item.uploaderRole, item.uploaderSubject)}
-                        color={roleMeta.color}
-                        soft={roleMeta.soft}
-                        icon={roleMeta.icon}
-                      />
-                    </View>
-                    <Text style={{ color: theme.textMuted, fontSize: 11.5, fontWeight: '600' }}>
-                      {item.pending
-                        ? `Đang đồng bộ nhanh lên Google Drive ${item.folderName}...`
-                        : [
-                            new Date(item.createdAt).toLocaleString('vi-VN', {
-                              day: '2-digit',
-                              month: '2-digit',
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            }),
-                            item.sizeBytes > 0 ? formatBytes(item.sizeBytes) : null,
-                            `Drive ${item.folderName}`,
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
-                    </Text>
-                  </View>
-                </View>
-
-                {/* Category + Status Badges */}
-                <View style={styles.metaBadges}>
-                  <Badge
-                    label={catMeta.label}
-                    color={catMeta.color}
-                    soft={catMeta.soft}
-                    icon={catMeta.icon}
-                  />
-                  {item.sizeBytes > 0 ? (
-                    <Badge
-                      label={formatBytes(item.sizeBytes)}
-                      color={'textSecondary'}
-                      soft={'backgroundElement'}
-                      icon={'server-outline'}
-                    />
-                  ) : null}
-                  {item.pending ? (
-                    <Badge
-                      label={'Đang tải lên...'}
-                      color={'accentText'}
-                      soft={'accentSoft'}
-                      icon={'cloud-upload-outline'}
-                    />
-                  ) : item.localOnly ? (
-                    <Badge
-                      label={'Lưu cục bộ'}
-                      color={'warning'}
-                      soft={'warningSoft'}
-                      icon={'phone-portrait-outline'}
-                    />
-                  ) : null}
-                </View>
-
-                {item.caption ? (
-                  <Text style={[styles.caption, { color: theme.text }]}>{item.caption}</Text>
-                ) : null}
-
-                {/* Media Body */}
-                {isPhoto ? (
-                  <Pressable
-                    disabled={Boolean(item.pending)}
-                    onPress={() => setPreviewItem(item)}
-                    style={({ pressed }) => [
-                      styles.photoFrame,
-                      { backgroundColor: theme.backgroundElement, borderColor: theme.border },
-                      pressed && styles.pressed,
-                    ]}>
-                    <DriveImage
-                      driveFileId={item.driveFileId}
-                      primaryUri={item.imageUrl}
-                      localUri={item.localPreviewUri}
-                      width={800}
-                      contentFit="cover"
-                      style={styles.photo}
-                    />
-                    {item.pending ? (
-                      <View style={styles.pendingBanner}>
-                        <ActivityIndicator size="small" color="#FFFFFF" />
-                        <Text style={styles.photoOverlayText} numberOfLines={1}>
-                          {`Đang đồng bộ "${item.fileName}"...`}
-                        </Text>
-                      </View>
-                    ) : (
-                      <View style={styles.photoOverlay}>
-                        <Ionicons name="expand-outline" size={13} color="#FFFFFF" />
-                        <Text style={styles.photoOverlayText} numberOfLines={1}>
-                          {item.fileName}
-                        </Text>
-                      </View>
-                    )}
-                  </Pressable>
+                {deletingId === item.id ? (
+                  <ActivityIndicator size="small" color={theme.danger} />
                 ) : (
-                  <View
-                    style={[
-                      styles.docBox,
-                      { backgroundColor: theme.backgroundElement, borderColor: theme.border },
-                    ]}>
-                    <View style={[styles.docIcon, { backgroundColor: theme[fileSoftKey] }]}>
-                      {item.pending ? (
-                        <ActivityIndicator size="small" color={theme[fileVisual.tone]} />
-                      ) : (
-                        <Ionicons name={fileVisual.icon} size={22} color={theme[fileVisual.tone]} />
-                      )}
-                    </View>
-                    <View style={styles.flex}>
-                      <Text style={[styles.docName, { color: theme.text }]} numberOfLines={2}>
-                        {item.fileName}
-                      </Text>
-                      <Text style={{ color: theme.textMuted, fontSize: 11.5, fontWeight: '600' }}>
-                        {item.pending
-                          ? `Đang chuyển lên Google Drive ${DRIVE_CONFIG.folderName}...`
-                          : [
-                              fileVisual.badge,
-                              item.sizeBytes > 0
-                                ? formatBytes(item.sizeBytes)
-                                : 'Lưu trên Google Drive',
-                            ].join(' · ')}
-                      </Text>
-                    </View>
-                  </View>
+                  <Ionicons
+                    name="trash-outline"
+                    size={15}
+                    color={confirmDeleteId === item.id ? '#FFFFFF' : theme.danger}
+                  />
                 )}
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+      </Card>
+    );
+  };
 
-                {/* Footer Actions */}
-                {!item.pending ? (
-                  <View style={[styles.itemFooter, { borderColor: theme.border }]}>
-                    <Pressable
-                      onPress={() => openLink(item.driveUrl)}
-                      style={[styles.footerPill, { backgroundColor: theme.accentSoft }]}>
-                      <Ionicons name="open-outline" size={14} color={theme.accentText} />
-                      <Text style={[styles.footerPillText, { color: theme.accentText }]}>
-                        Mở trên Drive
-                      </Text>
-                    </Pressable>
-
-                    <Pressable
-                      onPress={() => openLink(item.downloadUrl)}
-                      style={[styles.footerPill, { backgroundColor: theme.successSoft }]}>
-                      <Ionicons name="download-outline" size={14} color={theme.success} />
-                      <Text style={[styles.footerPillText, { color: theme.success }]}>Tải về</Text>
-                    </Pressable>
-
-                    <Pressable
-                      onPress={async () => {
-                        const res = await shareOrCopyText(item.driveUrl, item.fileName);
-                        showToast(
-                          res === 'copied' ? 'Đã sao chép link Google Drive!' : 'Đã mở chia sẻ link!',
-                        );
-                      }}
-                      style={[styles.footerIconBtn, { backgroundColor: theme.backgroundElement }]}>
-                      <Ionicons name="copy-outline" size={15} color={theme.textSecondary} />
-                    </Pressable>
-
-                    {deletable ? (
-                      <Pressable
-                        disabled={deletingId === item.id}
-                        onPress={() => void handleDelete(item)}
-                        accessibilityRole="button"
-                        accessibilityLabel={
-                          confirmDeleteId === item.id
-                            ? `Xác nhận xoá ${item.fileName}`
-                            : `Xoá ${item.fileName}`
-                        }
-                        style={[
-                          styles.footerIconBtn,
-                          {
-                            backgroundColor:
-                              confirmDeleteId === item.id ? theme.danger : theme.dangerSoft,
-                          },
-                        ]}>
-                        {deletingId === item.id ? (
-                          <ActivityIndicator size="small" color={theme.danger} />
-                        ) : (
-                          <Ionicons
-                            name="trash-outline"
-                            size={15}
-                            color={confirmDeleteId === item.id ? '#FFFFFF' : theme.danger}
-                          />
-                        )}
-                      </Pressable>
-                    ) : null}
-                  </View>
-                ) : null}
-              </Card>
-            </FadeIn>
-          );
-        })
-      )}
+  return (
+    <Screen scrollable={false} withTabBar={false}>
+      {/* Virtualized Feed List — instant cached render, ZERO full-screen spinner during uploads */}
+      <FlatList
+        data={listData}
+        keyExtractor={(item) => item.id}
+        renderItem={renderMediaItem}
+        ListHeaderComponent={listHeader}
+        ListEmptyComponent={listEmpty}
+        ListFooterComponent={listFooter}
+        ItemSeparatorComponent={ListItemGap}
+        extraData={`${confirmDeleteId ?? ''}|${deletingId ?? ''}`}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handlePullRefresh}
+            tintColor={theme.accent}
+            colors={[theme.accent]}
+          />
+        }
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+        windowSize={5}
+        initialNumToRender={10}
+        maxToRenderPerBatch={8}
+        removeClippedSubviews={Platform.OS !== 'web'}
+        style={styles.list}
+        contentContainerStyle={[
+          styles.listContent,
+          {
+            paddingTop: insets.top + Spacing.three,
+            paddingBottom: Math.max(24, insets.bottom + Spacing.three),
+          },
+        ]}
+      />
 
       {/* Fullscreen Photo Preview Modal */}
       <Modal
@@ -1096,6 +1175,27 @@ export default function GalleryScreen() {
 }
 
 const styles = StyleSheet.create({
+  list: { flex: 1, width: '100%' },
+  listContent: {
+    width: '100%',
+    maxWidth: MaxContentWidth + Spacing.three * 2,
+    alignSelf: 'center',
+    paddingHorizontal: Spacing.three,
+  },
+  listHeader: {
+    gap: Spacing.three,
+    marginBottom: Spacing.three,
+  },
+  itemGap: { height: Spacing.three },
+  loadMoreWrap: {
+    marginTop: Spacing.three,
+    gap: Spacing.two,
+    alignItems: 'center',
+  },
+  loadMoreHint: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
   flex: { flex: 1 },
   hero: {
     padding: Spacing.four,
@@ -1209,7 +1309,8 @@ const styles = StyleSheet.create({
   },
   filterCard: { gap: Spacing.two + 2 },
   chips: { gap: Spacing.two, paddingRight: Spacing.two },
-  loadingWrap: { alignItems: 'center', gap: Spacing.two, paddingVertical: Spacing.five },
+  skeletonList: { gap: Spacing.three },
+  skeletonHint: { fontSize: 12.5, fontWeight: '700', textAlign: 'center' },
   itemCard: { gap: Spacing.two + 2 },
   itemHead: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two + 2 },
   uploaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
