@@ -32,6 +32,13 @@ import { reportNonFatal } from '@/lib/logger';
 import { hasStoredPasswordHash, verifyPasswordHash } from '@/lib/password-crypto';
 import { subscribeLiveBroadcast } from '@/lib/realtime-bus';
 import {
+  callAuthGatewayLogin,
+  callAuthGatewayRegister,
+  callAuthGatewayVerifyTeacherInvite,
+  isServerSecurityEnabled,
+  type AuthGatewaySessionResponse,
+} from '@/lib/server-security';
+import {
   MIN_STUDENT_PASSWORD_LENGTH,
   changeOwnStudentPassword,
   findAccountByStudentId,
@@ -953,6 +960,161 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [persistSession, refreshTeacherAccountCount],
   );
 
+  const formatServerAuthError = useCallback(
+    (res: AuthGatewaySessionResponse, fallback: string): string => {
+      if (res.lockedUntilMs && res.lockedUntilMs > Date.now()) {
+        const waitSec = Math.max(1, Math.ceil((res.lockedUntilMs - Date.now()) / 1000));
+        return `Tạm khóa đăng nhập do nhập sai nhiều lần. Vui lòng thử lại sau ${waitSec} giây.`;
+      }
+      return res.error?.trim() || fallback;
+    },
+    [],
+  );
+
+  const verifyTeacherInviteServerMode = useCallback(
+    async (rawCode: string): Promise<{ ok: boolean; error?: string }> => {
+      const cleanCode = rawCode.trim();
+      if (!cleanCode) {
+        return {
+          ok: false,
+          error: 'Vui lòng nhập Mã mời giáo viên để xác thực quyền.',
+        };
+      }
+      const res = await callAuthGatewayVerifyTeacherInvite(cleanCode);
+      if (!res.ok) {
+        return {
+          ok: false,
+          error:
+            res.error?.trim() ||
+            'Mã mời giáo viên không chính xác, đã hết hạn hoặc đã hết lượt sử dụng.',
+        };
+      }
+      return { ok: true };
+    },
+    [],
+  );
+
+  /**
+   * Hydrates a real signed Supabase Auth JWT session + local session metadata from
+   * `/functions/v1/auth-gateway` (`P0-B` server security mode).
+   */
+  const enterAuthGatewaySession = useCallback(
+    async (
+      res: AuthGatewaySessionResponse,
+      options?: {
+        isFreshSignIn?: boolean;
+        forceNewAccountWelcome?: boolean;
+        overrideRole?: AccountRole;
+        overrideSubjectName?: string | null;
+      },
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const accessToken = res.access_token?.trim();
+      const refreshToken = res.refresh_token?.trim();
+      if (!accessToken || !refreshToken) {
+        return { ok: false, error: 'Máy chủ xác thực không trả về phiên JWT hợp lệ.' };
+      }
+
+      const prevSuppress = suppressAutoResolveRef.current;
+      suppressAutoResolveRef.current = true;
+      try {
+        if (isSupabaseConfigured) {
+          try {
+            const { error: setSessErr } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            });
+            if (setSessErr) {
+              reportNonFatal('auth-store', setSessErr, 'auth-gateway-set-session');
+              return {
+                ok: false,
+                error: 'Không thể thiết lập phiên xác thực Supabase JWT. Vui lòng thử lại.',
+              };
+            }
+          } catch (err) {
+            reportNonFatal('auth-store', err, 'auth-gateway-set-session');
+            return {
+              ok: false,
+              error: 'Không thể thiết lập phiên xác thực Supabase JWT. Vui lòng thử lại.',
+            };
+          }
+        }
+
+        const rawProfile = res.profile ?? {};
+        const accountId =
+          typeof rawProfile.accountId === 'string' && rawProfile.accountId.trim()
+            ? rawProfile.accountId.trim()
+            : null;
+        const resolvedLoginId =
+          typeof rawProfile.loginId === 'string' && rawProfile.loginId.trim()
+            ? rawProfile.loginId.trim()
+            : null;
+        const fullName =
+          typeof rawProfile.fullName === 'string' && rawProfile.fullName.trim()
+            ? rawProfile.fullName.trim()
+            : '';
+        const resolvedEmail =
+          typeof rawProfile.email === 'string' && rawProfile.email.trim()
+            ? rawProfile.email.trim()
+            : null;
+        const profileRole =
+          typeof rawProfile.role === 'string' && isAccountRole(rawProfile.role)
+            ? rawProfile.role
+            : null;
+        const responseRole: AccountRole =
+          options?.overrideRole ??
+          (res.role && isAccountRole(res.role) ? res.role : (profileRole ?? 'student'));
+        const resolvedSubject =
+          responseRole === 'subject_teacher'
+            ? (options?.overrideSubjectName?.trim() ||
+              (typeof rawProfile.subject === 'string' && rawProfile.subject.trim()
+                ? rawProfile.subject.trim()
+                : null))
+            : null;
+        const resolvedAuthUid =
+          typeof rawProfile.authUserId === 'string' && rawProfile.authUserId.trim()
+            ? rawProfile.authUserId.trim()
+            : null;
+
+        const isStudentAccount = responseRole === 'student';
+        if (options?.forceNewAccountWelcome && accountId) {
+          const welcomeKey = isStudentAccount ? `student:${accountId}` : `teacher:${accountId}`;
+          await AsyncStorage.setItem(NEW_ACCOUNT_WELCOME_PENDING_KEY, welcomeKey).catch(() => {});
+          setIsNewAccountWelcomePending(true);
+        } else {
+          setIsNewAccountWelcomePending(false);
+          void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+        }
+
+        setNeedsProfileCompletion(false);
+        setPendingOAuthUser(null);
+        setPendingEmailConfirmation(null);
+        setAuthCallbackError(null);
+
+        await persistSession({
+          displayName: fullName || (isStudentAccount ? 'Học sinh' : 'Giáo viên'),
+          accountRole: responseRole,
+          subjectName: resolvedSubject,
+          studentId: isStudentAccount ? accountId : null,
+          teacherId: isStudentAccount ? null : accountId,
+          loginId: resolvedLoginId,
+          email: resolvedEmail,
+          avatarUrl: null,
+          authProviders: resolvedEmail ? ['email', 'local'] : ['local'],
+          authUserId: resolvedAuthUid,
+          hasAccountPassword: true,
+        });
+
+        if (options?.isFreshSignIn) {
+          setLoginEventId((n) => n + 1);
+        }
+        return { ok: true };
+      } finally {
+        suppressAutoResolveRef.current = prevSuppress;
+      }
+    },
+    [persistSession],
+  );
+
   /**
    * Resolves an authenticated Supabase User to a linked class account (1-tap auto-enter),
    * finalizes any pending email registration metadata, completes an in-progress Settings OAuth link,
@@ -1389,11 +1551,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         // 2. Check active Supabase session (handles OAuth return, Settings OAuth link, or returning OAuth user).
+        let activeSupaUser: User | null = null;
         if (isSupabaseConfigured) {
           const pendingLinkRaw = await AsyncStorage.getItem(PENDING_OAUTH_LINK_KEY).catch(
             () => null,
           );
-          const supaUser =
+          activeSupaUser =
             callbackUser ??
             (
               await supabase.auth.getSession().catch((err) => {
@@ -1404,8 +1567,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             null;
           if (!active) return;
 
-          if (supaUser && (handledCallback || pendingLinkRaw || !raw)) {
-            const outcome = await resolveSupabaseUser(supaUser, {
+          if (activeSupaUser && (handledCallback || pendingLinkRaw || !raw)) {
+            const outcome = await resolveSupabaseUser(activeSupaUser, {
               isFreshSignIn: handledCallback,
             });
             if (outcome !== 'error' || !raw) {
@@ -1427,6 +1590,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const savedStudentId = parsed.studentId?.trim() || null;
           const savedTeacherId = parsed.teacherId?.trim() || null;
           const savedLoginId = parsed.loginId?.trim() || null;
+
+          // P0-B Server Security Mode: trust the verified live Supabase JWT (`activeSupaUser.id === parsed.authUserId`)
+          // so accounts in `private.account_credentials` (absent from legacy `class10t4_accounts_v1`) persist across reloads.
+          if (
+            isServerSecurityEnabled() &&
+            parsed.authUserId &&
+            activeSupaUser?.id === parsed.authUserId
+          ) {
+            const welcomePrefix = savedRole === 'student' ? 'student' : 'teacher';
+            const welcomeTargetId = savedRole === 'student' ? savedStudentId : savedTeacherId;
+            const isWelcomePending = Boolean(
+              welcomeTargetId && pendingWelcomeAccount === `${welcomePrefix}:${welcomeTargetId}`,
+            );
+            setIsNewAccountWelcomePending(isWelcomePending);
+            if (!isWelcomePending && pendingWelcomeAccount) {
+              void AsyncStorage.removeItem(NEW_ACCOUNT_WELCOME_PENDING_KEY).catch(() => {});
+            }
+            await persistSession({
+              displayName:
+                parsed.displayName?.trim() ||
+                (savedRole === 'student' ? 'Học sinh' : 'Giáo viên'),
+              accountRole: savedRole,
+              subjectName: savedRole === 'subject_teacher' ? savedSubject : null,
+              studentId: savedRole === 'student' ? savedStudentId : null,
+              teacherId: savedRole === 'student' ? null : savedTeacherId,
+              loginId: savedLoginId,
+              email: parsed.email ?? activeSupaUser.email ?? null,
+              avatarUrl: parsed.avatarUrl ?? null,
+              authProviders: mergeAuthProviders(parsed.authProviders, ['local']),
+              authUserId: activeSupaUser.id,
+              hasAccountPassword: parsed.hasAccountPassword ?? true,
+              signedInAt: ts,
+            });
+            return;
+          }
 
           // Enforce personal account binding for students: ignore legacy unlinked student sessions.
           if (savedRole === 'student') {
@@ -1806,10 +2004,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!code) {
           return {
             ok: false,
-            error: 'Vui lòng nhập Mã xác thực giáo viên (K8T4) để tạo tài khoản giáo viên.',
+            error: isServerSecurityEnabled()
+              ? 'Vui lòng nhập Mã mời giáo viên để tạo tài khoản giáo viên.'
+              : 'Vui lòng nhập Mã xác thực giáo viên (K8T4) để tạo tài khoản giáo viên.',
           };
         }
-        if (code !== TEACHER_ACCESS_PASSWORD) {
+        if (isServerSecurityEnabled()) {
+          const inviteCheck = await verifyTeacherInviteServerMode(code);
+          if (!inviteCheck.ok) {
+            return { ok: false, error: inviteCheck.error };
+          }
+        } else if (code !== TEACHER_ACCESS_PASSWORD) {
           return {
             ok: false,
             error: 'Mã xác thực giáo viên không chính xác! Chỉ giáo viên được cấp mã mới tạo được tài khoản giáo viên.',
@@ -1905,7 +2110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [pendingOAuthUser, enterMatchedStudent, enterMatchedTeacher],
+    [pendingOAuthUser, enterMatchedStudent, enterMatchedTeacher, verifyTeacherInviteServerMode],
   );
 
   const linkOAuthToExistingAccount = useCallback(
@@ -2021,6 +2226,83 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAuthCallbackError(null);
       suppressAutoResolveRef.current = true;
       try {
+        // P0-B Server Security Mode: authenticate via Supabase Edge Function `auth-gateway`
+        // (never falls back silently to insecure local auth or client-side K8T4).
+        if (isServerSecurityEnabled()) {
+          if (input.kind === 'teacher' && !cleanIdentifier) {
+            const msg =
+              'Chế độ bảo mật máy chủ yêu cầu đăng nhập bằng Mã ID hoặc Gmail giáo viên đã đăng ký.';
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+
+          if (cleanIdentifier.includes('@')) {
+            const emailErr = validateEmail(cleanIdentifier);
+            if (emailErr) {
+              setError(emailErr);
+              return { ok: false, error: emailErr };
+            }
+            const cleanEmail = normalizeEmail(cleanIdentifier);
+
+            if (isSupabaseConfigured) {
+              const supaRes = await signInSupabaseEmail(cleanEmail, cleanPass);
+              if (supaRes.emailNotConfirmed) {
+                const msg =
+                  supaRes.error ??
+                  'Email của bạn chưa được xác nhận. Hãy mở Gmail bấm link xác nhận hoặc bấm "Gửi lại email xác nhận".';
+                setError(msg);
+                return { ok: false, emailNotConfirmed: true, error: msg };
+              }
+              if (supaRes.ok && supaRes.user) {
+                const outcome = await resolveSupabaseUser(supaRes.user, { isFreshSignIn: true });
+                if (outcome === 'entered' || outcome === 'onboarding' || outcome === 'linked') {
+                  return { ok: true };
+                }
+              }
+            }
+
+            const gwEmailRes = await callAuthGatewayLogin({
+              loginId: cleanEmail,
+              password: cleanPass,
+            });
+            if (!gwEmailRes.ok) {
+              const msg = formatServerAuthError(
+                gwEmailRes,
+                'Gmail hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại!',
+              );
+              setError(msg);
+              return { ok: false, error: msg };
+            }
+            const entered = await enterAuthGatewaySession(gwEmailRes, { isFreshSignIn: true });
+            if (!entered.ok) {
+              const msg = entered.error ?? 'Không thể khởi tạo phiên đăng nhập máy chủ.';
+              setError(msg);
+              return { ok: false, error: msg };
+            }
+            return { ok: true };
+          }
+
+          const gwRes = await callAuthGatewayLogin({
+            loginId: cleanIdentifier,
+            password: cleanPass,
+          });
+          if (!gwRes.ok) {
+            const msg = formatServerAuthError(
+              gwRes,
+              'Mã ID hoặc mật khẩu chưa chính xác. Vui lòng kiểm tra lại!',
+            );
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+          const entered = await enterAuthGatewaySession(gwRes, { isFreshSignIn: true });
+          if (!entered.ok) {
+            const msg = entered.error ?? 'Không thể khởi tạo phiên đăng nhập máy chủ.';
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+          return { ok: true };
+        }
+
         // Teacher quick-access via class master code `K8T4` when Mã ID is intentionally left blank
         if (input.kind === 'teacher' && !cleanIdentifier) {
           if (cleanPass === TEACHER_ACCESS_PASSWORD) {
@@ -2182,7 +2464,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [resolveSupabaseUser, enterMatchedStudent, enterMatchedTeacher, persistSession],
+    [
+      resolveSupabaseUser,
+      enterMatchedStudent,
+      enterMatchedTeacher,
+      persistSession,
+      enterAuthGatewaySession,
+      formatServerAuthError,
+    ],
   );
 
   const registerWithEmailAndPassword = useCallback(
@@ -2211,11 +2500,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (input.kind === 'teacher' || input.kind === 'subject_teacher') {
         const code = input.accessCode?.trim() ?? '';
         if (!code) {
-          const msg = 'Vui lòng nhập Mã xác thực giáo viên để cấp quyền tạo tài khoản.';
+          const msg = isServerSecurityEnabled()
+            ? 'Vui lòng nhập Mã mời giáo viên để cấp quyền tạo tài khoản.'
+            : 'Vui lòng nhập Mã xác thực giáo viên để cấp quyền tạo tài khoản.';
           setError(msg);
           return { ok: false, error: msg };
         }
-        if (code !== TEACHER_ACCESS_PASSWORD) {
+        if (!isServerSecurityEnabled() && code !== TEACHER_ACCESS_PASSWORD) {
           const msg =
             'Mã xác thực giáo viên không chính xác! Chỉ giáo viên được cấp mã bảo mật lớp mới tạo được tài khoản giáo viên.';
           setError(msg);
@@ -2237,6 +2528,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAuthCallbackError(null);
       suppressAutoResolveRef.current = true;
       try {
+        // P0-B Server Security Mode: register directly via `auth-gateway` (server validates
+        // teacher invite code, hashes with PBKDF2-SHA256, and mints a signed Supabase JWT).
+        if (isServerSecurityEnabled()) {
+          const prefix = input.kind === 'student' ? '10T4' : 'GV';
+          const fallbackId = `${prefix}-${Date.now().toString(36).slice(-5).toUpperCase()}`;
+          const resolvedServerLoginId = (input.loginId?.trim() || fallbackId)
+            .toUpperCase()
+            .replace(/\s+/g, '');
+          const gwReg = await callAuthGatewayRegister({
+            role: input.kind === 'student' ? 'student' : 'teacher',
+            loginId: resolvedServerLoginId,
+            password: cleanPass,
+            fullName: cleanName,
+            email: cleanEmail,
+            ...(input.kind !== 'student' ? { teacherInviteCode: input.accessCode?.trim() } : {}),
+          });
+          if (!gwReg.ok) {
+            const msg = formatServerAuthError(
+              gwReg,
+              'Không thể đăng ký tài khoản trên máy chủ bảo mật. Vui lòng thử lại.',
+            );
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+          const entered = await enterAuthGatewaySession(gwReg, {
+            isFreshSignIn: true,
+            forceNewAccountWelcome: true,
+            overrideRole: input.kind === 'subject_teacher' ? 'subject_teacher' : undefined,
+            overrideSubjectName:
+              input.kind === 'subject_teacher' ? (input.subject?.trim() || null) : null,
+          });
+          if (!entered.ok) {
+            const msg = entered.error ?? 'Đăng ký thành công nhưng chưa khởi tạo được phiên JWT.';
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+          return { ok: true, needsEmailConfirmation: false };
+        }
+
         // Check email & Login ID availability BEFORE calling Supabase Auth signUp to avoid orphan users.
         const emailAlreadyUsed = await isEmailTaken(cleanEmail, { forceRemote: true });
         if (emailAlreadyUsed) {
@@ -2424,6 +2754,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       enterMatchedTeacher,
       refreshStudentAccountCount,
       refreshTeacherAccountCount,
+      enterAuthGatewaySession,
+      formatServerAuthError,
     ],
   );
 
@@ -2800,7 +3132,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         if (requestedMode === 'teacher' || requestedMode === 'subject_teacher') {
-          if (cleanPass !== TEACHER_ACCESS_PASSWORD) {
+          if (isServerSecurityEnabled()) {
+            const inviteCheck = await verifyTeacherInviteServerMode(cleanPass);
+            if (!inviteCheck.ok) {
+              setError(
+                inviteCheck.error ??
+                  'Mã mời giáo viên không chính xác. Hãy đăng nhập bằng Mã ID giáo viên hoặc mã mời hợp lệ.',
+              );
+              return false;
+            }
+          } else if (cleanPass !== TEACHER_ACCESS_PASSWORD) {
             setError('Mật khẩu tài khoản giáo viên không chính xác. Vui lòng thử lại!');
             return false;
           }
@@ -2837,7 +3178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [persistSession],
+    [persistSession, verifyTeacherInviteServerMode],
   );
 
   const signInAsStudent = useCallback(
@@ -2847,6 +3188,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setBusy(true);
       setError(null);
       try {
+        if (isServerSecurityEnabled()) {
+          const gwRes = await callAuthGatewayLogin({
+            loginId: rawLoginId.trim(),
+            password: rawPassword,
+          });
+          if (!gwRes.ok) {
+            setError(
+              formatServerAuthError(gwRes, 'Số ID hoặc mật khẩu học sinh chưa chính xác.'),
+            );
+            return false;
+          }
+          if (gwRes.role && gwRes.role !== 'student') {
+            setError('Tài khoản này không phải tài khoản học sinh. Hãy chọn mục Giáo viên.');
+            return false;
+          }
+          const entered = await enterAuthGatewaySession(gwRes, { isFreshSignIn: true });
+          if (!entered.ok) {
+            setError(entered.error ?? 'Không thể khởi tạo phiên đăng nhập máy chủ.');
+            return false;
+          }
+          return true;
+        }
+
         const res = await verifyStudentLogin(rawLoginId, rawPassword);
         if (!res.ok) {
           setError(res.error);
@@ -2863,7 +3227,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [enterMatchedStudent],
+    [enterMatchedStudent, enterAuthGatewaySession, formatServerAuthError],
   );
 
   const registerAndSignInStudent = useCallback(
@@ -2877,6 +3241,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setBusy(true);
       setError(null);
       try {
+        if (isServerSecurityEnabled()) {
+          const gwRes = await callAuthGatewayRegister({
+            role: 'student',
+            loginId: input.loginId.trim(),
+            password: input.password,
+            fullName: normalizeName(input.name),
+          });
+          if (!gwRes.ok) {
+            const msg = formatServerAuthError(
+              gwRes,
+              'Không thể tạo tài khoản học sinh trên máy chủ bảo mật.',
+            );
+            setError(msg);
+            return {
+              ok: false,
+              duplicateId: gwRes.status === 409,
+              error: msg,
+            };
+          }
+          const entered = await enterAuthGatewaySession(gwRes, {
+            isFreshSignIn: true,
+            forceNewAccountWelcome: true,
+          });
+          if (!entered.ok) {
+            const msg = entered.error ?? 'Đăng ký thành công nhưng chưa tạo được phiên JWT.';
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+          return { ok: true };
+        }
+
         const res = await registerStudentAccount({
           name: input.name,
           loginId: input.loginId,
@@ -2909,7 +3304,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [enterMatchedStudent],
+    [enterMatchedStudent, enterAuthGatewaySession, formatServerAuthError],
   );
 
   const changeStudentPassword = useCallback(
@@ -2937,6 +3332,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setBusy(true);
       setError(null);
       try {
+        if (isServerSecurityEnabled()) {
+          const gwRes = await callAuthGatewayLogin({
+            loginId: rawLoginId.trim(),
+            password: rawPassword,
+          });
+          if (!gwRes.ok) {
+            setError(
+              formatServerAuthError(gwRes, 'Mã ID hoặc mật khẩu giáo viên chưa chính xác.'),
+            );
+            return false;
+          }
+          if (gwRes.role !== 'teacher' && gwRes.role !== 'subject_teacher') {
+            setError('Tài khoản này không có quyền giáo viên.');
+            return false;
+          }
+          if (expectedRole && gwRes.role !== expectedRole) {
+            setError('Vai trò tài khoản giáo viên không khớp với mục đã chọn.');
+            return false;
+          }
+          const entered = await enterAuthGatewaySession(gwRes, { isFreshSignIn: true });
+          if (!entered.ok) {
+            setError(entered.error ?? 'Không thể khởi tạo phiên đăng nhập máy chủ.');
+            return false;
+          }
+          return true;
+        }
+
         const res = await verifyTeacherLogin(rawLoginId, rawPassword, expectedRole);
         if (!res.ok) {
           setError(res.error);
@@ -2953,7 +3375,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [enterMatchedTeacher],
+    [enterMatchedTeacher, enterAuthGatewaySession, formatServerAuthError],
   );
 
   const registerAndSignInTeacher = useCallback(
@@ -2969,10 +3391,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const code = input.teacherAccessCode.trim();
         if (!code) {
-          const msg = 'Vui lòng nhập Mã xác thực giáo viên để cấp quyền tạo tài khoản.';
+          const msg = isServerSecurityEnabled()
+            ? 'Vui lòng nhập Mã mời giáo viên để cấp quyền tạo tài khoản.'
+            : 'Vui lòng nhập Mã xác thực giáo viên để cấp quyền tạo tài khoản.';
           setError(msg);
           return { ok: false, error: msg };
         }
+
+        if (isServerSecurityEnabled()) {
+          const gwRes = await callAuthGatewayRegister({
+            role: 'teacher',
+            loginId: input.loginId.trim(),
+            password: input.password,
+            fullName: normalizeName(input.name),
+            teacherInviteCode: code,
+          });
+          if (!gwRes.ok) {
+            const msg = formatServerAuthError(
+              gwRes,
+              'Không thể tạo tài khoản giáo viên trên máy chủ bảo mật.',
+            );
+            setError(msg);
+            return {
+              ok: false,
+              duplicateId: gwRes.status === 409,
+              error: msg,
+            };
+          }
+          const entered = await enterAuthGatewaySession(gwRes, {
+            isFreshSignIn: true,
+            forceNewAccountWelcome: true,
+            overrideRole: input.role === 'subject_teacher' ? 'subject_teacher' : undefined,
+            overrideSubjectName:
+              input.role === 'subject_teacher' ? (input.subject?.trim() || null) : null,
+          });
+          if (!entered.ok) {
+            const msg = entered.error ?? 'Đăng ký thành công nhưng chưa tạo được phiên JWT.';
+            setError(msg);
+            return { ok: false, error: msg };
+          }
+          return { ok: true };
+        }
+
         if (code !== TEACHER_ACCESS_PASSWORD) {
           const msg =
             'Mã xác thực giáo viên không chính xác! Chỉ giáo viên được cấp mã bảo mật lớp mới tạo được tài khoản giáo viên.';
@@ -3013,7 +3473,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [enterMatchedTeacher],
+    [enterMatchedTeacher, enterAuthGatewaySession, formatServerAuthError],
   );
 
   const createTeacherAccount = useCallback(
@@ -3037,10 +3497,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!cleanCode) {
           return {
             ok: false,
-            error: 'Vui lòng nhập Mã xác thực giáo viên chủ nhiệm để tạo tài khoản GVCN.',
+            error: isServerSecurityEnabled()
+              ? 'Vui lòng nhập Mã mời giáo viên chủ nhiệm để tạo tài khoản GVCN.'
+              : 'Vui lòng nhập Mã xác thực giáo viên chủ nhiệm để tạo tài khoản GVCN.',
           };
         }
-        if (cleanCode !== TEACHER_ACCESS_PASSWORD) {
+        if (isServerSecurityEnabled()) {
+          const inviteCheck = await verifyTeacherInviteServerMode(cleanCode);
+          if (!inviteCheck.ok) {
+            return { ok: false, error: inviteCheck.error };
+          }
+        } else if (cleanCode !== TEACHER_ACCESS_PASSWORD) {
           return { ok: false, error: 'Mã xác thực giáo viên chủ nhiệm không chính xác!' };
         }
       }
@@ -3066,7 +3533,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await refreshTeacherAccountCount();
       return { ok: true, account: res.account };
     },
-    [accountRole, refreshTeacherAccountCount],
+    [accountRole, refreshTeacherAccountCount, verifyTeacherInviteServerMode],
   );
 
   const editTeacherAccount = useCallback(
@@ -3270,6 +3737,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const providedLoginId = options?.loginId?.trim() ?? '';
 
       if (providedLoginId) {
+        if (isServerSecurityEnabled()) {
+          const gwRes = await callAuthGatewayLogin({
+            loginId: providedLoginId,
+            password: options?.password ?? '',
+          });
+          if (!gwRes.ok) {
+            return {
+              ok: false,
+              error: formatServerAuthError(gwRes, 'Mã ID hoặc mật khẩu giáo viên chưa chính xác.'),
+            };
+          }
+          if (gwRes.role !== 'teacher' && gwRes.role !== 'subject_teacher') {
+            return { ok: false, error: 'Tài khoản này không có quyền giáo viên.' };
+          }
+          const entered = await enterAuthGatewaySession(gwRes, {
+            isFreshSignIn: true,
+            overrideRole: targetRole === 'subject_teacher' ? 'subject_teacher' : undefined,
+            overrideSubjectName: targetRole === 'subject_teacher' ? nextSubject : null,
+          });
+          if (!entered.ok) {
+            return { ok: false, error: entered.error ?? 'Không thể chuyển tài khoản giáo viên.' };
+          }
+          return { ok: true };
+        }
+
         const res = await verifyTeacherLogin(
           providedLoginId,
           options?.password ?? '',
@@ -3291,7 +3783,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!cleanPass) {
           return { ok: false, error: 'Vui lòng nhập mật khẩu giáo viên.' };
         }
-        if (cleanPass !== TEACHER_ACCESS_PASSWORD) {
+        if (isServerSecurityEnabled()) {
+          const inviteCheck = await verifyTeacherInviteServerMode(cleanPass);
+          if (!inviteCheck.ok) {
+            return { ok: false, error: inviteCheck.error };
+          }
+        } else if (cleanPass !== TEACHER_ACCESS_PASSWORD) {
           return { ok: false, error: 'Mật khẩu tài khoản giáo viên không chính xác!' };
         }
       }
@@ -3329,6 +3826,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       profile,
       persistSession,
       enterMatchedTeacher,
+      enterAuthGatewaySession,
+      formatServerAuthError,
+      verifyTeacherInviteServerMode,
       signOut,
     ],
   );
