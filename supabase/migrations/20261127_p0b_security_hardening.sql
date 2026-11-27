@@ -29,6 +29,172 @@ begin;
 create extension if not exists pgcrypto with schema extensions;
 
 -- -----------------------------------------------------------------------------
+-- 0) [Pre-Flight] Self-Contained `public.profiles` + Auth Trigger + Role Helpers
+--    Idempotent so projects that only have `class_state` & `class_photos` can
+--    apply this migration cleanly without prior `schema.sql` setup.
+-- -----------------------------------------------------------------------------
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  email text,
+  display_name text not null default '',
+  role text not null default 'student' check (role in ('teacher', 'editor', 'student')),
+  status text not null default 'approved' check (status in ('pending', 'approved', 'rejected', 'blocked')),
+  student_id text,
+  avatar_url text,
+  can_view_private boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.profiles add column if not exists email text;
+alter table public.profiles add column if not exists display_name text not null default '';
+alter table public.profiles add column if not exists role text not null default 'student';
+alter table public.profiles add column if not exists status text not null default 'approved';
+alter table public.profiles add column if not exists student_id text;
+alter table public.profiles add column if not exists avatar_url text;
+alter table public.profiles add column if not exists can_view_private boolean not null default false;
+alter table public.profiles add column if not exists created_at timestamptz not null default now();
+alter table public.profiles add column if not exists updated_at timestamptz not null default now();
+
+create or replace function public.app_is_member() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1
+      from public.profiles
+     where id = auth.uid()
+       and status = 'approved'
+  );
+$$;
+
+create or replace function public.app_is_teacher() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1
+      from public.profiles
+     where id = auth.uid()
+       and status = 'approved'
+       and role = 'teacher'
+  );
+$$;
+
+create or replace function public.app_can_edit() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1
+      from public.profiles
+     where id = auth.uid()
+       and status = 'approved'
+       and role in ('teacher', 'editor')
+  );
+$$;
+
+create or replace function public.app_my_student_id() returns text
+language sql stable security definer set search_path = public as $$
+  select student_id
+    from public.profiles
+   where id = auth.uid()
+     and status = 'approved';
+$$;
+
+revoke all on function public.app_is_member() from public, anon;
+revoke all on function public.app_is_teacher() from public, anon;
+revoke all on function public.app_can_edit() from public, anon;
+revoke all on function public.app_my_student_id() from public, anon;
+grant execute on function public.app_is_member() to authenticated;
+grant execute on function public.app_is_teacher() to authenticated;
+grant execute on function public.app_can_edit() to authenticated;
+grant execute on function public.app_my_student_id() to authenticated;
+
+alter table public.profiles enable row level security;
+revoke all on table public.profiles from public, anon;
+grant select, update on table public.profiles to authenticated;
+
+drop policy if exists "profiles own select" on public.profiles;
+drop policy if exists "profiles teacher all" on public.profiles;
+
+create policy "profiles own select" on public.profiles
+  for select to authenticated
+  using (id = auth.uid());
+
+create policy "profiles teacher all" on public.profiles
+  for all to authenticated
+  using (public.app_is_teacher())
+  with check (public.app_is_teacher());
+
+-- Backfill all existing `auth.users` into `public.profiles` cleanly (idempotent)
+insert into public.profiles (id, email, display_name, role, status, student_id, avatar_url)
+select
+  u.id,
+  u.email,
+  coalesce(
+    nullif(trim(u.raw_user_meta_data ->> 'display_name'), ''),
+    nullif(trim(u.raw_user_meta_data ->> 'full_name'), ''),
+    nullif(trim(u.raw_user_meta_data ->> 'name'), ''),
+    split_part(coalesce(u.email, ''), '@', 1),
+    ''
+  ),
+  case
+    when (u.raw_app_meta_data ->> 'role') in ('teacher', 'editor', 'student')
+    then (u.raw_app_meta_data ->> 'role')
+    else 'student'
+  end,
+  'approved',
+  case
+    when coalesce(u.raw_app_meta_data ->> 'role', 'student') = 'student'
+    then nullif(trim(coalesce(u.raw_app_meta_data ->> 'account_id', '')), '')
+    else null
+  end,
+  u.raw_user_meta_data ->> 'avatar_url'
+from auth.users u
+on conflict (id) do nothing;
+
+-- Auto-create an approved `public.profiles` row on new Google/GitHub OAuth or email signups
+create or replace function public.handle_new_auth_user_profile()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  assigned_role text;
+begin
+  assigned_role := case
+    when (new.raw_app_meta_data ->> 'role') in ('teacher', 'editor', 'student')
+    then (new.raw_app_meta_data ->> 'role')
+    else 'student'
+  end;
+
+  insert into public.profiles (id, email, display_name, role, status, student_id, avatar_url)
+  values (
+    new.id,
+    new.email,
+    coalesce(
+      nullif(trim(new.raw_user_meta_data ->> 'display_name'), ''),
+      nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''),
+      nullif(trim(new.raw_user_meta_data ->> 'name'), ''),
+      split_part(coalesce(new.email, ''), '@', 1),
+      ''
+    ),
+    assigned_role,
+    'approved',
+    case
+      when assigned_role = 'student'
+      then nullif(trim(coalesce(new.raw_app_meta_data ->> 'account_id', '')), '')
+      else null
+    end,
+    new.raw_user_meta_data ->> 'avatar_url'
+  )
+  on conflict (id) do nothing;
+
+  return new;
+end $$;
+
+drop trigger if exists on_auth_user_created_profile on auth.users;
+create trigger on_auth_user_created_profile
+  after insert on auth.users
+  for each row execute function public.handle_new_auth_user_profile();
+
+-- -----------------------------------------------------------------------------
 -- 1) Isolated `private` schema — NEVER exposed through PostgREST / anon / auth
 -- -----------------------------------------------------------------------------
 create schema if not exists private;
@@ -327,20 +493,23 @@ drop policy if exists "app state update" on public.class_state;
 drop policy if exists "class_state member select" on public.class_state;
 drop policy if exists "class_state editor insert" on public.class_state;
 drop policy if exists "class_state editor update" on public.class_state;
+drop policy if exists "class_state member insert" on public.class_state;
+drop policy if exists "class_state member update" on public.class_state;
 
--- Explicitly block `class10t4_accounts_v1` even for authenticated members.
+-- Explicitly block `class10t4_accounts_v1` even for authenticated members while allowing
+-- authenticated approved class members (GVCN, GVBM, Ban cán sự, students) to sync `class10t4`.
 create policy "class_state member select" on public.class_state
   for select to authenticated
   using (id = 'class10t4' and public.app_is_member());
 
-create policy "class_state editor insert" on public.class_state
+create policy "class_state member insert" on public.class_state
   for insert to authenticated
-  with check (id = 'class10t4' and public.app_can_edit());
+  with check (id = 'class10t4' and public.app_is_member());
 
-create policy "class_state editor update" on public.class_state
+create policy "class_state member update" on public.class_state
   for update to authenticated
-  using (id = 'class10t4' and public.app_can_edit())
-  with check (id = 'class10t4' and public.app_can_edit());
+  using (id = 'class10t4' and public.app_is_member())
+  with check (id = 'class10t4' and public.app_is_member());
 
 -- -----------------------------------------------------------------------------
 -- 6) [P1-2] Server-Side SECURITY DEFINER RPCs for Privileged Mutations

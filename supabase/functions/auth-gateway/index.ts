@@ -138,6 +138,38 @@ async function checkTeacherInvite(
   return { ok: true, role: invite.role };
 }
 
+function isEmailAlreadyRegisteredError(
+  err: { message?: string; code?: string } | null | undefined,
+): boolean {
+  if (!err) return false;
+  if (err.code === 'email_exists' || err.code === 'user_already_exists') return true;
+  return /already\s+(been\s+)?registered|already\s+exists|email.*exists|duplicate/i.test(
+    err.message ?? '',
+  );
+}
+
+async function findExistingAuthUserByEmail(
+  adminClient: SupabaseClient,
+  targetEmail: string,
+): Promise<{ id: string; email: string } | null> {
+  const cleanTarget = targetEmail.trim().toLowerCase();
+  if (!cleanTarget) return null;
+
+  const perPage = 1000;
+  for (let page = 1; page <= 5; page += 1) {
+    const { data, error } = await adminClient.auth.admin.listUsers({ page, perPage });
+    if (error || !data?.users?.length) return null;
+    const matched = data.users.find(
+      (u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === cleanTarget,
+    );
+    if (matched) {
+      return { id: matched.id, email: matched.email ?? cleanTarget };
+    }
+    if (data.users.length < perPage) return null;
+  }
+  return null;
+}
+
 async function ensureAuthUserAndMintSession(params: {
   adminClient: SupabaseClient;
   anonClient: SupabaseClient;
@@ -173,11 +205,18 @@ async function ensureAuthUserAndMintSession(params: {
       },
     });
 
-    if (createErr || !created?.user) {
-      throw new Error(createErr?.message || 'Không thể khởi tạo phiên Supabase Auth.');
+    if (created?.user) {
+      authUserId = created.user.id;
+    } else {
+      // Recover cleanly when the email already exists in `auth.users` (e.g. prior Google/GitHub OAuth user).
+      const matched = await findExistingAuthUserByEmail(adminClient, authEmail);
+      if (!matched) {
+        throw new Error(createErr?.message || 'Không thể khởi tạo phiên Supabase Auth.');
+      }
+      authUserId = matched.id;
+      authEmail = matched.email;
     }
 
-    authUserId = created.user.id;
     await privateClient
       .from('account_credentials')
       .update({ auth_user_id: authUserId, updated_at: new Date().toISOString() })
@@ -507,6 +546,15 @@ Deno.serve(async (req: Request) => {
           message: 'Địa chỉ email này đã được sử dụng cho tài khoản khác.',
         });
       }
+
+      const existingAuthEmail = await findExistingAuthUserByEmail(adminClient, cleanEmail);
+      if (existingAuthEmail) {
+        return jsonCorsResponse(req, 409, {
+          ok: false,
+          error: 'email_taken',
+          message: 'Địa chỉ email này đã được đăng ký trước đó. Hãy đăng nhập hoặc dùng email khác.',
+        });
+      }
     }
 
     // Teacher registration MUST present a valid server-side invite code
@@ -544,6 +592,13 @@ Deno.serve(async (req: Request) => {
     });
 
     if (createAuthErr || !createdAuth?.user) {
+      if (cleanEmail && isEmailAlreadyRegisteredError(createAuthErr)) {
+        return jsonCorsResponse(req, 409, {
+          ok: false,
+          error: 'email_taken',
+          message: 'Địa chỉ email này đã được sử dụng cho tài khoản khác.',
+        });
+      }
       return jsonCorsResponse(req, 500, {
         ok: false,
         error: 'auth_create_failed',

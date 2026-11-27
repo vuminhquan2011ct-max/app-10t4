@@ -541,13 +541,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshStudentAccountCount = useCallback(async () => {
-    const list = await loadStudentAccounts();
+    const list = await loadStudentAccounts(
+      isServerSecurityEnabled() ? { localOnly: true } : undefined,
+    );
     setStudentAccountCount(list.length);
     setStudentAccountsVersion((v) => v + 1);
   }, []);
 
   const refreshTeacherAccountCount = useCallback(async () => {
-    const list = await loadTeacherAccounts();
+    const list = await loadTeacherAccounts(
+      isServerSecurityEnabled() ? { localOnly: true } : undefined,
+    );
     setTeacherAccountCount(list.length);
     setTeacherAccountsVersion((v) => v + 1);
   }, []);
@@ -1352,6 +1356,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (event.type === 'member-registered' || event.type === 'state-updated') {
+        if (isServerSecurityEnabled()) return;
         void Promise.all([
           loadStudentAccounts({ forceRemote: true }),
           loadTeacherAccounts({ forceRemote: true }),
@@ -1472,8 +1477,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const hasInitialCallback = Boolean(initialUrl && hasAuthCallbackMarkers(initialUrl));
 
         // Enforce full account reset epoch BEFORE restoring any cached local or Supabase session.
+        // In P0-B server mode (`isServerSecurityEnabled()`), skip legacy public `class10t4_accounts_v1`
+        // polling before authentication so the login screen never triggers 401/403 RLS errors.
         let targetResetAt = ACCOUNTS_RESET_EPOCH;
-        if (isSupabaseConfigured) {
+        if (isSupabaseConfigured && !isServerSecurityEnabled()) {
           let timer: ReturnType<typeof setTimeout> | null = null;
           const remoteReg = await Promise.race([
             fetchAuthRegistryRemote().catch((err) => {
@@ -1514,19 +1521,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStudentAccountCount(studentAccounts.length);
         setTeacherAccountCount(teacherAccounts.length);
 
-        // Background remote refresh so AuthGate always sees post-reset cloud accounts immediately.
-        void Promise.all([
-          loadStudentAccounts({ forceRemote: true }),
-          loadTeacherAccounts({ forceRemote: true }),
-        ])
-          .then(([sList, tList]) => {
-            if (!active) return;
-            setStudentAccountCount(sList.length);
-            setTeacherAccountCount(tList.length);
-            setStudentAccountsVersion((v) => v + 1);
-            setTeacherAccountsVersion((v) => v + 1);
-          })
-          .catch((err) => reportNonFatal('auth-store', err, 'boot-refresh-accounts'));
+        // Background remote refresh so AuthGate always sees post-reset cloud accounts immediately
+        // (skipped in P0-B server mode where legacy `class10t4_accounts_v1` is intentionally locked).
+        if (!isServerSecurityEnabled()) {
+          void Promise.all([
+            loadStudentAccounts({ forceRemote: true }),
+            loadTeacherAccounts({ forceRemote: true }),
+          ])
+            .then(([sList, tList]) => {
+              if (!active) return;
+              setStudentAccountCount(sList.length);
+              setTeacherAccountCount(tList.length);
+              setStudentAccountsVersion((v) => v + 1);
+              setTeacherAccountsVersion((v) => v + 1);
+            })
+            .catch((err) => reportNonFatal('auth-store', err, 'boot-refresh-accounts'));
+        }
 
         // 1. Handle initial Web URL or Native deep-link BEFORE dropping loading splash.
         let callbackUser: User | null = null;
@@ -1631,7 +1641,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             let linkedAccount = savedStudentId
               ? studentAccounts.find((a) => a.studentId === savedStudentId)
               : null;
-            if (!linkedAccount && savedStudentId && isSupabaseConfigured) {
+            if (!linkedAccount && savedStudentId && isSupabaseConfigured && !isServerSecurityEnabled()) {
               studentAccounts = await loadStudentAccounts({ forceRemote: true });
               if (!active) return;
               linkedAccount = studentAccounts.find((a) => a.studentId === savedStudentId) ?? null;
@@ -1681,7 +1691,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // Restore personal teacher account if bound to `teacherId`.
           if (savedTeacherId) {
             let linkedTeacher = teacherAccounts.find((t) => t.teacherId === savedTeacherId);
-            if (!linkedTeacher && isSupabaseConfigured) {
+            if (!linkedTeacher && isSupabaseConfigured && !isServerSecurityEnabled()) {
               teacherAccounts = await loadTeacherAccounts({ forceRemote: true });
               if (!active) return;
               linkedTeacher = teacherAccounts.find((t) => t.teacherId === savedTeacherId);
