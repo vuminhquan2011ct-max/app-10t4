@@ -5,6 +5,7 @@ import type {
   Announcement,
   AnnouncementAuthorRole,
   AnnouncementTag,
+  AnnouncementVisibility,
   AttendanceDay,
   ClassInfo,
   ClassResource,
@@ -137,6 +138,9 @@ export type AnnouncementInput = {
   authorRole?: AnnouncementAuthorRole;
   department?: OfficerDepartmentKey | null;
   authorPosition?: string | null;
+  authorStudentId?: string | null;
+  visibility?: AnnouncementVisibility;
+  visibleToStudentIds?: string[];
   eventId?: string | null;
   attachments?: DriveAttachment[];
 };

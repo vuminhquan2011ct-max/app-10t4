@@ -3,7 +3,7 @@ import type { BottomTabBarProps } from 'expo-router/js-tabs';
 
 import { AppTabBar } from '@/components/app-tab-bar';
 
-/** Six main sections rendered with the shared floating tab bar. */
+/** Seven main sections rendered with the shared floating tab bar. */
 export default function TabsLayout() {
   return (
     <Tabs
@@ -12,6 +12,7 @@ export default function TabsLayout() {
         <AppTabBar state={props.state as unknown as Parameters<typeof AppTabBar>[0]['state']} />
       )}>
       <Tabs.Screen name="index" options={{ title: 'Tổng quan' }} />
+      <Tabs.Screen name="bulletin" options={{ title: 'Thông tin' }} />
       <Tabs.Screen name="students" options={{ title: 'Học sinh' }} />
       <Tabs.Screen name="feed" options={{ title: 'Nhật ký' }} />
       <Tabs.Screen name="tools" options={{ title: 'Tiện ích' }} />

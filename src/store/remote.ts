@@ -25,6 +25,8 @@ import type { StudentPrivateData } from '@/types/auth';
 import type {
   ActivityLogItem,
   Announcement,
+  AnnouncementReply,
+  AnnouncementVisibility,
   AttendanceDay,
   ClassResource,
   ClassTask,
@@ -417,6 +419,115 @@ function mergeEntries(
     .sort((a, b) => ts(b.createdAt) - ts(a.createdAt));
 }
 
+function normalizeAnnouncementVisibility(value: unknown): AnnouncementVisibility {
+  return value === 'private' || value === 'selected' ? value : 'public';
+}
+
+function dedupeStringIds(values?: readonly string[] | null): string[] {
+  if (!Array.isArray(values) || values.length === 0) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const val of values) {
+    if (typeof val !== 'string') continue;
+    const trimmed = val.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function mergeAnnouncementReplies(
+  secondaryReplies: AnnouncementReply[] | undefined,
+  primaryReplies: AnnouncementReply[] | undefined,
+  deletedItemIds: Record<string, string>,
+): AnnouncementReply[] {
+  const byId = new Map<string, AnnouncementReply>();
+  const push = (list?: AnnouncementReply[]) => {
+    if (!Array.isArray(list)) return;
+    for (const r of list) {
+      if (!r?.id || !r.content?.trim()) continue;
+      if (
+        isItemTombstoned(deletedItemIds, r.id) ||
+        isItemTombstoned(deletedItemIds, `reply:${r.id}`)
+      ) {
+        continue;
+      }
+      if (!byId.has(r.id)) {
+        byId.set(r.id, r);
+      }
+    }
+  };
+  // Primary inserted first so primary metadata wins on duplicate reply IDs.
+  push(primaryReplies);
+  push(secondaryReplies);
+  return Array.from(byId.values()).sort((a, b) => ts(a.createdAt) - ts(b.createdAt));
+}
+
+function latestIso(a?: string | null, b?: string | null): string | undefined {
+  const cleanA = typeof a === 'string' && a.trim() ? a.trim() : undefined;
+  const cleanB = typeof b === 'string' && b.trim() ? b.trim() : undefined;
+  if (!cleanA) return cleanB;
+  if (!cleanB) return cleanA;
+  return ts(cleanA) >= ts(cleanB) ? cleanA : cleanB;
+}
+
+function normalizeSingleAnnouncement(
+  item: Announcement,
+  deletedItemIds: Record<string, string>,
+  deletedDriveFileIds: Record<string, string>,
+): Announcement {
+  const visibility = normalizeAnnouncementVisibility(item.visibility);
+  return {
+    ...item,
+    visibility,
+    visibleToStudentIds: visibility === 'selected' ? dedupeStringIds(item.visibleToStudentIds) : [],
+    authorStudentId:
+      typeof item.authorStudentId === 'string' && item.authorStudentId.trim()
+        ? item.authorStudentId.trim()
+        : null,
+    acknowledgedBy: dedupeStringIds(item.acknowledgedBy),
+    replies: mergeAnnouncementReplies(undefined, item.replies, deletedItemIds),
+    attachments: filterLiveAttachments(item.attachments, deletedDriveFileIds),
+    ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
+  };
+}
+
+function mergeTwoAnnouncements(
+  secondary: Announcement,
+  primary: Announcement,
+  deletedItemIds: Record<string, string>,
+  deletedDriveFileIds: Record<string, string>,
+): Announcement {
+  const primaryTs = ts(primary.updatedAt ?? primary.createdAt);
+  const secondaryTs = ts(secondary.updatedAt ?? secondary.createdAt);
+  const audienceWinner = secondaryTs > primaryTs ? secondary : primary;
+  const visibility = normalizeAnnouncementVisibility(audienceWinner.visibility);
+  const visibleToStudentIds =
+    visibility === 'selected' ? dedupeStringIds(audienceWinner.visibleToStudentIds) : [];
+  const updatedAt = latestIso(primary.updatedAt, secondary.updatedAt);
+
+  return {
+    ...secondary,
+    ...primary,
+    pinned: audienceWinner.pinned,
+    department: primary.department ?? secondary.department ?? null,
+    authorPosition: primary.authorPosition ?? secondary.authorPosition ?? null,
+    authorStudentId: primary.authorStudentId ?? secondary.authorStudentId ?? null,
+    eventId: primary.eventId ?? secondary.eventId ?? null,
+    visibility,
+    visibleToStudentIds,
+    acknowledgedBy: dedupeStringIds([
+      ...(secondary.acknowledgedBy ?? []),
+      ...(primary.acknowledgedBy ?? []),
+    ]),
+    replies: mergeAnnouncementReplies(secondary.replies, primary.replies, deletedItemIds),
+    likes: Math.max(primary.likes ?? 0, secondary.likes ?? 0),
+    attachments: mergeAttachments(secondary.attachments, primary.attachments, deletedDriveFileIds),
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
 function mergeAnnouncements(
   remoteList: Announcement[],
   localList: Announcement[],
@@ -430,48 +541,42 @@ function mergeAnnouncements(
 
   for (const item of primaryList) {
     if (item?.id) {
-      byId.set(item.id, {
-        ...item,
-        attachments: filterLiveAttachments(item.attachments, deletedDriveFileIds),
-      });
+      byId.set(item.id, normalizeSingleAnnouncement(item, deletedItemIds, deletedDriveFileIds));
     }
   }
   for (const item of secondaryList) {
     if (!item?.id) continue;
     const primary = byId.get(item.id);
     if (!primary) {
-      byId.set(item.id, {
-        ...item,
-        attachments: filterLiveAttachments(item.attachments, deletedDriveFileIds),
-      });
+      byId.set(item.id, normalizeSingleAnnouncement(item, deletedItemIds, deletedDriveFileIds));
     } else {
-      byId.set(item.id, {
-        ...item,
-        ...primary,
-        likes: Math.max(primary.likes ?? 0, item.likes ?? 0),
-        attachments: mergeAttachments(item.attachments, primary.attachments, deletedDriveFileIds),
-      });
+      byId.set(
+        item.id,
+        mergeTwoAnnouncements(item, primary, deletedItemIds, deletedDriveFileIds),
+      );
     }
   }
 
   // Deduplicate identical seed announcements that received random IDs on fresh devices.
-  // Because primaryList was inserted first, primary IDs & timestamps win.
+  // Preserve distinct user posts that carry attachments, authorStudentId, or non-public visibility.
   const byContent = new Map<string, Announcement>();
   for (const item of byId.values()) {
     if (isItemTombstoned(deletedItemIds, item.id)) continue;
-    const key = `${normText(item.title)}|${normText(item.content)}|${normText(item.author)}`;
+    const isSeedLike =
+      (!item.attachments || item.attachments.length === 0) &&
+      !item.authorStudentId &&
+      (!item.visibility || item.visibility === 'public');
+    const key = isSeedLike
+      ? `${normText(item.title)}|${normText(item.content)}|${normText(item.author)}`
+      : `id:${item.id}`;
     const existing = byContent.get(key);
     if (!existing) {
       byContent.set(key, item);
     } else {
-      byContent.set(key, {
-        ...existing,
-        department: existing.department ?? item.department ?? null,
-        authorPosition: existing.authorPosition ?? item.authorPosition ?? null,
-        eventId: existing.eventId ?? item.eventId ?? null,
-        likes: Math.max(existing.likes ?? 0, item.likes ?? 0),
-        attachments: mergeAttachments(existing.attachments, item.attachments, deletedDriveFileIds),
-      });
+      byContent.set(
+        key,
+        mergeTwoAnnouncements(item, existing, deletedItemIds, deletedDriveFileIds),
+      );
     }
   }
 

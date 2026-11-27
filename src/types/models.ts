@@ -257,6 +257,18 @@ export type AnnouncementTag = 'important' | 'subject' | 'exam' | 'event' | 'remi
 
 export type AnnouncementAuthorRole = 'teacher' | 'subject_teacher' | 'editor' | 'officer';
 
+export type AnnouncementVisibility = 'public' | 'private' | 'selected';
+
+export type AnnouncementReply = {
+  id: string;
+  authorName: string;
+  authorRole: AnnouncementAuthorRole | 'student';
+  authorPosition?: string | null;
+  authorStudentId?: string | null;
+  content: string;
+  createdAt: string;
+};
+
 export type Announcement = {
   id: string;
   title: string;
@@ -275,11 +287,23 @@ export type Announcement = {
   department?: OfficerDepartmentKey | null;
   /** Chức vụ cụ thể của người đăng (ví dụ: Lớp trưởng, Bí thư, Lớp phó văn thể mỹ). */
   authorPosition?: string | null;
+  /** ID học sinh đăng bài (khi Ban cán sự / học sinh có chức vụ đăng tin). */
+  authorStudentId?: string | null;
+  /** Chế độ hiển thị: công khai cả lớp, riêng tư (tác giả + GVCN), hoặc chỉ thành viên được chọn. */
+  visibility?: AnnouncementVisibility;
+  /** Danh sách ID học sinh được phép xem khi `visibility === 'selected'`. */
+  visibleToStudentIds?: string[];
+  /** Danh sách voterKey / định danh thành viên đã xác nhận "Đã xem". */
+  acknowledgedBy?: string[];
+  /** Chuỗi phản hồi / tin nhắn trực tiếp dưới bản tin. */
+  replies?: AnnouncementReply[];
   /** ID sự kiện / nhiệm vụ liên kết (nếu chuyển từ màn hình Nhiệm vụ & Sự kiện). */
   eventId?: string | null;
   /** Ảnh / tài liệu đính kèm lưu trên Google Drive `K8T4_app`. */
   attachments?: DriveAttachment[];
   createdAt: string;
+  /** Dấu thời gian ISO cập nhật gần nhất (ví dụ khi đổi quyền xem). */
+  updatedAt?: string;
 };
 
 /* ---------- Quỹ lớp ---------- */

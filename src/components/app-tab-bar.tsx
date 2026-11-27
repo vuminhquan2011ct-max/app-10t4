@@ -19,6 +19,7 @@ const PRO_ACTIVE_GRADIENT = ['#92400E', '#D97706', '#F59E0B'] as const;
 
 const TAB_ITEMS: { name: string; label: string; icon: IoniconName; activeIcon: IoniconName }[] = [
   { name: 'index', label: 'Tổng quan', icon: 'grid-outline', activeIcon: 'grid' },
+  { name: 'bulletin', label: 'Thông tin', icon: 'newspaper-outline', activeIcon: 'newspaper' },
   { name: 'students', label: 'Học sinh', icon: 'people-outline', activeIcon: 'people' },
   { name: 'feed', label: 'Nhật ký', icon: 'sparkles-outline', activeIcon: 'sparkles' },
   { name: 'tools', label: 'Tiện ích', icon: 'apps-outline', activeIcon: 'apps' },
@@ -38,10 +39,10 @@ const SAWTOOTH_D = (() => {
 })();
 
 /**
- * Royal Đông Sơn Bronze & Gold floating 6-tab pill dock shared by every platform.
+ * Royal Đông Sơn Bronze & Gold floating 7-tab pill dock shared by every platform.
  *
  * The active tab expands into a glowing gradient capsule with icon + label while
- * inactive tabs show crisp icons (plus a live pending count badge on Nhật ký and
+ * inactive tabs show crisp icons (plus live badges on Thông tin & Nhật ký and
  * a royal gold diamond + subtle lock dot on Gói Pro).
  */
 export function AppTabBar({
@@ -53,7 +54,7 @@ export function AppTabBar({
   const isDark = useIsDark();
   const gradient = useBrandGradient();
   const insets = useSafeAreaInsets();
-  const { role, totals } = useClassStore();
+  const { role, totals, unreadAnnouncementsCount } = useClassStore();
   const proUnlocked = useSyncExternalStore(
     subscribeProVault,
     isProVaultUnlocked,
@@ -140,7 +141,12 @@ export function AppTabBar({
           if (!item) return null;
           const focused = state.index === index;
           const isPro = route.name === 'pro';
-          const badgeCount = route.name === 'feed' && role === 'teacher' ? totals.pending : 0;
+          const badgeCount =
+            route.name === 'feed' && role === 'teacher'
+              ? totals.pending
+              : route.name === 'bulletin'
+                ? unreadAnnouncementsCount
+                : 0;
 
           const onPress = () => {
             if (focused) return;
@@ -181,7 +187,7 @@ export function AppTabBar({
               <View style={styles.iconBox}>
                 <Ionicons
                   name={focused ? item.activeIcon : item.icon}
-                  size={20}
+                  size={18}
                   color={focused ? '#FFFFFF' : isPro ? proIdleColor : theme.textMuted}
                 />
                 {isPro && !proUnlocked && !focused ? (
@@ -231,17 +237,17 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     alignItems: 'center',
-    paddingHorizontal: Spacing.three,
+    paddingHorizontal: 8,
   },
   bar: {
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
-    maxWidth: 530,
+    maxWidth: 560,
     borderRadius: Radius.pill,
     borderWidth: 1.5,
     padding: 5,
-    gap: 3,
+    gap: 2,
     overflow: 'hidden',
   },
   topOrnamentWrap: {
@@ -252,17 +258,17 @@ const styles = StyleSheet.create({
     height: 10,
   },
   item: {
-    height: 48,
+    height: 46,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 5,
+    gap: 4,
     borderRadius: Radius.pill,
     overflow: 'hidden',
   },
   itemActive: {
-    flex: 2.05,
-    paddingHorizontal: 10,
+    flex: 2.0,
+    paddingHorizontal: 8,
     borderWidth: 1,
     borderColor: 'rgba(253, 224, 71, 0.45)',
     shadowOpacity: 0.34,
@@ -305,5 +311,5 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   badgeText: { color: '#FFFFFF', fontSize: 9.5, fontWeight: '900' },
-  label: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', letterSpacing: -0.1 },
+  label: { color: '#FFFFFF', fontSize: 11.5, fontWeight: '800', letterSpacing: -0.15 },
 });

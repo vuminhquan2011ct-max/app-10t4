@@ -17,6 +17,8 @@ import type { StudentPrivateData } from '@/types/auth';
 import type {
   ActivityLogItem,
   Announcement,
+  AnnouncementReply,
+  AnnouncementVisibility,
   AttendanceStatus,
   ClassInfo,
   ClassResource,
@@ -618,15 +620,28 @@ export function createActions(
       },
     ) =>
       mutate((prev) => {
+        const nowIso = new Date().toISOString();
         const cleanSubject = input.subject?.trim() || null;
         const cleanAuthorPos = input.authorPosition?.trim() || null;
         const resolvedRole =
           input.authorRole ??
           (cleanSubject ? 'subject_teacher' : cleanAuthorPos ? 'officer' : 'teacher');
+        const visibility: AnnouncementVisibility = input.visibility ?? 'public';
+        const visibleToStudentIds =
+          visibility === 'selected'
+            ? Array.from(
+                new Set((input.visibleToStudentIds ?? []).map((id) => id.trim()).filter(Boolean)),
+              )
+            : [];
+        const authorStudentId = input.authorStudentId?.trim() || null;
+        const cleanContent = input.content.trim();
+        const cleanTitle =
+          input.title.trim() ||
+          (cleanContent ? cleanContent.slice(0, 60) : 'Chia sẻ ảnh / tệp tin');
         const item: Announcement = {
           id: createId('ann'),
-          title: input.title.trim(),
-          content: input.content.trim(),
+          title: cleanTitle,
+          content: cleanContent,
           tag: input.tag,
           eventDate: input.eventDate?.trim() || null,
           pinned: Boolean(input.pinned),
@@ -634,36 +649,51 @@ export function createActions(
           author: input.author?.trim() || actorName() || prev.classInfo.teacherName,
           subject: cleanSubject,
           authorRole: resolvedRole,
+          authorStudentId,
+          visibility,
+          visibleToStudentIds,
+          acknowledgedBy: [],
+          replies: [],
           ...(input.department !== undefined ? { department: input.department } : {}),
           ...(cleanAuthorPos ? { authorPosition: cleanAuthorPos } : {}),
           ...(input.eventId?.trim() ? { eventId: input.eventId.trim() } : {}),
           attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
+          updatedAt: nowIso,
         };
         const logPrefix = cleanSubject
           ? `GV ${cleanSubject} đăng thông báo`
           : cleanAuthorPos
             ? `${cleanAuthorPos} đăng thông báo`
             : 'Đăng thông báo';
+        const visSuffix =
+          visibility === 'private'
+            ? ' (riêng tư)'
+            : visibility === 'selected'
+              ? ` (chọn ${visibleToStudentIds.length} thành viên)`
+              : '';
         return {
           ...prev,
           announcements: [item, ...prev.announcements],
           activityLog: appendLog(
             prev,
             item.author,
-            `${logPrefix} "${item.title}"`,
+            `${logPrefix} "${item.title}"${visSuffix}`,
             actorStudentId(),
           ),
         };
       }),
 
     togglePinAnnouncement: (id: string) =>
-      mutate((prev) => ({
-        ...prev,
-        announcements: prev.announcements.map((a) =>
-          a.id === id ? { ...a, pinned: !a.pinned } : a,
-        ),
-      })),
+      mutate((prev) => {
+        const nowIso = new Date().toISOString();
+        return {
+          ...prev,
+          announcements: prev.announcements.map((a) =>
+            a.id === id ? { ...a, pinned: !a.pinned, updatedAt: nowIso } : a,
+          ),
+        };
+      }),
 
     likeAnnouncementLocal: (id: string) =>
       mutate((prev) => ({
@@ -672,6 +702,113 @@ export function createActions(
           a.id === id ? { ...a, likes: a.likes + 1 } : a,
         ),
       })),
+
+    updateAnnouncementAudienceLocal: (
+      announcementId: string,
+      visibility: AnnouncementVisibility,
+      visibleToStudentIds?: string[],
+    ) =>
+      mutate((prev) => {
+        const target = prev.announcements.find((a) => a.id === announcementId);
+        if (!target) return prev;
+        const nowIso = new Date().toISOString();
+        const cleanIds =
+          visibility === 'selected'
+            ? Array.from(
+                new Set((visibleToStudentIds ?? []).map((id) => id.trim()).filter(Boolean)),
+              )
+            : [];
+        const visLabel =
+          visibility === 'public'
+            ? 'Công khai'
+            : visibility === 'private'
+              ? 'Không công khai'
+              : `Chọn ${cleanIds.length} thành viên`;
+        return {
+          ...prev,
+          announcements: prev.announcements.map((a) =>
+            a.id === announcementId
+              ? {
+                  ...a,
+                  visibility,
+                  visibleToStudentIds: cleanIds,
+                  updatedAt: nowIso,
+                }
+              : a,
+          ),
+          activityLog: appendLog(
+            prev,
+            actorName(),
+            `Cập nhật quyền xem "${target.title}" → ${visLabel}`,
+            actorStudentId(),
+          ),
+        };
+      }),
+
+    toggleAnnouncementAcknowledgeLocal: (announcementId: string, actorKey: string) =>
+      mutate((prev) => {
+        const cleanKey = actorKey.trim();
+        if (!cleanKey) return prev;
+        const target = prev.announcements.find((a) => a.id === announcementId);
+        if (!target) return prev;
+        const existing = Array.isArray(target.acknowledgedBy) ? target.acknowledgedBy : [];
+        const hasKey = existing.includes(cleanKey);
+        const nextAck = hasKey
+          ? existing.filter((k) => k !== cleanKey)
+          : Array.from(new Set([...existing, cleanKey]));
+        return {
+          ...prev,
+          announcements: prev.announcements.map((a) =>
+            a.id === announcementId ? { ...a, acknowledgedBy: nextAck } : a,
+          ),
+        };
+      }),
+
+    addAnnouncementReplyLocal: (
+      announcementId: string,
+      reply: Omit<AnnouncementReply, 'id' | 'createdAt'>,
+    ) =>
+      mutate((prev) => {
+        const cleanContent = reply.content.trim();
+        if (!cleanContent) return prev;
+        const target = prev.announcements.find((a) => a.id === announcementId);
+        if (!target) return prev;
+        const nowIso = new Date().toISOString();
+        const newReply: AnnouncementReply = {
+          id: createId('rep'),
+          authorName: reply.authorName.trim() || actorName() || 'Thành viên 10T4',
+          authorRole: reply.authorRole,
+          authorPosition: reply.authorPosition?.trim() || null,
+          authorStudentId: reply.authorStudentId ?? null,
+          content: cleanContent,
+          createdAt: nowIso,
+        };
+        const existingReplies = Array.isArray(target.replies) ? target.replies : [];
+        return {
+          ...prev,
+          announcements: prev.announcements.map((a) =>
+            a.id === announcementId ? { ...a, replies: [...existingReplies, newReply] } : a,
+          ),
+        };
+      }),
+
+    removeAnnouncementReplyLocal: (announcementId: string, replyId: string) =>
+      mutate((prev) => {
+        const target = prev.announcements.find((a) => a.id === announcementId);
+        if (!target) return prev;
+        const existingReplies = Array.isArray(target.replies) ? target.replies : [];
+        if (!existingReplies.some((r) => r.id === replyId)) return prev;
+        const nowIso = new Date().toISOString();
+        return {
+          ...prev,
+          announcements: prev.announcements.map((a) =>
+            a.id === announcementId
+              ? { ...a, replies: existingReplies.filter((r) => r.id !== replyId) }
+              : a,
+          ),
+          deletedItemIds: stampDeletedItems(prev, [replyId], nowIso),
+        };
+      }),
 
     removeAnnouncement: (id: string) =>
       mutate((prev) => {
@@ -728,6 +865,7 @@ export function createActions(
               ? {
                   ...a,
                   attachments: nextAttachments.length > 0 ? nextAttachments : undefined,
+                  updatedAt: now,
                 }
               : a,
           ),

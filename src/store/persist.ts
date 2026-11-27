@@ -23,6 +23,9 @@ import {
 import type {
   ActivityLogItem,
   Announcement,
+  AnnouncementAuthorRole,
+  AnnouncementReply,
+  AnnouncementVisibility,
   AttendanceDay,
   ClassResource,
   ClassTask,
@@ -124,6 +127,103 @@ function sanitizeTombstones(raw: unknown): Record<string, string> {
 
 function isDutyCompletionStatus(value: unknown): value is DutyCompletionStatus {
   return value === 'pending' || value === 'completed' || value === 'missed';
+}
+
+function isAnnouncementVisibility(value: unknown): value is AnnouncementVisibility {
+  return value === 'public' || value === 'private' || value === 'selected';
+}
+
+function isAnnouncementReplyRole(
+  value: unknown,
+): value is AnnouncementAuthorRole | 'student' {
+  return (
+    value === 'teacher' ||
+    value === 'subject_teacher' ||
+    value === 'editor' ||
+    value === 'officer' ||
+    value === 'student'
+  );
+}
+
+function sanitizeStringIdList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function sanitizeAnnouncementReplies(raw: unknown): AnnouncementReply[] {
+  if (!Array.isArray(raw)) return [];
+  const byId = new Map<string, AnnouncementReply>();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const r = item as Partial<AnnouncementReply>;
+    const id = typeof r.id === 'string' ? r.id.trim() : '';
+    const content = typeof r.content === 'string' ? r.content.trim() : '';
+    if (!id || !content) continue;
+    byId.set(id, {
+      id,
+      authorName:
+        typeof r.authorName === 'string' && r.authorName.trim()
+          ? r.authorName.trim()
+          : 'Thành viên 10T4',
+      authorRole: isAnnouncementReplyRole(r.authorRole) ? r.authorRole : 'student',
+      authorPosition:
+        typeof r.authorPosition === 'string' && r.authorPosition.trim()
+          ? r.authorPosition.trim()
+          : null,
+      authorStudentId:
+        typeof r.authorStudentId === 'string' && r.authorStudentId.trim()
+          ? r.authorStudentId.trim()
+          : null,
+      content,
+      createdAt:
+        typeof r.createdAt === 'string' && r.createdAt.trim()
+          ? r.createdAt.trim()
+          : new Date().toISOString(),
+    });
+  }
+  return Array.from(byId.values()).sort(
+    (a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0),
+  );
+}
+
+function sanitizeAnnouncements(raw: unknown, fallback: Announcement[]): Announcement[] {
+  if (!Array.isArray(raw)) return fallback;
+  return (raw as Announcement[])
+    .filter((item): item is Announcement => Boolean(item) && typeof item === 'object' && typeof item.id === 'string')
+    .map((ann) => {
+      const visibility: AnnouncementVisibility = isAnnouncementVisibility(ann.visibility)
+        ? ann.visibility
+        : 'public';
+      const visibleToStudentIds =
+        visibility === 'selected' ? sanitizeStringIdList(ann.visibleToStudentIds) : [];
+      const authorStudentId =
+        typeof ann.authorStudentId === 'string' && ann.authorStudentId.trim()
+          ? ann.authorStudentId.trim()
+          : null;
+      const acknowledgedBy = sanitizeStringIdList(ann.acknowledgedBy);
+      const replies = sanitizeAnnouncementReplies(ann.replies);
+      const updatedAt =
+        typeof ann.updatedAt === 'string' && ann.updatedAt.trim() ? ann.updatedAt.trim() : undefined;
+
+      return {
+        ...ann,
+        visibility,
+        visibleToStudentIds,
+        authorStudentId,
+        acknowledgedBy,
+        replies,
+        ...(updatedAt ? { updatedAt } : {}),
+      };
+    });
 }
 
 function sanitizeDutyLogs(raw: unknown): Record<string, DutyDayLog> {
@@ -254,9 +354,10 @@ export function hydrateState(parsed: Partial<PersistedState> | null | undefined)
       parsed.attendance && typeof parsed.attendance === 'object'
         ? (parsed.attendance as Record<string, AttendanceDay>)
         : {},
-    announcements: Array.isArray(parsed.announcements)
-      ? (parsed.announcements as Announcement[])
-      : buildInitialAnnouncements(classInfo.teacherName),
+    announcements: sanitizeAnnouncements(
+      parsed.announcements,
+      buildInitialAnnouncements(classInfo.teacherName),
+    ),
     fundTransactions: Array.isArray(parsed.fundTransactions)
       ? (parsed.fundTransactions as FundTransaction[])
       : buildInitialFund(),

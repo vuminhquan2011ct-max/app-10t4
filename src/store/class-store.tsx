@@ -87,6 +87,8 @@ import type { MemberRole, StudentPrivateData } from '@/types/auth';
 import type {
   ActivityLogItem,
   Announcement,
+  AnnouncementReply,
+  AnnouncementVisibility,
   AttendanceDay,
   AttendanceStats,
   AttendanceStatus,
@@ -236,6 +238,11 @@ type BaseActions = Omit<
   | 'setAttendance'
   | 'markAllPresent'
   | 'addAnnouncement'
+  | 'togglePinAnnouncement'
+  | 'updateAnnouncementAudienceLocal'
+  | 'toggleAnnouncementAcknowledgeLocal'
+  | 'addAnnouncementReplyLocal'
+  | 'removeAnnouncementReplyLocal'
   | 'removeAnnouncement'
   | 'removeAnnouncementAttachment'
   | 'addTask'
@@ -361,6 +368,7 @@ export type ClassStore = BaseActions & {
   upcomingBirthdays: UpcomingBirthday[];
   attendance: Record<string, AttendanceDay>;
   announcements: Announcement[];
+  unreadAnnouncementsCount: number;
   fundTransactions: FundTransaction[];
   fundPaid: Record<string, boolean>;
   fundCycleLabel: string;
@@ -419,6 +427,15 @@ export type ClassStore = BaseActions & {
   ) => void;
   markAllPresent: (date: string) => void;
   addAnnouncement: (input: ExtendedAnnouncementInput) => void;
+  togglePinAnnouncement: (id: string) => void;
+  updateAnnouncementAudience: (
+    announcementId: string,
+    visibility: AnnouncementVisibility,
+    visibleToStudentIds?: string[],
+  ) => void;
+  toggleAnnouncementAcknowledge: (announcementId: string) => void;
+  addAnnouncementReply: (announcementId: string, content: string) => void;
+  removeAnnouncementReply: (announcementId: string, replyId: string) => void;
   removeAnnouncement: (id: string) => void;
   removeAnnouncementAttachment: (
     announcementId: string,
@@ -1560,9 +1577,17 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
             : officerPermissions.isOfficer
               ? 'officer'
               : 'editor');
+      const visibility: AnnouncementVisibility = input.visibility ?? 'public';
+      const visibleToStudentIds =
+        visibility === 'selected'
+          ? Array.from(
+              new Set((input.visibleToStudentIds ?? []).map((id) => id.trim()).filter(Boolean)),
+            )
+          : [];
       actions.addAnnouncement({
         ...input,
         authorRole: resolvedAuthorRole,
+        authorStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
         authorPosition:
           input.authorPosition !== undefined
             ? input.authorPosition
@@ -1573,10 +1598,20 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
           input.department !== undefined
             ? input.department
             : officerPermissions.defaultDepartment,
+        visibility,
+        visibleToStudentIds,
       });
       flushCloud('add-announcement');
     },
-    [actions, canPostAnnouncements, flushCloud, isTeacher, isSubjectTeacher, officerPermissions],
+    [
+      actions,
+      canPostAnnouncements,
+      effectiveStudentId,
+      flushCloud,
+      isTeacher,
+      isSubjectTeacher,
+      officerPermissions,
+    ],
   );
 
   const addTask = useCallback(
@@ -1753,10 +1788,66 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     [actions, flushCloud],
   );
 
+  const isAnnouncementAuthor = useCallback(
+    (item: Announcement): boolean => {
+      if (effectiveStudentId !== null && item.authorStudentId === effectiveStudentId) {
+        return true;
+      }
+      if (
+        isSubjectTeacher &&
+        item.authorRole === 'subject_teacher' &&
+        item.author === actorLabel
+      ) {
+        return true;
+      }
+      if (isTeacher && item.authorRole === 'teacher' && item.author === actorLabel) {
+        return true;
+      }
+      return false;
+    },
+    [effectiveStudentId, isSubjectTeacher, isTeacher, actorLabel],
+  );
+
+  const canSeeAnnouncement = useCallback(
+    (item: Announcement): boolean => {
+      if (isTeacher) return true;
+      const vis: AnnouncementVisibility = item.visibility ?? 'public';
+      if (vis === 'public') return true;
+      if (isAnnouncementAuthor(item)) return true;
+      if (vis === 'private') return false;
+      if (vis === 'selected') {
+        return (
+          effectiveStudentId !== null &&
+          (item.visibleToStudentIds ?? []).includes(effectiveStudentId)
+        );
+      }
+      return false;
+    },
+    [isTeacher, isAnnouncementAuthor, effectiveStudentId],
+  );
+
+  const togglePinAnnouncement = useCallback(
+    (id: string) => {
+      if (!isTeacher && !officerPermissions.isClassMonitor) return;
+      const target = stateRef.current.announcements.find((a) => a.id === id);
+      if (!target || !canSeeAnnouncement(target)) return;
+      actions.togglePinAnnouncement(id);
+      flushCloud('toggle-pin-announcement');
+    },
+    [actions, canSeeAnnouncement, flushCloud, isTeacher, officerPermissions],
+  );
+
   const removeAnnouncement = useCallback(
     (id: string) => {
       const target = stateRef.current.announcements.find((a) => a.id === id);
-      const attachments = target?.attachments ?? [];
+      if (
+        !target ||
+        !canSeeAnnouncement(target) ||
+        (!isTeacher && !officerPermissions.isClassMonitor && !isAnnouncementAuthor(target))
+      ) {
+        return;
+      }
+      const attachments = target.attachments ?? [];
       const driveTargets = attachments
         .map((att) => ({
           driveFileId: resolveDriveIdFromAttachmentLike(att),
@@ -1776,7 +1867,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         void deleteDriveFileEverywhere(item).catch(() => {});
       }
     },
-    [actions, flushCloud],
+    [actions, canSeeAnnouncement, flushCloud, isAnnouncementAuthor, isTeacher, officerPermissions],
   );
 
   const removeAnnouncementAttachment = useCallback(
@@ -1785,7 +1876,14 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       attachment: { id: string; driveFileId?: string; url?: string; name?: string },
     ) => {
       const existingAnn = stateRef.current.announcements.find((a) => a.id === announcementId);
-      const existingAtt = existingAnn?.attachments?.find((a) => a.id === attachment.id);
+      if (
+        !existingAnn ||
+        !canSeeAnnouncement(existingAnn) ||
+        (!isTeacher && !officerPermissions.isClassMonitor && !isAnnouncementAuthor(existingAnn))
+      ) {
+        return;
+      }
+      const existingAtt = existingAnn.attachments?.find((a) => a.id === attachment.id);
       const driveFileId =
         resolveDriveIdFromAttachmentLike(attachment) ??
         (existingAtt ? resolveDriveIdFromAttachmentLike(existingAtt) : null);
@@ -1805,7 +1903,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         }).catch(() => {});
       }
     },
-    [actions, flushCloud],
+    [actions, canSeeAnnouncement, flushCloud, isAnnouncementAuthor, isTeacher, officerPermissions],
   );
 
   const removeTask = useCallback(
@@ -2048,6 +2146,110 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
         : isSubjectTeacher
           ? `subj_${subjectName ?? 'gvbm'}`
           : 'local_teacher';
+
+  const updateAnnouncementAudience = useCallback(
+    (
+      announcementId: string,
+      visibility: AnnouncementVisibility,
+      visibleToStudentIds?: string[],
+    ) => {
+      const target = stateRef.current.announcements.find((a) => a.id === announcementId);
+      if (!target || !canSeeAnnouncement(target)) return;
+      const canManageAudience =
+        isTeacher || officerPermissions.isClassMonitor || isAnnouncementAuthor(target);
+      if (!canManageAudience) return;
+      actions.updateAnnouncementAudienceLocal(announcementId, visibility, visibleToStudentIds);
+      flushCloud('update-announcement-audience');
+    },
+    [actions, canSeeAnnouncement, flushCloud, isAnnouncementAuthor, isTeacher, officerPermissions],
+  );
+
+  const toggleAnnouncementAcknowledge = useCallback(
+    (announcementId: string) => {
+      const target = stateRef.current.announcements.find((a) => a.id === announcementId);
+      if (!target || !canSeeAnnouncement(target)) return;
+      const ackKey = effectiveStudentId ?? voterKey;
+      actions.toggleAnnouncementAcknowledgeLocal(announcementId, ackKey);
+      flushCloud('ack-announcement');
+    },
+    [actions, canSeeAnnouncement, effectiveStudentId, flushCloud, voterKey],
+  );
+
+  const addAnnouncementReply = useCallback(
+    (announcementId: string, content: string) => {
+      const cleanContent = content.trim();
+      if (!cleanContent) return;
+      const target = stateRef.current.announcements.find((a) => a.id === announcementId);
+      if (!target || !canSeeAnnouncement(target)) return;
+      const replyRole: AnnouncementReply['authorRole'] = isTeacher
+        ? 'teacher'
+        : isSubjectTeacher
+          ? 'subject_teacher'
+          : officerPermissions.isOfficer
+            ? 'officer'
+            : 'student';
+      const replyPosition = isTeacher
+        ? 'GVCN'
+        : isSubjectTeacher
+          ? `GV ${subjectName ?? 'Bộ môn'}`
+          : officerPermissions.isOfficer
+            ? officerPermissions.officerPositionLabel
+            : null;
+      actions.addAnnouncementReplyLocal(announcementId, {
+        authorName: actorLabel,
+        authorRole: replyRole,
+        authorPosition: replyPosition,
+        authorStudentId: isTeacher || isSubjectTeacher ? null : effectiveStudentId,
+        content: cleanContent,
+      });
+      flushCloud('reply-announcement');
+    },
+    [
+      actions,
+      actorLabel,
+      canSeeAnnouncement,
+      effectiveStudentId,
+      flushCloud,
+      isSubjectTeacher,
+      isTeacher,
+      officerPermissions,
+      subjectName,
+    ],
+  );
+
+  const removeAnnouncementReply = useCallback(
+    (announcementId: string, replyId: string) => {
+      const target = stateRef.current.announcements.find((a) => a.id === announcementId);
+      if (!target || !canSeeAnnouncement(target)) return;
+      const reply = (target.replies ?? []).find((r) => r.id === replyId);
+      if (!reply) return;
+      const isReplyAuthor =
+        (effectiveStudentId !== null && reply.authorStudentId === effectiveStudentId) ||
+        (reply.authorStudentId === null &&
+          reply.authorName === actorLabel &&
+          ((isTeacher && reply.authorRole === 'teacher') ||
+            (isSubjectTeacher && reply.authorRole === 'subject_teacher')));
+      const canRemove =
+        isTeacher ||
+        officerPermissions.isClassMonitor ||
+        isReplyAuthor ||
+        isAnnouncementAuthor(target);
+      if (!canRemove) return;
+      actions.removeAnnouncementReplyLocal(announcementId, replyId);
+      flushCloud('remove-announcement-reply');
+    },
+    [
+      actions,
+      actorLabel,
+      canSeeAnnouncement,
+      effectiveStudentId,
+      flushCloud,
+      isAnnouncementAuthor,
+      isSubjectTeacher,
+      isTeacher,
+      officerPermissions,
+    ],
+  );
 
   const votePoll = useCallback(
     async (pollId: string, optionId: string) => {
@@ -2507,13 +2709,34 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
     };
   }, [fundTransactions, visibleStudents, visibleFundPaid, fundCycleAmount]);
 
+  const visibleAnnouncements = useMemo(
+    () => announcements.filter(canSeeAnnouncement),
+    [announcements, canSeeAnnouncement],
+  );
+
   const sortedAnnouncements = useMemo(
     () =>
-      [...announcements].sort(
+      [...visibleAnnouncements].sort(
         (a, b) => Number(b.pinned) - Number(a.pinned) || b.createdAt.localeCompare(a.createdAt),
       ),
-    [announcements],
+    [visibleAnnouncements],
   );
+
+  const unreadAnnouncementsCount = useMemo(() => {
+    const todayEndMs = Date.parse(`${todayIso()}T23:59:59.999Z`);
+    const cutoffMs = Number.isFinite(todayEndMs) ? todayEndMs - 7 * 24 * 60 * 60 * 1000 : 0;
+    const ackKey = effectiveStudentId ?? voterKey;
+    let count = 0;
+    for (const item of visibleAnnouncements) {
+      if (isAnnouncementAuthor(item)) continue;
+      const createdMs = Date.parse(item.createdAt);
+      if (!Number.isFinite(createdMs) || createdMs < cutoffMs) continue;
+      if (!(item.acknowledgedBy ?? []).includes(ackKey)) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [visibleAnnouncements, effectiveStudentId, voterKey, isAnnouncementAuthor]);
 
   const sortedTasks = useMemo(
     () => [...tasks].sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
@@ -2606,7 +2829,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       setAttendance,
       markAllPresent,
       addAnnouncement,
-      togglePinAnnouncement: actions.togglePinAnnouncement,
+      updateAnnouncementAudience,
+      toggleAnnouncementAcknowledge,
+      addAnnouncementReply,
+      removeAnnouncementReply,
+      togglePinAnnouncement,
       removeAnnouncement,
       removeAnnouncementAttachment,
       addFundTransaction: actions.addFundTransaction,
@@ -2725,6 +2952,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       upcomingBirthdays,
       attendance: visibleAttendance,
       announcements: sortedAnnouncements,
+      unreadAnnouncementsCount,
       fundTransactions,
       fundPaid: visibleFundPaid,
       fundCycleLabel,
@@ -2770,6 +2998,11 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       setAttendance,
       markAllPresent,
       addAnnouncement,
+      updateAnnouncementAudience,
+      toggleAnnouncementAcknowledge,
+      addAnnouncementReply,
+      removeAnnouncementReply,
+      togglePinAnnouncement,
       removeAnnouncement,
       removeAnnouncementAttachment,
       addTask,
@@ -2845,6 +3078,7 @@ export function ClassStoreProvider({ children }: { children: ReactNode }) {
       upcomingBirthdays,
       visibleAttendance,
       sortedAnnouncements,
+      unreadAnnouncementsCount,
       fundTransactions,
       visibleFundPaid,
       fundCycleLabel,

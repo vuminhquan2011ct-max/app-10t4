@@ -155,6 +155,7 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
       'Điều chỉnh lịch Tổ trực nhật các ngày trong tuần',
       'Phân công học sinh trực nhật theo từng ngày',
       'Chấm Hoàn thành / Chưa hoàn thành trực nhật vào Điểm chuyên cần',
+      'Đăng bản tin, ảnh, tệp & tin nhắn trên trang Thông tin lớp',
     ],
   },
   {
@@ -214,6 +215,7 @@ export const OFFICER_POSITIONS: readonly OfficerPositionOption[] = [
       'Cộng & xoá Stamp phát biểu (+0,25đ) cho thành viên trong Tổ',
       'Ghi điểm cộng thi đua cho thành viên trong Tổ của mình',
       'Theo dõi tiến độ hoạt động & chuyên cần của Tổ',
+      'Đăng bản tin, ảnh, tệp & tin nhắn trên trang Thông tin lớp',
     ],
   },
 ] as const;
@@ -828,7 +830,12 @@ export function computeOfficerPermissions(params: {
   );
 
   const canPostAnnouncements = Boolean(
-    canManageTasksAndEvents || hasFullCoordination || hasGrant('post_announcements'),
+    params.isTeacher ||
+      params.isSubjectTeacher ||
+      params.memberRole === 'editor' ||
+      isOfficer ||
+      hasGrant('post_announcements') ||
+      hasFullCoordination,
   );
 
   return {
