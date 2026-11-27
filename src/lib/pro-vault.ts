@@ -15,6 +15,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 import { derivePbkdf2Sha256Hex, timingSafeEqualHex } from '@/lib/password-crypto';
+import { isServerSecurityEnabled, verifyProVaultRemote } from '@/lib/server-security';
 
 export const PRO_PIN_LENGTH = 7;
 export const PRO_MAX_ATTEMPTS = 5;
@@ -43,7 +44,27 @@ const EXPECTED_PASSWORD_HASH = '6cc156fa84d295a6d9e01b5ddaf584d052060c212b37f71c
 const EXPECTED_PIN_HASH = '46f35ed634bb14a9338487fea6cbaa455b5d17b3d14d18dd63822ee0dfdcede5';
 
 const PRO_VAULT_LOCKOUT_KEY = 'class10t4:pro-vault-lockout:v1';
+const PRO_VAULT_DEVICE_ID_KEY = 'class10t4:pro-vault-device-id:v1';
 const PIN_PATTERN = new RegExp(`^\\d{${PRO_PIN_LENGTH}}$`);
+
+let cachedDeviceId: string | null = null;
+
+async function getOrCreateProDeviceId(): Promise<string> {
+  if (cachedDeviceId) return cachedDeviceId;
+  try {
+    const existing = await AsyncStorage.getItem(PRO_VAULT_DEVICE_ID_KEY);
+    if (existing && existing.trim()) {
+      cachedDeviceId = existing.trim();
+      return cachedDeviceId;
+    }
+  } catch {
+    // Fallback to an ephemeral ID below when storage is unavailable.
+  }
+  const generated = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  cachedDeviceId = generated;
+  await AsyncStorage.setItem(PRO_VAULT_DEVICE_ID_KEY, generated).catch(() => {});
+  return generated;
+}
 
 type PersistedLockoutRecord = {
   failedAttempts: number;
@@ -235,6 +256,84 @@ export async function verifyProVaultCredential(
     };
   }
 
+  // P0-B Server Security Mode: route strictly through `/functions/v1/pro-vault-verify`
+  // (never silently falls back to local verification on server rejection or network outage).
+  if (isServerSecurityEnabled()) {
+    const mode: ProAuthMethod = preferredMethod ?? (PIN_PATTERN.test(input) ? 'pin' : 'password');
+    const deviceId = await getOrCreateProDeviceId();
+    const remote = await verifyProVaultRemote({ mode, secret: input, deviceId });
+
+    if (remote.ok) {
+      failedAttempts = 0;
+      lockedUntilMs = 0;
+      await persistLockoutState();
+      unlockInfo = {
+        unlockedAt: new Date().toISOString(),
+        method: mode,
+      };
+      notifyListeners();
+      return {
+        ok: true,
+        method: mode,
+        remainingAttempts: PRO_MAX_ATTEMPTS,
+      };
+    }
+
+    if (remote.networkError) {
+      return {
+        ok: false,
+        remainingAttempts: Math.max(0, PRO_MAX_ATTEMPTS - failedAttempts),
+        error:
+          remote.error ||
+          'Không thể kết nối máy chủ xác thực Gói PRO. Vui lòng kiểm tra mạng và thử lại.',
+      };
+    }
+
+    const now = Date.now();
+    if (remote.lockedUntilMs && remote.lockedUntilMs > now) {
+      lockedUntilMs = Math.max(lockedUntilMs, remote.lockedUntilMs);
+      failedAttempts = PRO_MAX_ATTEMPTS;
+      await persistLockoutState();
+      notifyListeners();
+      const waitSec = Math.max(1, Math.ceil((lockedUntilMs - now) / 1000));
+      return {
+        ok: false,
+        lockedUntilMs,
+        remainingAttempts: 0,
+        error: `Tạm khóa xác thực do nhập sai nhiều lần. Vui lòng thử lại sau ${waitSec} giây.`,
+      };
+    }
+
+    // Do NOT count server configuration/5xx/non-401 errors against user lockout attempts.
+    if (remote.status !== 401 && remote.status !== 429) {
+      return {
+        ok: false,
+        remainingAttempts: Math.max(0, PRO_MAX_ATTEMPTS - failedAttempts),
+        error:
+          remote.error ||
+          'Máy chủ xác thực Gói PRO chưa sẵn sàng. Vui lòng thử lại sau.',
+      };
+    }
+
+    const remainingAttempts =
+      typeof remote.attemptsRemaining === 'number'
+        ? Math.max(0, remote.attemptsRemaining)
+        : Math.max(0, PRO_MAX_ATTEMPTS - (failedAttempts + 1));
+    failedAttempts = Math.min(
+      PRO_MAX_ATTEMPTS,
+      Math.max(failedAttempts + 1, PRO_MAX_ATTEMPTS - remainingAttempts),
+    );
+    await persistLockoutState();
+    return {
+      ok: false,
+      remainingAttempts,
+      error:
+        mode === 'pin'
+          ? `Mã PIN không chính xác (còn ${remainingAttempts} lần thử).`
+          : `Mật khẩu không chính xác (còn ${remainingAttempts} lần thử).`,
+    };
+  }
+
   let matchedMethod: ProAuthMethod | null = null;
 
   if (preferredMethod === 'password') {
@@ -297,4 +396,12 @@ export async function verifyProVaultCredential(
         ? `Mã PIN không chính xác (còn ${remainingAttempts} lần thử).`
         : `Mật khẩu không chính xác (còn ${remainingAttempts} lần thử).`,
   };
+}
+
+export function verifyProPassword(password: string): Promise<ProVerifyResult> {
+  return verifyProVaultCredential(password, 'password');
+}
+
+export function verifyProPin(pin: string): Promise<ProVerifyResult> {
+  return verifyProVaultCredential(pin, 'pin');
 }

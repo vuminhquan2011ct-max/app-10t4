@@ -182,6 +182,12 @@ const {
 } = await import('@/lib/drive');
 const { isAccountTombstoned, isBeforeResetEpoch } = await import('@/lib/account-core');
 const { buildWeeklyZaloReport } = await import('@/lib/weekly-zalo-report');
+const edgeCrypto = await import(
+  pathToFileURL(path.join(ROOT_DIR, 'supabase', 'functions', '_shared', 'crypto.ts')).href
+);
+const edgeCors = await import(
+  pathToFileURL(path.join(ROOT_DIR, 'supabase', 'functions', '_shared', 'cors.ts')).href
+);
 
 /* ---------- 1. Cloud Merge & Announcement Privacy / Replies / Pinned ---------- */
 
@@ -811,5 +817,84 @@ describe('buildWeeklyZaloReport (src/lib/weekly-zalo-report.ts)', () => {
     assert.equal(empty.metrics.upcomingTasksCount, 0);
     assert.match(empty.text, /0 ₫/);
     assert.doesNotMatch(empty.text, /NaN/);
+  });
+});
+
+/* ---------- 9. P0-B Edge Functions Shared Crypto Parity & CORS Allowlist ---------- */
+
+describe('supabase/functions/_shared/crypto.ts & cors.ts (P0-B parity)', () => {
+  it('maintains 100% PBKDF2-SHA256 & legacy SHA-256 format parity with src/lib/password-crypto.ts', async () => {
+    // Client hash -> Edge verify
+    const clientHash = await hashPasswordV2('Lop10T4#2026!');
+    const edgeChecksClient = await edgeCrypto.verifyPasswordHash('Lop10T4#2026!', clientHash);
+    assert.deepEqual(edgeChecksClient, { ok: true, needsRehash: false });
+
+    const edgeRejectsWrong = await edgeCrypto.verifyPasswordHash('wrong-pass', clientHash);
+    assert.equal(edgeRejectsWrong.ok, false);
+
+    // Edge hash -> Client verify (both async & sync)
+    const edgeHash = await edgeCrypto.hashPasswordV2('EdgeSecret#99', 15_000);
+    assert.ok(edgeHash.startsWith('pbkdf2_sha256$15000$'));
+    const clientChecksEdge = await verifyPasswordHash('EdgeSecret#99', edgeHash);
+    assert.deepEqual(clientChecksEdge, { ok: true, needsRehash: false });
+    assert.equal(verifyPasswordHashSync('EdgeSecret#99', edgeHash).ok, true);
+
+    // Legacy `<salt>:<sha256>` hash -> Edge verifies & flags `needsRehash: true`
+    const legacySalt = 'salt-legacy-edge';
+    const legacyHash = `${legacySalt}:${sha256HexPure(`class10t4:${legacySalt}:LegacyPass42`)}`;
+    const edgeLegacy = await edgeCrypto.verifyPasswordHash('LegacyPass42', legacyHash);
+    assert.deepEqual(edgeLegacy, { ok: true, needsRehash: true });
+
+    // Pro Vault PBKDF2 secret verification (both full v2 format & raw 64-hex domain format)
+    const vaultV2 = await edgeCrypto.hashPasswordV2('9876543', 15_000);
+    assert.equal(await edgeCrypto.verifyProVaultSecret('pin', '9876543', vaultV2), true);
+    assert.equal(await edgeCrypto.verifyProVaultSecret('pin', '0000000', vaultV2), false);
+
+    const rawHex = await edgeCrypto.derivePbkdf2Sha256Hex('9876543', 'k8t4-pro-vault-v2:pin:', 60_000);
+    assert.equal(await edgeCrypto.verifyProVaultSecret('pin', '9876543', rawHex), true);
+    assert.equal(await edgeCrypto.verifyProVaultSecret('pin', '1111111', rawHex), false);
+  });
+
+  it('enforces strict CORS origin allowlist & blocks disallowed origins on preflight', () => {
+    // Default allowed origins
+    assert.equal(edgeCors.isOriginAllowed('https://app-10t4.vercel.app'), true);
+    assert.equal(edgeCors.isOriginAllowed('http://localhost:8081'), true);
+    assert.equal(edgeCors.isOriginAllowed('http://localhost:19006'), true);
+
+    const allowedHeaders = edgeCors.buildCorsHeaders('https://app-10t4.vercel.app');
+    assert.equal(allowedHeaders['Access-Control-Allow-Origin'], 'https://app-10t4.vercel.app');
+    assert.equal(allowedHeaders.Vary, 'Origin');
+
+    // Custom ALLOWED_ORIGINS CSV
+    assert.equal(
+      edgeCors.isOriginAllowed('https://staging.class10t4.edu.vn', 'https://staging.class10t4.edu.vn, https://other.test'),
+      true,
+    );
+
+    // Disallowed origin must NEVER receive Access-Control-Allow-Origin (nor wildcard *)
+    assert.equal(edgeCors.isOriginAllowed('https://evil.example'), false);
+    const evilHeaders = edgeCors.buildCorsHeaders('https://evil.example');
+    assert.equal(evilHeaders['Access-Control-Allow-Origin'], undefined);
+
+    // OPTIONS preflight checks
+    const okPreflight = edgeCors.handleCorsPreflight(
+      new Request('https://fn.local/pro-vault-verify', {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://app-10t4.vercel.app' },
+      }),
+    );
+    assert.ok(okPreflight);
+    assert.equal(okPreflight.status, 204);
+    assert.equal(okPreflight.headers.get('Access-Control-Allow-Origin'), 'https://app-10t4.vercel.app');
+
+    const badPreflight = edgeCors.handleCorsPreflight(
+      new Request('https://fn.local/pro-vault-verify', {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://evil.example' },
+      }),
+    );
+    assert.ok(badPreflight);
+    assert.equal(badPreflight.status, 403);
+    assert.equal(badPreflight.headers.get('Access-Control-Allow-Origin'), null);
   });
 });

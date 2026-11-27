@@ -6,6 +6,8 @@
  * and Supabase only keep lightweight metadata links.
  */
 
+import { callDriveProxyRemote, isServerSecurityEnabled } from '@/lib/server-security';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import type { MemberRole } from '@/types/auth';
 
 export type DriveUploaderRole = MemberRole;
@@ -50,6 +52,9 @@ const IMAGE_EXT_REGEX = /\.(jpg|jpeg|png|gif|webp|bmp|heic|heif|avif|svg)$/i;
 const VIDEO_EXT_REGEX = /\.(mp4|mov|m4v|webm|avi|mkv|3gp)$/i;
 
 export function isDriveUploadConfigured(): boolean {
+  if (isServerSecurityEnabled()) {
+    return isSupabaseConfigured;
+  }
   return Boolean(
     process.env.EXPO_PUBLIC_DRIVE_API_URL?.trim() &&
       process.env.EXPO_PUBLIC_DRIVE_API_KEY?.trim(),
@@ -348,6 +353,93 @@ async function fetchWithTimeout(
  * via the configured Google Apps Script Web App endpoint (45s timeout + 1 auto-retry).
  */
 export async function uploadFileToDrive(params: UploadToDriveParams): Promise<UploadedDriveFile> {
+  const cleanMime = params.mimeType?.trim() || 'application/octet-stream';
+  const sizeBytes = params.sizeBytes ?? estimateBytesFromBase64(params.base64Content);
+
+  // P0-B Server Security Mode: proxy through Supabase Edge Function `drive-proxy`
+  // so `DRIVE_API_KEY` & `DRIVE_SCRIPT_URL` stay strictly server-side.
+  if (isServerSecurityEnabled()) {
+    if (!isSupabaseConfigured) {
+      throw new Error(
+        'Chưa cấu hình máy chủ Supabase để tải tệp qua cổng bảo mật Google Drive K8T4_app.',
+      );
+    }
+
+    const proxyPayload: Record<string, unknown> = {
+      fileName: params.fileName,
+      mimeType: cleanMime,
+      fileBase64: params.base64Content,
+      folderId: DRIVE_CONFIG.folderId,
+      folderName: DRIVE_CONFIG.folderName,
+      uploaderName: params.uploaderName,
+      uploaderRole: params.uploaderRole,
+      category: params.category,
+    };
+
+    let lastProxyError: Error | null = null;
+    for (let attempt = 1; attempt <= DRIVE_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+      const proxyRes = await callDriveProxyRemote<{
+        status?: string;
+        message?: string;
+        error?: string;
+        fileInfo?: {
+          id?: string;
+          name?: string;
+          url?: string;
+          createdAt?: string;
+          size?: number;
+          mimeType?: string;
+        };
+      }>({
+        action: 'upload',
+        payload: proxyPayload,
+      });
+
+      if (
+        (proxyRes.networkError || isTransientStatus(proxyRes.status)) &&
+        attempt < DRIVE_UPLOAD_MAX_ATTEMPTS
+      ) {
+        lastProxyError = new Error(
+          proxyRes.error || `Không thể tải "${params.fileName}" lên Google Drive qua máy chủ bảo mật.`,
+        );
+        await sleepMs(DRIVE_RETRY_BACKOFF_MS);
+        continue;
+      }
+
+      const payload = proxyRes.data;
+      if (!proxyRes.ok || payload?.status !== 'success' || !payload?.fileInfo?.id) {
+        throw new Error(
+          payload?.message ||
+            payload?.error ||
+            proxyRes.error ||
+            `Không thể tải "${params.fileName}" lên Google Drive ${DRIVE_CONFIG.folderName}.`,
+        );
+      }
+
+      const info = payload.fileInfo;
+      const fileId = String(info.id);
+      const finalName = info.name?.trim() || params.fileName;
+      const finalMime = info.mimeType?.trim() || cleanMime;
+      const kind = detectDriveMediaKind(finalName, finalMime);
+
+      return {
+        id: fileId,
+        name: finalName,
+        url: info.url?.trim() || buildDriveViewUrl(fileId),
+        thumbnailUrl: kind === 'photo' ? buildDriveThumbnailUrl(fileId, 800) : null,
+        downloadUrl: buildDriveDownloadUrl(fileId),
+        mimeType: finalMime,
+        sizeBytes: typeof info.size === 'number' && info.size > 0 ? info.size : sizeBytes,
+        kind,
+        folderId: DRIVE_CONFIG.folderId,
+        folderName: DRIVE_CONFIG.folderName,
+        createdAt: info.createdAt || new Date().toISOString(),
+      };
+    }
+
+    throw lastProxyError ?? new Error(`Không thể tải "${params.fileName}" lên Google Drive.`);
+  }
+
   const url = process.env.EXPO_PUBLIC_DRIVE_API_URL?.trim();
   const apiKey = process.env.EXPO_PUBLIC_DRIVE_API_KEY?.trim();
 
@@ -356,9 +448,6 @@ export async function uploadFileToDrive(params: UploadToDriveParams): Promise<Up
       'Chưa cấu hình EXPO_PUBLIC_DRIVE_API_URL hoặc EXPO_PUBLIC_DRIVE_API_KEY để kết nối Google Drive K8T4_app.',
     );
   }
-
-  const cleanMime = params.mimeType?.trim() || 'application/octet-stream';
-  const sizeBytes = params.sizeBytes ?? estimateBytesFromBase64(params.base64Content);
 
   const requestBody = JSON.stringify({
     apiKey,
@@ -483,9 +572,62 @@ export async function deleteFileFromDrive(params: {
   fileUrl?: string | null;
   fileName?: string | null;
 }): Promise<DeleteDriveFileResult> {
+  const resolvedFileId = params.fileId?.trim() || extractDriveFileIdFromUrl(params.fileUrl);
+
+  // P0-B Server Security Mode: proxy deletion through Supabase Edge Function `drive-proxy`.
+  if (isServerSecurityEnabled()) {
+    if (!isSupabaseConfigured || !resolvedFileId) {
+      return {
+        ok: false,
+        trashedDrive: false,
+        removedSheetRows: 0,
+        skipped: true,
+      };
+    }
+
+    const proxyRes = await callDriveProxyRemote<{
+      ok?: boolean;
+      status?: string;
+      trashedDrive?: boolean;
+      removedSheetRows?: number;
+      message?: string;
+      error?: string;
+    }>({
+      action: 'delete',
+      payload: {
+        fileId: resolvedFileId,
+        fileUrl: params.fileUrl?.trim() ?? '',
+        fileName: params.fileName?.trim() ?? '',
+        folderId: DRIVE_CONFIG.folderId,
+        folderName: DRIVE_CONFIG.folderName,
+      },
+    });
+
+    const payload = proxyRes.data;
+    const ok =
+      proxyRes.ok &&
+      (payload?.ok === true || payload?.status === 'deleted' || payload?.status === 'success');
+    const trashedDrive = Boolean(payload?.trashedDrive);
+    const removedSheetRows =
+      typeof payload?.removedSheetRows === 'number' && Number.isFinite(payload.removedSheetRows)
+        ? Math.max(0, Math.round(payload.removedSheetRows))
+        : 0;
+
+    return {
+      ok,
+      trashedDrive,
+      removedSheetRows,
+      error: ok
+        ? undefined
+        : payload?.message ||
+          payload?.error ||
+          proxyRes.error ||
+          'Không thể xoá tệp qua cổng bảo mật Google Drive.',
+    };
+  }
+
   const apiUrl = process.env.EXPO_PUBLIC_DRIVE_API_URL?.trim();
   const apiKey = process.env.EXPO_PUBLIC_DRIVE_API_KEY?.trim();
-  const resolvedFileId = params.fileId?.trim() || extractDriveFileIdFromUrl(params.fileUrl);
 
   if (!apiUrl || !apiKey || !resolvedFileId) {
     return {

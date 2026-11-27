@@ -253,6 +253,24 @@ revoke all on function public.app_verify_teacher_invite(text) from public, anon;
 grant execute on function public.app_verify_teacher_invite(text) to authenticated;
 
 -- -----------------------------------------------------------------------------
+-- 3b) [P0-6] Persistent Server-Side Brute-Force Lockouts (`private.security_lockouts`)
+--     Shared by `pro-vault-verify` and `auth-gateway` Edge Functions.
+-- -----------------------------------------------------------------------------
+create table if not exists private.security_lockouts (
+  lock_key text primary key,
+  failed_attempts int not null default 0 check (failed_attempts >= 0),
+  lockout_count int not null default 0 check (lockout_count >= 0),
+  locked_until timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists security_lockouts_locked_until_idx
+  on private.security_lockouts (locked_until)
+  where locked_until is not null;
+
+revoke all on table private.security_lockouts from public, anon, authenticated;
+
+-- -----------------------------------------------------------------------------
 -- 4) [P0-4] Tighten `public.class_photos` RLS & Uploader Ownership
 -- -----------------------------------------------------------------------------
 alter table public.class_photos
@@ -682,3 +700,4 @@ grant execute on function public.app_assign_positions(text, text[], text[]) to a
 grant execute on function public.app_reset_accounts() to authenticated;
 
 commit;
+
